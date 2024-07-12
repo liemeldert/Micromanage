@@ -1,0 +1,18 @@
+[
+    {
+      "label": "Dashboard",
+      "icon": "MdDashboard",
+      "path": "/"
+    },
+    {
+      "label": "Devices",
+      "icon": "MdDevices",
+      "path": "/devices"
+    },
+    {
+      "label": "Settings",
+      "icon": "MdSettings",
+      "path": "/settings"
+    }
+  ]
+  

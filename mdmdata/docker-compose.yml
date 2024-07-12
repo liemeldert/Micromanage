@@ -1,0 +1,22 @@
+version: '3.8'
+
+services:
+  micromdm:
+    image: sphen/micromdm
+    container_name: micromdm
+    restart: always
+    environment:
+      - SERVER_URL=https://micromdm.acme.com
+      - API_KEY=abcdef1234567890
+      - TLS=false
+    volumes:
+      - certs:/certs
+      - micromdm:/config
+      - mdmrepo:/repo
+    ports:
+      - "8080:8080"
+
+volumes:
+  certs:
+  micromdm:
+  mdmrepo: 
