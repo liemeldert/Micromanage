@@ -1,6 +1,7 @@
 import connectToDatabase from "@/lib/mongodb";
 import Device from "@/models/device";
 import axios from "axios";
+import Curlirize from "axios-curlirize";
 
 export interface DeviceShard {
   serial_number: string;
@@ -114,5 +115,25 @@ export const sendCommand = async (udid: string, command: any): Promise<any> => {
   } catch (error) {
     console.error("Error sending command:", error);
     throw error;
+  }
+};
+
+export const getWebhookEvents = async (udid: string): Promise<any[]> => {
+  try {
+    const response = await axios.get(`/api/webhook_events/${udid}`);
+    return response.data;
+  } catch (error) {
+    console.error("Error fetching webhook events:", error);
+    return [];
+  }
+};
+
+export const getAllDeviceDetails = async (): Promise<Device[]> => {
+  try {
+    const response = await axios.get<Device[]>(`/api/all_devices`);
+    return response.data;
+  } catch (error) {
+    console.error("Error fetching all device details:", error);
+    return [];
   }
 };
