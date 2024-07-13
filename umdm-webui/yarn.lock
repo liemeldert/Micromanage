@@ -1348,6 +1348,18 @@
     "@swc/counter" "^0.1.3"
     tslib "^2.4.0"
 
+"@tanstack/react-table@^8.19.2":
+  version "8.19.2"
+  resolved "https://registry.yarnpkg.com/@tanstack/react-table/-/react-table-8.19.2.tgz#25ee691d12b8e6e0fca32f8e8cf465ee172009af"
+  integrity sha512-itoSIAkA/Vsg+bjY23FSemcTyPhc5/1YjYyaMsr9QSH/cdbZnQxHVWrpWn0Sp2BWN71qkzR7e5ye8WuMmwyOjg==
+  dependencies:
+    "@tanstack/table-core" "8.19.2"
+
+"@tanstack/table-core@8.19.2":
+  version "8.19.2"
+  resolved "https://registry.yarnpkg.com/@tanstack/table-core/-/table-core-8.19.2.tgz#5fc8ede54f18867f74715ad93927f7df4d255209"
+  integrity sha512-KpRjhgehIhbfH78ARm/GJDXGnpdw4bCg3qas6yjWSi7czJhI/J6pWln7NHtmBkGE9ZbohiiNtLqwGzKmBfixig==
+
 "@types/cookie@0.6.0":
   version "0.6.0"
   resolved "https://registry.yarnpkg.com/@types/cookie/-/cookie-0.6.0.tgz#eac397f28bf1d6ae0ae081363eca2f425bedf0d5"
@@ -1675,6 +1687,11 @@ axe-core@^4.9.1:
   version "4.9.1"
   resolved "https://registry.yarnpkg.com/axe-core/-/axe-core-4.9.1.tgz#fcd0f4496dad09e0c899b44f6c4bb7848da912ae"
   integrity sha512-QbUdXJVTpvUTHU7871ppZkdOLBeGUKBQWHkHrvN2V9IQWGMt61zf3B45BtzjxEJzYuj0JBjBZP/hmYS/R9pmAw==
+
+axios-curlirize@^2.0.0:
+  version "2.0.0"
+  resolved "https://registry.yarnpkg.com/axios-curlirize/-/axios-curlirize-2.0.0.tgz#c63eedac2c18ef5591371d7658b733cacd2e731a"
+  integrity sha512-TrQBa8MfIwaYsrCoYhfCr7NDRXLuGm+Rqh/PtAuO64b8PCCOJWn37BWQvpN4/mzzig3uHb4qXzvpxJmALHaiwA==
 
 axios@^1.7.2:
   version "1.7.2"
