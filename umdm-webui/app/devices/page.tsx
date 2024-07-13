@@ -4,8 +4,9 @@ import React, { useEffect, useState } from 'react';
 import { Center, Box, Heading, Spinner, Table, Tbody, Td, Th, Thead, Tr, Text, Divider } from '@chakra-ui/react';
 import { getDevices, DeviceShard } from '@/lib/micromdm';
 import { useRouter } from 'next/navigation';
+import DeviceList from '@/app/components/device_list';
 
-const DeviceList: React.FC = () => {
+const Page: React.FC = () => {
   const [devices, setDevices] = useState<DeviceShard[]>([]);
   const [loading, setLoading] = useState<boolean>(true);
   const router = useRouter();
@@ -33,8 +34,11 @@ const DeviceList: React.FC = () => {
     <Box>
       <Heading as="h1" size="lg" mb={4}>Device List</Heading>
       <Text mb="1rem">Click on a device to view more details. Disreguard last two rows if DEP is not in use.</Text>
+      <Text>MDM Devices is a list of devices that got a profile and pinged the MDM server at some point.</Text>
+      <Text>Checked-in Devices pinged our server providing specific device information</Text>
       <Divider mb="1rem" />
-      <Table variant="striped">
+      <DeviceList />
+      {/* <Table variant="striped">
         <Thead>
           <Tr>
             <Th>UDID</Th>
@@ -55,7 +59,7 @@ const DeviceList: React.FC = () => {
             </Tr>
           ))}
         </Tbody>
-      </Table>
+      </Table> */}
     </Box>
   );
 };

@@ -1,0 +1,508 @@
+[
+    {
+        "name": "DeviceInformation",
+        "friendlyName": "Device Information",
+        "description": "Queries the device for various information.",
+        "section": "Information",
+        "icon": "FaInfoCircle",
+        "parameters": {
+            "queries": {
+                "type": "array",
+                "description": "List of information to query.",
+                "required": true
+            }
+        }
+    },
+    {
+        "name": "DeviceLock",
+        "friendlyName": "Device Lock",
+        "description": "Locks the device.",
+        "section": "Security",
+        "icon": "FaLock",
+        "parameters": {
+            "message": {
+                "type": "string",
+                "description": "The message to display on the lock screen.",
+                "required": false
+            },
+            "phone_number": {
+                "type": "string",
+                "description": "The phone number to display on the lock screen.",
+                "required": false
+            }
+        }
+    },
+    {
+        "name": "ClearPasscode",
+        "friendlyName": "Clear Passcode",
+        "description": "Clears the passcode from the device.",
+        "section": "Security",
+        "icon": "FaUnlock",
+        "parameters": {}
+    },
+    {
+        "name": "EraseDevice",
+        "friendlyName": "Erase Device",
+        "description": "Erases all content and settings on the device.",
+        "section": "Security",
+        "icon": "FaTrashAlt",
+        "parameters": {}
+    },
+    {
+        "name": "InstallProfile",
+        "friendlyName": "Install Profile",
+        "description": "Installs a configuration profile.",
+        "section": "Configuration",
+        "icon": "FaDownload",
+        "parameters": {
+            "payload": {
+                "type": "string",
+                "description": "The configuration profile in base64-encoded format.",
+                "required": true
+            }
+        }
+    },
+    {
+        "name": "RemoveProfile",
+        "friendlyName": "Remove Profile",
+        "description": "Removes a configuration profile.",
+        "section": "Configuration",
+        "icon": "FaTrashAlt",
+        "parameters": {
+            "identifier": {
+                "type": "string",
+                "description": "The identifier of the profile to remove.",
+                "required": true
+            }
+        }
+    },
+    {
+        "name": "InstalledApplicationList",
+        "friendlyName": "Installed Applications",
+        "description": "Queries the list of installed applications on the device.",
+        "section": "Information",
+        "icon": "FaList",
+        "parameters": {
+            "identifiers": {
+                "type": "array",
+                "description": "List of bundle identifiers to query.",
+                "required": false
+            }
+        }
+    },
+    {
+        "name": "InstallApplication",
+        "friendlyName": "Install Application",
+        "description": "Installs an application on the device.",
+        "section": "Applications",
+        "icon": "FaDownload",
+        "parameters": {
+            "manifest_url": {
+                "type": "string",
+                "description": "The URL of the manifest file for the application.",
+                "required": true
+            },
+            "management_flags": {
+                "type": "integer",
+                "description": "Flags that specify management options.",
+                "required": false
+            }
+        }
+    },
+    {
+        "name": "RemoveApplication",
+        "friendlyName": "Remove Application",
+        "description": "Removes an application from the device.",
+        "section": "Applications",
+        "icon": "FaTrashAlt",
+        "parameters": {
+            "identifier": {
+                "type": "string",
+                "description": "The bundle identifier of the application to remove.",
+                "required": true
+            },
+            "management_flags": {
+                "type": "integer",
+                "description": "Flags that specify management options.",
+                "required": false
+            }
+        }
+    },
+    {
+        "name": "ScheduleOSUpdate",
+        "friendlyName": "Schedule OS Update",
+        "description": "Schedules an OS update.",
+        "section": "Update",
+        "icon": "FaCalendarAlt",
+        "parameters": {
+            "updates": {
+                "type": "array",
+                "description": "List of updates to install.",
+                "required": true
+            }
+        }
+    },
+    {
+        "name": "RestartDevice",
+        "friendlyName": "Restart Device",
+        "description": "Restarts the device.",
+        "section": "Actions",
+        "icon": "FaRecycle",
+        "parameters": {}
+    },
+    {
+        "name": "ShutDownDevice",
+        "friendlyName": "Shut Down Device",
+        "description": "Shuts down the device.",
+        "section": "Actions",
+        "icon": "FaPowerOff",
+        "parameters": {}
+    },
+    {
+        "name": "RequestMirroring",
+        "friendlyName": "Request Mirroring",
+        "description": "Requests screen mirroring.",
+        "section": "Mirroring",
+        "icon": "FaTv",
+        "parameters": {
+            "destination_name": {
+                "type": "string",
+                "description": "The name of the destination for screen mirroring.",
+                "required": true
+            },
+            "scan_result": {
+                "type": "string",
+                "description": "The result of a scan to find the destination.",
+                "required": false
+            }
+        }
+    },
+    {
+        "name": "Restrictions",
+        "friendlyName": "Restrictions",
+        "description": "Queries the restrictions on the device.",
+        "section": "Information",
+        "icon": "FaLock",
+        "parameters": {}
+    },
+    {
+        "name": "UnlockUserAccount",
+        "friendlyName": "Unlock User Account",
+        "description": "Unlocks a user account.",
+        "section": "User Accounts",
+        "icon": "FaUnlock",
+        "parameters": {
+            "user_name": {
+                "type": "string",
+                "description": "The user name of the account to unlock.",
+                "required": true
+            }
+        }
+    },
+    {
+        "name": "DeleteUser",
+        "friendlyName": "Delete User Account",
+        "description": "Deletes a user account.",
+        "section": "User Accounts",
+        "icon": "FaTrashAlt",
+        "parameters": {
+            "user_name": {
+                "type": "string",
+                "description": "The user name of the account to delete.",
+                "required": true
+            }
+        }
+    },
+    {
+        "name": "EnableLostMode",
+        "friendlyName": "Enable Lost Mode",
+        "description": "Enables Lost Mode on the device.",
+        "section": "Security",
+        "icon": "FaExclamationCircle",
+        "parameters": {
+            "message": {
+                "type": "string",
+                "description": "The message to display on the lock screen.",
+                "required": false
+            },
+            "phone_number": {
+                "type": "string",
+                "description": "The phone number to display on the lock screen.",
+                "required": false
+            }
+        }
+    },
+    {
+        "name": "DisableLostMode",
+        "friendlyName": "Disable Lost Mode",
+        "description": "Disables Lost Mode on the device.",
+        "section": "Security",
+        "icon": "FaExclamationCircle",
+        "parameters": {}
+    },
+    {
+        "name": "PlayLostModeSound",
+        "friendlyName": "Play Lost Mode Sound",
+        "description": "Plays a sound on the device while in Lost Mode.",
+        "section": "Security",
+        "icon": "FaVolumeUp",
+        "parameters": {}
+    },
+    {
+        "name": "ManagedApplicationList",
+        "friendlyName": "Managed Application List",
+        "description": "Queries the list of managed applications on the device.",
+        "section": "Applications",
+        "icon": "FaList",
+        "parameters": {}
+    },
+    {
+        "name": "InstallEnterpriseApplication",
+        "friendlyName": "Install Enterprise Application",
+        "description": "Installs an enterprise application on the device.",
+        "section": "Applications",
+        "icon": "FaDownload",
+        "parameters": {
+            "manifest_url": {
+                "type": "string",
+                "description": "The URL of the manifest file for the application.",
+                "required": true
+            },
+            "management_flags": {
+                "type": "integer",
+                "description": "Flags that specify management options.",
+                "required": false
+            }
+        }
+    },
+    {
+        "name": "AccountConfiguration",
+        "friendlyName": "Account Configuration",
+        "description": "Configures an account on the device.",
+        "section": "Configuration",
+        "icon": "FaUserCog",
+        "parameters": {
+            "account_name": {
+                "type": "string",
+                "description": "The name of the account to configure.",
+                "required": true
+            },
+            "account_configuration": {
+                "type": "object",
+                "description": "The configuration details for the account.",
+                "required": true
+            }
+        }
+    },
+    {
+        "name": "ApplyRedemptionCode",
+        "friendlyName": "Apply Redemption Code",
+        "description": "Applies a redemption code to an application.",
+        "section": "Applications",
+        "icon": "FaTicketAlt",
+        "parameters": {
+            "identifier": {
+                "type": "string",
+                "description": "The bundle identifier of the application.",
+                "required": true
+            },
+            "redemption_code": {
+                "type": "string",
+                "description": "The redemption code to apply.",
+                "required": true
+            }
+        }
+    },
+    {
+        "name": "ValidateApplications",
+        "friendlyName": "Validate Applications",
+        "description": "Validates the applications on the device.",
+        "section": "Applications",
+        "icon": "FaCheck",
+        "parameters": {
+            "identifiers": {
+                "type": "array",
+                "description": "List of bundle identifiers to validate.",
+                "required": false
+            }
+        }
+    },
+    {
+        "name": "InstallMedia",
+        "friendlyName": "Install Media",
+        "description": "Installs media on the device.",
+        "section": "Media",
+        "icon": "FaFileUpload",
+        "parameters": {
+            "manifest_url": {
+                "type": "string",
+                "description": "The URL of the manifest file for the media.",
+                "required": true
+            }
+        }
+    },
+    {
+        "name": "RemoveMedia",
+        "friendlyName": "Remove Media",
+        "description": "Removes media from the device.",
+        "section": "Media",
+        "icon": "FaTrashAlt",
+        "parameters": {
+            "identifier": {
+                "type": "string",
+                "description": "The identifier of the media to remove.",
+                "required": true
+            }
+        }
+    },
+    {
+        "name": "Settings",
+        "friendlyName": "Settings",
+        "description": "Configures settings on the device.",
+        "section": "Configuration",
+        "icon": "FaCog",
+        "parameters": {
+            "settings": {
+                "type": "array",
+                "description": "List of settings to configure.",
+                "required": true
+            }
+        }
+    },
+    {
+        "name": "SetFirmwarePassword",
+        "friendlyName": "Set Firmware Password",
+        "description": "Sets a firmware password on the device.",
+        "section": "Security",
+        "icon": "FaLock",
+        "parameters": {
+            "password": {
+                "type": "string",
+                "description": "The firmware password to set.",
+                "required": true
+            }
+        }
+    },
+    {
+        "name": "VerifyFirmwarePassword",
+        "friendlyName": "Verify Firmware Password",
+        "description": "Verifies the firmware password on the device.",
+        "section": "Security",
+        "icon": "FaCheck",
+        "parameters": {
+            "password": {
+                "type": "string",
+                "description": "The firmware password to verify.",
+                "required": true
+            }
+        }
+    },
+    {
+        "name": "SetRecoveryLock",
+        "friendlyName": "Set Recovery Lock",
+        "description": "Sets a recovery lock on the device.",
+        "section": "Security",
+        "icon": "FaLock",
+        "parameters": {
+            "password": {
+                "type": "string",
+                "description": "The recovery lock password to set.",
+                "required": true
+            }
+        }
+    },
+    {
+        "name": "VerifyRecoveryLock",
+        "friendlyName": "Verify Recovery Lock",
+        "description": "Verifies the recovery lock password on the device.",
+        "section": "Security",
+        "icon": "FaCheck",
+        "parameters": {
+            "password": {
+                "type": "string",
+                "description": "The recovery lock password to verify.",
+                "required": true
+            }
+        }
+    },
+    {
+        "name": "SetAutoAdminPassword",
+        "friendlyName": "Set Auto-Admin Password",
+        "description": "Sets an auto-admin password on the device.",
+        "section": "Security",
+        "icon": "FaUserLock",
+        "parameters": {
+            "password": {
+                "type": "string",
+                "description": "The auto-admin password to set.",
+                "required": true
+            }
+        }
+    },
+    {
+        "name": "ScheduleOSUpdateScan",
+        "friendlyName": "Schedule OS Update Scan",
+        "description": "Schedules a scan for OS updates.",
+        "section": "Update",
+        "icon": "FaCalendarCheck",
+        "parameters": {}
+    },
+    {
+        "name": "ActiveNSExtensions",
+        "friendlyName": "Active Network System Extensions",
+        "description": "Requests the active network system extensions on the device.",
+        "section": "Network",
+        "icon": "FaNetworkWired",
+        "parameters": {}
+    },
+    {
+        "name": "RotateFileVaultKey",
+        "friendlyName": "Rotate FileVault Key",
+        "description": "Rotates the FileVault key on the device.",
+        "section": "Security",
+        "icon": "FaKey",
+        "parameters": {
+            "key_type": {
+                "type": "string",
+                "description": "The type of FileVault key to rotate.",
+                "required": true
+            }
+        }
+    },
+    {
+        "name": "RefreshCellularPlans",
+        "friendlyName": "Refresh Cellular Plans",
+        "description": "Refreshes the cellular plans on the device.",
+        "section": "Network",
+        "icon": "FaSyncAlt",
+        "parameters": {}
+    },
+    {
+        "name": "LOMDeviceRequest",
+        "friendlyName": "LOM Device Request",
+        "description": "Requests a LOM device action.",
+        "section": "Network",
+        "icon": "FaMobileAlt",
+        "parameters": {
+            "action": {
+                "type": "string",
+                "description": "The LOM device action to request.",
+                "required": true
+            }
+        }
+    },
+    {
+        "name": "LOMSetupRequestCommand",
+        "friendlyName": "LOM Setup Request",
+        "description": "Sets up a LOM device.",
+        "section": "Network",
+        "icon": "FaCogs",
+        "parameters": {
+            "configuration": {
+                "type": "object",
+                "description": "The configuration for the LOM device setup.",
+                "required": true
+            }
+        }
+    }
+]
