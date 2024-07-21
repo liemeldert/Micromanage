@@ -1,6 +1,9 @@
 import mongoose, { Schema, Document } from 'mongoose';
 
 export interface Device extends Document {
+    notes: string;
+    tags: string[];
+
     UDID: string;
     Languages: string[];
     Locales: string[];

@@ -23,7 +23,7 @@ const WebhookEvents: React.FC<{ udid: string }> = ({ udid }) => {
     <Box mt={5}>
       <Heading size="md">Webhook Events</Heading>
       {events.map((event, index) => (
-        <Box key={index} mt={3} p={3} borderWidth="1px" borderRadius="md">
+        <Box key={index} mt={3} p={3} borderWidth="1px" borderRadius="md" width="100%">
           <Text>Topic: {event.topic}</Text>
           <Text>Time: {new Date(event.created_at).toLocaleString()}</Text>
           <Text>Status: {event.acknowledge_event.status}</Text>

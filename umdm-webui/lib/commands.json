@@ -1,7 +1,7 @@
 [
     {
         "name": "DeviceInformation",
-        "friendlyName": "Device Information",
+        "friendlyName": "Query Device Information",
         "description": "Queries the device for various information.",
         "section": "Information",
         "icon": "FaInfoCircle",
@@ -78,7 +78,7 @@
     },
     {
         "name": "InstalledApplicationList",
-        "friendlyName": "Installed Applications",
+        "friendlyName": "Query Installed Applications",
         "description": "Queries the list of installed applications on the device.",
         "section": "Information",
         "icon": "FaList",
@@ -179,7 +179,7 @@
     },
     {
         "name": "Restrictions",
-        "friendlyName": "Restrictions",
+        "friendlyName": "Query Restrictions",
         "description": "Queries the restrictions on the device.",
         "section": "Information",
         "icon": "FaLock",

@@ -10,6 +10,11 @@
       "path": "/devices"
     },
     {
+      "label": "Profiles",
+      "icon": "MdFileOpen",
+      "path": "/profiles"
+    },
+    {
       "label": "Settings",
       "icon": "MdSettings",
       "path": "/settings"

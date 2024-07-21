@@ -7,7 +7,7 @@ export default function Logo() {
         <Heading as="h1" size="lg" fontWeight="bold"
         bgGradient='linear(to-l, #7928CA, #FF0080)'
         bgClip='text'>
-            uMDM
+            MicroManage
         </Heading>
     );
 }

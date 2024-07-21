@@ -27,6 +27,8 @@ import {
   FormControl,
   FormLabel,
   Input,
+  Flex,
+  Spacer
 } from "@chakra-ui/react";
 import { getDeviceDetails, Device, sendCommand } from "@/lib/micromdm";
 import commands from "@/lib/commands.json";
@@ -234,7 +236,7 @@ const DeviceDetails: React.FC = () => {
   }
 
   return (
-    <Box>
+    <Box w="100%">
       <Heading>{device.DeviceName}</Heading>
       <Box mt={5}>
         <Button
@@ -255,29 +257,35 @@ const DeviceDetails: React.FC = () => {
       </Heading>
       <Box mt={"0.25rem"}>{renderCommandsBySection()}</Box>
 
-      <Heading size="md" mt={5}>
-        Device Details
-      </Heading>
-      <Table variant="simple">
-        <Thead>
-          <Tr>
-            <Th>Field</Th>
-            <Th>Value</Th>
-          </Tr>
-        </Thead>
-        <Tbody>
-          {Object.entries(device).map(([key, value]) => (
-            <Tr key={key}>
-              <Td>{key}</Td>
-              <Td>
-                {Array.isArray(value) ? value.join(", ") : value?.toString()}
-              </Td>
-            </Tr>
-          ))}
-        </Tbody>
-      </Table>
-
-      <WebhookEvents udid={device.UDID} />
+      <Flex w="100%">
+          <Box>
+              <Heading size="md" mt={5}>
+                Device Details
+              </Heading>
+              <Table variant="simple">
+                <Thead>
+                  <Tr>
+                    <Th>Field</Th>
+                    <Th>Value</Th>
+                  </Tr>
+                </Thead>
+                <Tbody>
+                  {Object.entries(device).map(([key, value]) => (
+                    <Tr key={key}>
+                      <Td>{key}</Td>
+                      <Td>
+                        {Array.isArray(value) ? value.join(", ") : value?.toString()}
+                      </Td>
+                    </Tr>
+                  ))}
+                </Tbody>
+              </Table>
+          </Box>
+          <Spacer />
+          <Box flex="1">
+            <WebhookEvents udid={device.UDID} />
+          </Box>
+      </Flex>
 
       <Modal isOpen={isOpen} onClose={onClose}>
         <ModalOverlay />
