@@ -1,7 +1,7 @@
 // src/app/api/devices/[udid]/route.ts
 import { NextResponse } from 'next/server';
 import connectToDatabase from '@/lib/mongodb';
-import Device from '@/models/Device';
+import Device from '@/models/device';
 
 export async function GET(req: Request, { params }: { params: { udid: string } }) {
   await connectToDatabase();

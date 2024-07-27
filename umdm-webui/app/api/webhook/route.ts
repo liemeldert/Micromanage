@@ -1,6 +1,6 @@
 import { NextResponse } from 'next/server';
 import connectToDatabase from '@/lib/mongodb';
-import Device from '@/models/Device';
+import Device from '@/models/device';
 import WebhookEvent from '@/models/WebhookEvent';
 import { parse } from '@plist/plist';
 
