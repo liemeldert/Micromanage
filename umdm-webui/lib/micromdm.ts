@@ -1,7 +1,6 @@
 import connectToDatabase from "@/lib/mongodb";
 import Device from "@/models/device";
 import axios from "axios";
-import Curlirize from "axios-curlirize";
 
 export interface DeviceShard {
   serial_number: string;

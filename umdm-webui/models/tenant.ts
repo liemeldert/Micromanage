@@ -1,11 +1,11 @@
 import mongoose from 'mongoose';
 
 const TenantSchema = new mongoose.Schema({
-  topic: String,
-  event_id: String,
+  name: String,
+  description: String,
   created_at: Date,
-  acknowledge_event: mongoose.Schema.Types.Mixed,
-  decodedPayload: mongoose.Schema.Types.Mixed,
+  members: [String],
+  group_yaml: String,
 }, { timestamps: true });
 
 export default mongoose.models.TenantSchema || mongoose.model('Tenant', TenantSchema);

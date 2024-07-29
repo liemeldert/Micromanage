@@ -39,14 +39,14 @@ export async function POST(request: Request) {
       return NextResponse.json({ success: true });
     } catch (error) {
       console.error('Error saving device:', error);
-      return NextResponse.json({ success: false, error: error.message }, { status: 500 });
+      return NextResponse.json({ success: false, error: (error as Error).message }, { status: 500 });
     }
   } else {
     return NextResponse.json({ success: true, message: 'Event logged but no device information to update.' });
   }
 }
 
-async function logWebhookEvent(eventData) {
+async function logWebhookEvent(eventData: any) {
   try {
     await WebhookEvent.create(eventData);
   } catch (error) {

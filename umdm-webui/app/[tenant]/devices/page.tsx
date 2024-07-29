@@ -15,7 +15,6 @@ const Page: React.FC = () => {
     const fetchDevices = async () => {
       const devices = await getDevices();
       setDevices(devices);
-      console.log("devices", devices);
       setLoading(false);
     };
 

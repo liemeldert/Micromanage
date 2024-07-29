@@ -81,6 +81,7 @@ const DeviceDetails: React.FC = () => {
     try {
       await sendCommand(udid as string, {
         request_type: "DeviceInformation",
+        // todo: mode this elsewhere so I don't have to keep searing my eyes on this
         queries: [
           "UDID",
           "Languages",

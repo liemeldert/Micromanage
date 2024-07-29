@@ -1,0 +1,40 @@
+name: Build and Push Docker Image
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'umdm-webui/**'
+    paths-ignore:
+      - '**.md' # Ignore markdown files changes to avoid unnecessary builds
+  pull_request:
+    branches:
+      - main
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Check out the repo
+        uses: actions/checkout@v2
+
+      - name: Log in to the GitHub Container Registry
+        uses: docker/login-action@v1
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v2
+        with:
+          context: ./umdm-webui
+          push: true
+          tags: |
+                ghcr.io/${{ github.repository_owner }}/micromanage:latest
+                ghcr.io/${{ github.repository_owner }}/micromanage:${{ github.sha }}

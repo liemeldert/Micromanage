@@ -13,8 +13,9 @@ import {
     Tooltip,
     Center,
     Divider,
+    Icon
 } from "@chakra-ui/react";
-import { FaGoogle  } from "react-icons/fa";
+import { FaGithub, FaGoogle  } from "react-icons/fa";
 import { LuLogIn } from "react-icons/lu";
 import { redirect } from "next/navigation";
 import React from "react";
@@ -35,20 +36,23 @@ export default function LoginCard() {
                 <Box minH="3rem" w="100%">
                     <VStack spacing={4}>
                         {Object.keys(providers).map((provider) => {
-                            let Icon;
+                            let selected_icon;
                             switch (provider) {
                                 case "google":
-                                    Icon = FaGoogle;
+                                    selected_icon = FaGoogle;
+                                    break;
+                                case "github":
+                                    selected_icon = FaGithub;
                                     break;
                                 default:
-                                    Icon = LuLogIn;
+                                    selected_icon = LuLogIn;
                                     break;
                             }
                             return (
                                 <Button
                                     key={provider}
                                     onClick={() => signIn(provider)}
-                                    leftIcon={<Icon as={Icon} />}
+                                    leftIcon={<Icon as={selected_icon} />}
                                     colorScheme="teal"
                                 >
                                     Sign in with {provider.charAt(0).toUpperCase() + provider.slice(1)}
