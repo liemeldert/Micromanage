@@ -28,14 +28,14 @@ export const { handlers, signIn, signOut, auth } = NextAuth({
             // Logged in users are authenticated, otherwise redirect to login page
             return !!auth
         },
-        // async session({ session, token }: { session: any, token: any }) {
-        //   if (session.user) {
-        //     session.user.id = token.id as string;
-        //     session.user.isAllowed = (process.env.ALLOWED_USER_IDS ?? '').split(',').includes(token.id as string);
 
-        //   }
-        //   return session;
-        // },
+        async session({ session, token }: { session: any, token: any }) {
+          if (session.user) {
+            session.user.id = token.id as string;
+            // session.user.isAllowed = (process.env.ALLOWED_USER_IDS ?? '').split(',').includes(token.id as string);
+          }
+          return session;
+        },
         // async jwt({ token, account }: { token: any, account: any }) {
         //   if (account) {
         //     token.id = account.providerAccountId;

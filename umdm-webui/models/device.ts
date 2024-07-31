@@ -2,6 +2,7 @@ import mongoose, { Schema, Document } from 'mongoose';
 
 export interface Device extends Document {
     notes: string;
+    tenant_id: string;
     tags: string[];
 
     UDID: string;

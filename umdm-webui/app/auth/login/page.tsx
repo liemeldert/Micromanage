@@ -30,7 +30,7 @@ export default function LoginCard() {
         if (status === "loading") {
             setLoginBox(<Spinner size="xl" />);
         } else if (session) {
-            redirect("/");
+            redirect("/1/");
         } else if (providers) {
             setLoginBox(
                 <Box minH="3rem" w="100%">

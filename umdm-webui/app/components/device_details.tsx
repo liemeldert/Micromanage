@@ -36,7 +36,7 @@ import WebhookEvents from "./webhook_events";
 
 const DeviceDetails: React.FC = () => {
   const router = useRouter();
-  const { udid } = useParams();
+  const { tenant_id, udid } = useParams();
   const [device, setDevice] = useState<Device | null>(null);
   const [loading, setLoading] = useState<boolean>(true);
   const [selectedCommand, setSelectedCommand] = useState<any>(null);

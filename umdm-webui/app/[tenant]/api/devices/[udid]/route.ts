@@ -1,4 +1,3 @@
-// src/app/api/devices/[udid]/route.ts
 import { NextResponse } from 'next/server';
 import connectToDatabase from '@/lib/mongodb';
 import Device from '@/models/device';
