@@ -1,7 +1,7 @@
 'use client';
-import { Box, Heading, Text } from "@chakra-ui/react";
+import {Box, Heading} from "@chakra-ui/react";
 import React from "react";
-import { useRouter } from "next/navigation";
+import {useRouter} from "next/navigation";
 
 
 export default function Home() {

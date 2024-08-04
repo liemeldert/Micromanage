@@ -10,10 +10,10 @@ export interface DeviceShard {
   dep_profile_status: string;
 }
 
-export const getDevices = async (): Promise<DeviceShard[]> => {
+export const getDevices = async (tenantID: string): Promise<DeviceShard[]> => {
   try {
     const response = await axios.get<{ devices: DeviceShard[] }>(
-      "/api/mdm_api"
+      `/${tenantID}/api/mdm_api/get_devices`
     );
     return response.data.devices;
   } catch (error) {
@@ -96,10 +96,11 @@ export interface Device {
 }
 
 export const getDeviceDetails = async (
-  udid: string
+    tenantID: string,
+    udid: string
 ): Promise<Device | null> => {
   try {
-    const response = await axios.get<Device>(`/api/devices/${udid}`);
+    const response = await axios.get<Device>(`/${tenantID}/api/devices/get_device/${udid}`);
     return response.data;
   } catch (error) {
     console.error("Error fetching device details:", error);
@@ -107,9 +108,22 @@ export const getDeviceDetails = async (
   }
 };
 
-export const sendCommand = async (udid: string, command: any): Promise<any> => {
+export const getManyDeviceDetails = async (tenantID: string, udids: string[]): Promise<Device[]> => {
   try {
-    const response = await axios.post(`/api/commands/${udid}`, command);
+    const deviceDetailsPromises = udids.map(udid =>
+        axios.get<Device>(`/${tenantID}/api/devices/get_device/${udid}`)
+    );
+    const responses = await Promise.all(deviceDetailsPromises);
+    return responses.map(response => response.data);
+  } catch (error) {
+    console.error('Error fetching device details:', error);
+    return [];
+  }
+};
+
+export const sendCommand = async (tenant_id: string, udid: string, command: any): Promise<any> => {
+  try {
+    const response = await axios.post(`/${tenant_id}/api/commands/${udid}`, command);
     return response.data;
   } catch (error) {
     console.error("Error sending command:", error);
@@ -127,9 +141,9 @@ export const getWebhookEvents = async (udid: string): Promise<any[]> => {
   }
 };
 
-export const getAllDeviceDetails = async (): Promise<Device[]> => {
+export const getAllDeviceDetails = async (tenantID: string): Promise<Device[]> => {
   try {
-    const response = await axios.get<Device[]>(`/api/all_devices`);
+    const response = await axios.get<Device[]>(`/${tenantID}/api/devices/get_all_devices/`);
     return response.data;
   } catch (error) {
     console.error("Error fetching all device details:", error);

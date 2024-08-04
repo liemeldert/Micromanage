@@ -1,4 +1,4 @@
-import connectToDatabase from '@/lib/mongodb';
+// import connectToDatabase from '@/lib/mongodb';
 import Tenant from '@/models/tenant';
 
 export interface ITenant {
@@ -13,26 +13,30 @@ export interface ITenant {
     mdm_secret: String,
 }
 
-export function saveCurrentTenant(tenant: string) {
-    localStorage.setItem('selectedTenant', tenant);
-};
+// export function saveCurrentTenant(tenant: ITenant) {
+//     localStorage.setItem('selectedTenant', JSON.stringify(tenant));
+// };
 
-export async function getCurrentTenant(): Promise<ITenant | null> {
-    await connectToDatabase();
-    const tenant_id = localStorage.getItem('selectedTenant');
-    if (!tenant_id) {
-        return null;
-    }
+export function saveCurrentTenant(tenant: ITenant) {
+    localStorage.setItem('selectedTenant', tenant._id);
+}
 
-    try {
-        const tenant = await Tenant.findById(tenant_id).exec();
-        if (!tenant) {
-            return null;
-        }
-        return tenant as ITenant;
-    } catch (error) {
-        console.error('Error fetching tenant:', error);
-        return null;
-    }
-};
-
+// export async function getCurrentTenant(): Promise<ITenant | null> {
+//     await connectToDatabase();
+//     const tenant_id = localStorage.getItem('selectedTenant');
+//     if (!tenant_id) {
+//         return null;
+//     }
+//
+//     try {
+//         const tenant = await Tenant.findById(tenant_id).exec();
+//         if (!tenant) {
+//             return null;
+//         }
+//         return tenant as ITenant;
+//     } catch (error) {
+//         console.error('Error fetching tenant:', error);
+//         return null;
+//     }
+// };
+//

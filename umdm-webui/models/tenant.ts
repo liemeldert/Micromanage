@@ -21,4 +21,4 @@ TenantSchema.plugin(fieldEncryption, {
   saltGenerator: (secret: string | any[]) => secret.slice(0, 16),
 });
 
-export default mongoose.models.TenantSchema || mongoose.model('Tenant', TenantSchema);
+export default mongoose.models.Tenant || mongoose.model('Tenant', TenantSchema);

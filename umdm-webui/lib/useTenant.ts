@@ -19,7 +19,7 @@ export const useTenant = () => {
             }
 
             try {
-                const response = await fetch(`/api/get-tenant/${tenant_id}`);
+                const response = await fetch(`/${tenant_id}/api/get_tenant`);
                 if (!response.ok) {
                     throw new Error('Failed to fetch tenant');
                 }

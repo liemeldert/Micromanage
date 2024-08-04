@@ -1,23 +1,28 @@
 [
-    {
-      "label": "Dashboard",
-      "icon": "MdDashboard",
-      "path": "/"
-    },
-    {
-      "label": "Devices",
-      "icon": "MdDevices",
-      "path": "/devices"
-    },
-    {
-      "label": "Profiles",
-      "icon": "MdFileOpen",
-      "path": "/profiles"
-    },
-    {
-      "label": "Settings",
-      "icon": "MdSettings",
-      "path": "/settings"
-    }
-  ]
+  {
+    "label": "Dashboard",
+    "icon": "MdDashboard",
+    "path": "/"
+  },
+  {
+    "label": "Devices",
+    "icon": "MdDevices",
+    "path": "/devices"
+  },
+  {
+    "label": "Compliance Groups",
+    "icon": "MdGroup",
+    "path": "/compliance"
+  },
+  {
+    "label": "Profiles",
+    "icon": "MdFileOpen",
+    "path": "/profiles"
+  },
+  {
+    "label": "Settings",
+    "icon": "MdSettings",
+    "path": "/settings"
+  }
+]
   

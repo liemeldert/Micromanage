@@ -1,26 +1,41 @@
 "use client"
 
-import {Box, Card, Center, Divider, Heading, Link, Tooltip} from "@chakra-ui/react";
+import {Box, Button, Card, Center, Divider, Heading, Tooltip} from "@chakra-ui/react";
 import Logo from "@/app/components/branding";
 import React from "react";
-import {useSession} from "next-auth/react";
+import {signOut, useSession} from "next-auth/react";
+import {useRouter} from "next/navigation";
+import {ITenant, saveCurrentTenant} from "@/lib/tenant";
 
 export default function TenantSelect() {
     const [allowedTenants, setAllowedTenants] = React.useState([]);
     const [loading, setLoading] = React.useState(true);
     const [error, setError] = React.useState("");
-    const { data: session, status } = useSession();
+
+    const {data: session, status} = useSession();
+    const router = useRouter();
+
+    const handleTenantClick = (tenant: ITenant) => {
+        saveCurrentTenant(tenant);
+        router.push(`/${tenant._id}`);
+    }
+
 
     React.useEffect(() => {
         const fetchTenants = async () => {
             setLoading(true);
             try {
                 console.log("User ID: ", session?.user?.id);
-                const response = await fetch(`/api/get-allowed-tenants/${session?.user?.id}`);
+                if (!session?.user?.id) {
+                    throw new Error('No user ID');
+                }
+
+                const response = await fetch(`/api/get_allowed_tenants/`);
                 if (!response.ok) {
                     throw new Error('Failed to fetch tenants');
                 }
                 const data = await response.json();
+                console.log(data)
                 setAllowedTenants(data);
             } catch (err) {
                 if (err instanceof Error) {
@@ -43,6 +58,7 @@ export default function TenantSelect() {
     }
 
     if (status === "unauthenticated") {
+        router.push("/auth/login")
         return <p>Not authenticated</p>
     }
 
@@ -56,23 +72,31 @@ export default function TenantSelect() {
                     textAlign="center"
                     bg="white"
                 >
-                    <Logo/>
-                    <Heading as="h1" size="2xl" mb={4}>Select a Tenant</Heading>
+                    <Box textAlign="left" p="0.5rem">
+                        <Logo/>
+                        <Heading size="md">Select a Tenant</Heading>
+                    </Box>
                     <Divider/>
                     {loading ? (
                         <p>Loading...</p>
                     ) : error ? (
-                        <p>{error}</p>
+                        <>
+                            <p>{error}</p>
+                            <Button onClick={() => {
+                                signOut()
+                            }}>Sign out</Button>
+                        </>
                     ) : (
                         <Box mt={4}>
-                            {allowedTenants.map((tenant) => (
+                            {allowedTenants.map((tenant: ITenant) => (
                                 <Tooltip key={tenant._id} label={tenant.description} aria-label={tenant.description}>
-                                    <Link href={`/tenant/${tenant._id}`} color="blue.500"
-                                          fontSize="xl">{tenant.name}</Link>
+                                    <Button onClick={() => (handleTenantClick(tenant))} color="blue.500"
+                                            fontSize="xl">{tenant.name}</Button>
                                 </Tooltip>
                             ))}
                         </Box>
                     )}
+                    <Button onClick={() => router.push("/tenant-create")} mt={"0.5rem"}>Create a new tenant</Button>
                 </Card>
             </Center>
         </Box>

@@ -5,14 +5,13 @@ import WebhookEvent from '@/models/WebhookEvent';
 import {parse} from '@plist/plist';
 import Tenant from "@/models/tenant";
 
-export async function POST(request: Request, {params}: { params: { tenant_id: string, secret: string } }) {
+export async function POST(request: Request, {params}: { params: { tenant: string, secret: string } }) {
     await connectToDatabase();
     const data = await request.json();
-    console.log("data", data);
 
     const {acknowledge_event} = data;
     const {udid, raw_payload} = acknowledge_event;
-    const tenant_id = params.tenant_id;
+    const tenant_id = params.tenant;
 
     // verify tenant secret
     const tenant = await Tenant.findById(tenant_id).exec();
@@ -45,7 +44,11 @@ export async function POST(request: Request, {params}: { params: { tenant_id: st
 
         try {
             // Upsert the device information in the database
-            await Device.findOneAndUpdate({UDID: udid}, deviceInfo, {upsert: true, new: true});
+            const result = await Device.findOneAndUpdate(
+                {UDID: udid},
+                {$set: deviceInfo},
+                {upsert: true, new: true}
+            );
             return NextResponse.json({success: true});
         } catch (error) {
             console.error('Error saving device:', error);
@@ -55,7 +58,6 @@ export async function POST(request: Request, {params}: { params: { tenant_id: st
         return NextResponse.json({success: true, message: 'Event logged but no device information to update.'});
     }
 }
-
 
 async function logWebhookEvent(eventData: any) {
     try {

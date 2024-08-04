@@ -1,36 +1,22 @@
 "use client";
-import { useEffect, useState } from "react";
-import { getProviders, signIn, useSession } from "next-auth/react";
-import {
-    Box,
-    Button,
-    Card,
-    Heading,
-    Link,
-    Spinner,
-    Text,
-    VStack,
-    Tooltip,
-    Center,
-    Divider,
-    Icon
-} from "@chakra-ui/react";
-import { FaGithub, FaGoogle  } from "react-icons/fa";
-import { LuLogIn } from "react-icons/lu";
-import { redirect } from "next/navigation";
-import React from "react";
+import React, {useEffect, useState} from "react";
+import {getProviders, signIn, useSession} from "next-auth/react";
+import {Box, Button, Card, Center, Divider, Heading, Icon, Link, Spinner, Tooltip, VStack} from "@chakra-ui/react";
+import {FaGithub, FaGoogle} from "react-icons/fa";
+import {LuLogIn} from "react-icons/lu";
+import {redirect} from "next/navigation";
 import Logo from "@/app/components/branding";
 
 export default function LoginCard() {
     const [providers, setProviders] = useState<Record<string, any> | null>(null);
-    const { data: session, status } = useSession();
+    const {data: session, status} = useSession();
     const [loginBox, setLoginBox] = useState<JSX.Element | null>(null);
 
     useEffect(() => {
         if (status === "loading") {
-            setLoginBox(<Spinner size="xl" />);
+            setLoginBox(<Spinner size="xl"/>);
         } else if (session) {
-            redirect("/1/");
+            redirect("/tenant-select/");
         } else if (providers) {
             setLoginBox(
                 <Box minH="3rem" w="100%">
@@ -52,7 +38,7 @@ export default function LoginCard() {
                                 <Button
                                     key={provider}
                                     onClick={() => signIn(provider)}
-                                    leftIcon={<Icon as={selected_icon} />}
+                                    leftIcon={<Icon as={selected_icon}/>}
                                     colorScheme="teal"
                                 >
                                     Sign in with {provider.charAt(0).toUpperCase() + provider.slice(1)}
@@ -63,7 +49,7 @@ export default function LoginCard() {
                 </Box>
             );
         } else {
-            setLoginBox(<Spinner size="xl" />);
+            setLoginBox(<Spinner size="xl"/>);
         }
     }, [providers, session, status]); // Dependencies
 
@@ -88,12 +74,14 @@ export default function LoginCard() {
                     bg="white"
                 >
                     <Box textAlign="left" p="0.5rem">
-                        <Logo />
+                        <Logo/>
                     </Box>
-                    <Divider />
+                    <Divider/>
                     <Heading pt="0.75rem" mb={4}>Log in</Heading>
                     {loginBox}
-                    <Tooltip label="Make sure the environment variables for the provider are configured properly on the frontend." fontSize="md">
+                    <Tooltip
+                        label="Make sure the environment variables for the provider are configured properly on the frontend."
+                        fontSize="md">
                         <Link mt={4} href="#" color="teal.500">
                             Something missing?
                         </Link>

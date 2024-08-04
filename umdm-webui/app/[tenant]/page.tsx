@@ -1,5 +1,5 @@
 'use client';
-import {Box, Code, Heading, Text} from "@chakra-ui/react";
+import {Box, Button, Code, Heading, Text} from "@chakra-ui/react";
 import React from "react";
 import {useTenant} from "@/lib/useTenant";
 
@@ -8,21 +8,26 @@ export default function Home() {
     const tenant = useTenant();
     const domain = window.location.hostname;
 
-    const [ webhookUrl, setWebhookUrl ] = React.useState<string | null>(null);
+    const [webhookUrl, setWebhookUrl] = React.useState<string | null>(null);
 
-    React.useEffect(() => {
-        if (tenant.loading) {
-            setWebhookUrl("Loading...");
-        } else {
-            const current_tenant = tenant.tenant;
-            if (!current_tenant) {
-                setWebhookUrl("No tenant selected somehow");
-                return;
-            }
-            const url = `${current_tenant.mdm_url}/webhook/${current_tenant.webhook_secret}`;
-            setWebhookUrl(url);
+    // useEffect(() => {
+    //     if (tenant.loading) {
+    //         setWebhookUrl("loading...");
+    //     } else {
+    //         if (tenant.tenant) {
+    //             setWebhookUrl(`https://${domain}/${tenant.tenant._id}/webhook`)
+    //         }
+    //     }
+    // });
+
+    const handleWebhookGet = async () => {
+        const response = await fetch(`/${tenant?.tenant?._id}/api/get_complete_tenant`);
+        if (!response.ok) {
+            throw new Error('Failed to fetch webhook URL');
         }
-    }, [useTenant]);
+        const data = await response.json();
+        setWebhookUrl(`https://${domain}/${data._id}/webhook/${data.webhook_secret}`);
+    }
 
 
     return (
@@ -33,6 +38,8 @@ export default function Home() {
             <Heading mt={"5rem"}>Setup information</Heading>
             <Text>In order to receive device status information, you must configure the webhook_url on your MicroMDM
                 server to the following:</Text>
+
+            <Button onClick={handleWebhookGet} mr={"4"}>Show URL</Button>
             <Code>{webhookUrl}</Code>
 
         </Box>

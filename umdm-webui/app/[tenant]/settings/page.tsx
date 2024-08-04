@@ -1,7 +1,6 @@
 'use client';
-import { useState } from 'react';
-import { Box, Button, FormControl, FormLabel, Input, Text } from '@chakra-ui/react';
-import React from 'react';
+import React, {useState} from 'react';
+import {Box, Button, FormControl, Text} from '@chakra-ui/react';
 
 const Settings = () => {
     const [apiKey, setApiKey] = useState('');
