@@ -1,29 +1,19 @@
 'use client';
 
-import React, { useState, useEffect } from 'react';
-import { useParams } from 'next/navigation';
-import {
-    Box,
-    Heading,
-    Text,
-    Table,
-    Thead,
-    Tbody,
-    Tr,
-    Th,
-    Td,
-} from '@chakra-ui/react';
+import React, {useEffect, useState} from 'react';
+import {useParams} from 'next/navigation';
+import {Box, Heading, Table, Tbody, Td, Text, Th, Thead, Tr,} from '@chakra-ui/react';
 import axios from 'axios';
 
 export default function ProfileDetailsPage() {
-    const { tenant, profileId } = useParams();
+    const {tenant, profileId} = useParams();
     const [profile, setProfile] = useState<any>(null);
     const [devices, setDevices] = useState([]);
 
     useEffect(() => {
         fetchProfileDetails();
         fetchDevicesWithProfile();
-    }, []);
+    });
 
     const fetchProfileDetails = async () => {
         try {

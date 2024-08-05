@@ -1,5 +1,5 @@
 'use client';
-import { Heading} from "@chakra-ui/react";
+import {Heading} from "@chakra-ui/react";
 import React from "react";
 import {useRouter} from "next/navigation";
 import {CenterCardLogo} from "@/app/components/CenterCard";

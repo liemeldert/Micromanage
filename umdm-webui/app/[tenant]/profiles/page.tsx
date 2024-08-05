@@ -1,57 +1,57 @@
 'use client';
 
-import React, { useState, useEffect } from 'react';
-import { useParams, useRouter } from 'next/navigation';
+import React, {useEffect, useState} from 'react';
+import {useParams, useRouter} from 'next/navigation';
 import {
+    Badge,
     Box,
     Button,
-    Heading,
-    Table,
-    Thead,
-    Tbody,
-    Tr,
-    Th,
-    Td,
-    Modal,
-    ModalOverlay,
-    ModalContent,
-    ModalHeader,
-    ModalFooter,
-    ModalBody,
-    ModalCloseButton,
     FormControl,
     FormLabel,
+    Heading,
+    HStack,
+    IconButton,
     Input,
-    Textarea,
+    Modal,
+    ModalBody,
+    ModalCloseButton,
+    ModalContent,
+    ModalFooter,
+    ModalHeader,
+    ModalOverlay,
     Select,
+    Table,
+    Tbody,
+    Td,
+    Text,
+    Textarea,
+    Th,
+    Thead,
+    Tooltip,
+    Tr,
     useDisclosure,
     useToast,
     VStack,
-    HStack,
-    Text,
-    IconButton,
-    Tooltip,
-    Badge,
 } from '@chakra-ui/react';
-import { AddIcon, DeleteIcon, ViewIcon, CheckIcon } from '@chakra-ui/icons';
+import {AddIcon, CheckIcon, DeleteIcon, ViewIcon} from '@chakra-ui/icons';
 import axios from 'axios';
 
 const profileTypes = ['Configuration', 'Restriction', 'App'];
 
 export default function ProfilesPage() {
-    const { tenant } = useParams();
+    const {tenant} = useParams();
     const router = useRouter();
     const [profiles, setProfiles] = useState([]);
     const [enrollmentProfiles, setEnrollmentProfiles] = useState([]);
     const [activeEnrollmentProfile, setActiveEnrollmentProfile] = useState(null);
-    const { isOpen, onOpen, onClose } = useDisclosure();
-    const [newProfile, setNewProfile] = useState({ name: '', description: '', type: '', profileData: '' });
+    const {isOpen, onOpen, onClose} = useDisclosure();
+    const [newProfile, setNewProfile] = useState({name: '', description: '', type: '', profileData: ''});
     const toast = useToast();
     const [isLoading, setIsLoading] = useState(false);
 
     useEffect(() => {
         fetchProfiles();
-    }, []);
+    });
 
     const fetchProfiles = async () => {
         setIsLoading(true);
@@ -60,7 +60,10 @@ export default function ProfilesPage() {
             const allProfiles = response.data;
             setProfiles(allProfiles.filter((profile: { type: string; }) => profile.type !== 'Enrollment'));
             setEnrollmentProfiles(allProfiles.filter((profile: { type: string; }) => profile.type === 'Enrollment'));
-            const active = allProfiles.find((profile: { type: string; isActive: any; }) => profile.type === 'Enrollment' && profile.isActive);
+            const active = allProfiles.find((profile: {
+                type: string;
+                isActive: any;
+            }) => profile.type === 'Enrollment' && profile.isActive);
             setActiveEnrollmentProfile(active ? active._id : null);
         } catch (error) {
             console.error('Error fetching profiles:', error);
@@ -77,8 +80,8 @@ export default function ProfilesPage() {
     };
 
     const handleInputChange = (e: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement>) => {
-        const { name, value } = e.target;
-        setNewProfile({ ...newProfile, [name]: value });
+        const {name, value} = e.target;
+        setNewProfile({...newProfile, [name]: value});
     };
 
     const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -87,7 +90,7 @@ export default function ProfilesPage() {
             const reader = new FileReader();
             reader.onload = (event) => {
                 const base64 = event.target?.result as string;
-                setNewProfile({ ...newProfile, profileData: base64.split(',')[1] });
+                setNewProfile({...newProfile, profileData: base64.split(',')[1]});
             };
             reader.readAsDataURL(file);
         }
@@ -179,7 +182,7 @@ export default function ProfilesPage() {
             <VStack align="stretch" spacing={8}>
                 <HStack justify="space-between">
                     <Heading>Profiles</Heading>
-                    <Button leftIcon={<AddIcon />} colorScheme="blue" onClick={onOpen}>
+                    <Button leftIcon={<AddIcon/>} colorScheme="blue" onClick={onOpen}>
                         Add New Profile
                     </Button>
                 </HStack>
@@ -216,7 +219,7 @@ export default function ProfilesPage() {
                                                     <Tooltip label="View Details">
                                                         <IconButton
                                                             aria-label="View profile details"
-                                                            icon={<ViewIcon />}
+                                                            icon={<ViewIcon/>}
                                                             size="sm"
                                                             onClick={() => router.push(`/${tenant}/profiles/${profile._id}`)}
                                                         />
@@ -225,7 +228,7 @@ export default function ProfilesPage() {
                                                         <Tooltip label="Activate Profile">
                                                             <IconButton
                                                                 aria-label="Activate profile"
-                                                                icon={<CheckIcon />}
+                                                                icon={<CheckIcon/>}
                                                                 size="sm"
                                                                 colorScheme="green"
                                                                 onClick={() => handleActivateEnrollmentProfile(profile._id)}
@@ -235,7 +238,7 @@ export default function ProfilesPage() {
                                                     <Tooltip label="Delete Profile">
                                                         <IconButton
                                                             aria-label="Delete profile"
-                                                            icon={<DeleteIcon />}
+                                                            icon={<DeleteIcon/>}
                                                             size="sm"
                                                             colorScheme="red"
                                                             onClick={() => handleDelete(profile._id)}
@@ -271,7 +274,7 @@ export default function ProfilesPage() {
                                                     <Tooltip label="View Details">
                                                         <IconButton
                                                             aria-label="View profile details"
-                                                            icon={<ViewIcon />}
+                                                            icon={<ViewIcon/>}
                                                             size="sm"
                                                             onClick={() => router.push(`/${tenant}/profiles/${profile._id}`)}
                                                         />
@@ -279,7 +282,7 @@ export default function ProfilesPage() {
                                                     <Tooltip label="Delete Profile">
                                                         <IconButton
                                                             aria-label="Delete profile"
-                                                            icon={<DeleteIcon />}
+                                                            icon={<DeleteIcon/>}
                                                             size="sm"
                                                             colorScheme="red"
                                                             onClick={() => handleDelete(profile._id)}
@@ -297,15 +300,15 @@ export default function ProfilesPage() {
             </VStack>
 
             <Modal isOpen={isOpen} onClose={onClose}>
-                <ModalOverlay />
+                <ModalOverlay/>
                 <ModalContent>
                     <ModalHeader>Create New Profile</ModalHeader>
-                    <ModalCloseButton />
+                    <ModalCloseButton/>
                     <ModalBody>
                         <VStack spacing={4}>
                             <FormControl isRequired>
                                 <FormLabel>Name</FormLabel>
-                                <Input name="name" value={newProfile.name} onChange={handleInputChange} />
+                                <Input name="name" value={newProfile.name} onChange={handleInputChange}/>
                             </FormControl>
                             <FormControl isRequired>
                                 <FormLabel>Type</FormLabel>
@@ -321,11 +324,12 @@ export default function ProfilesPage() {
                             </FormControl>
                             <FormControl>
                                 <FormLabel>Description</FormLabel>
-                                <Textarea name="description" value={newProfile.description} onChange={handleInputChange} />
+                                <Textarea name="description" value={newProfile.description}
+                                          onChange={handleInputChange}/>
                             </FormControl>
                             <FormControl isRequired>
                                 <FormLabel>Profile File</FormLabel>
-                                <Input type="file" onChange={handleFileUpload} accept=".mobileconfig" />
+                                <Input type="file" onChange={handleFileUpload} accept=".mobileconfig"/>
                             </FormControl>
                         </VStack>
                     </ModalBody>

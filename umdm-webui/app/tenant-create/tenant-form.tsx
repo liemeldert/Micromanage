@@ -75,7 +75,7 @@ const TenantForm = () => {
                         onChange={(e) => setDescription(e.target.value)}
                     />
                 </FormControl>
-                <Text mt={4}>Don't have a MicroMDM server? Please contact us to host one for you, or host one
+                <Text mt={4}>Don&apos;t have a MicroMDM server? Please contact us to host one for you, or host one
                     yourself.</Text>
                 <FormControl id="mdmurl" mt={4}>
                     <FormLabel>MicroMDM Server URL</FormLabel>
@@ -94,7 +94,7 @@ const TenantForm = () => {
                     />
                 </FormControl>
                 {error && <Text color="red.500" mt={2}>{error}</Text>}
-                <Text mt={4}>We'll help you add more users later.</Text>
+                <Text mt={4}>We&apos;ll help you add more users later.</Text>
                 <Button
                     mt={4}
                     colorScheme="teal"

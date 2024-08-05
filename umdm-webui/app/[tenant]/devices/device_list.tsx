@@ -2,46 +2,45 @@
 
 import React, {useEffect, useState} from 'react';
 import {
-  Box,
-  Button,
-  Checkbox,
-  Heading,
-  HStack,
-  Input,
-  Menu,
-  MenuButton,
-  MenuItem,
-  MenuList,
-  Spinner,
-  Tab,
-  Table,
-  TabList,
-  TabPanel,
-  TabPanels,
-  Tabs,
-  Tbody,
-  Td,
-  Text,
-  Th,
-  Thead,
-  Tr,
-  VStack
+    Box,
+    Button,
+    Checkbox,
+    Heading,
+    HStack,
+    Input,
+    Menu,
+    MenuButton,
+    MenuItem,
+    MenuList,
+    Spinner,
+    Tab,
+    Table,
+    TabList,
+    TabPanel,
+    TabPanels,
+    Tabs,
+    Tbody,
+    Td,
+    Text,
+    Th,
+    Thead,
+    Tr,
+    VStack
 } from '@chakra-ui/react';
 import {Device, DeviceShard, getAllDeviceDetails, getDevices} from '@/lib/micromdm';
-import {useRouter} from 'next/navigation';
+import {useParams, useRouter} from 'next/navigation';
 import {
-  ColumnDef,
-  ColumnOrderState,
-  createColumnHelper,
-  flexRender,
-  getCoreRowModel,
-  getFilteredRowModel,
-  getPaginationRowModel,
-  getSortedRowModel,
-  useReactTable,
+    ColumnDef,
+    ColumnOrderState,
+    createColumnHelper,
+    flexRender,
+    getCoreRowModel,
+    getFilteredRowModel,
+    getPaginationRowModel,
+    getSortedRowModel,
+    useReactTable,
 } from '@tanstack/react-table';
 import {ChevronDownIcon} from '@chakra-ui/icons';
-import {useTenant} from "@/lib/useTenant";
 import CenterCard from "@/app/components/CenterCard";
 
 const DeviceList: React.FC = () => {
@@ -53,18 +52,14 @@ const DeviceList: React.FC = () => {
     const [columnVisibility, setColumnVisibility] = useState({});
 
     const router = useRouter();
-    const tenant = useTenant();
+    const {tenant} = useParams() as { tenant: string; };
 
     useEffect(() => {
         const fetchDevices = async () => {
-            if (!tenant?.tenant?._id || !allDevices) {
-                console.error('Tenant ID is undefined');
-                return;
-            }
             try {
-                const devices = await getDevices(tenant.tenant._id);
+                const devices = await getDevices(tenant);
                 setDevices(devices);
-                const allDeviceDetails = await getAllDeviceDetails(tenant.tenant._id);
+                const allDeviceDetails = await getAllDeviceDetails(tenant);
                 setAllDevices(allDeviceDetails);
                 return;
             } catch (error) {
@@ -74,10 +69,10 @@ const DeviceList: React.FC = () => {
             }
         };
 
-        if (!tenant.loading && tenant.tenant) {
+        if (tenant) {
             fetchDevices();
         }
-    }, [tenant.loading, tenant.tenant?._id]);
+    }, [tenant]);
 
     const columnHelperShard = createColumnHelper<DeviceShard>();
     // yes this is bad, but I don't think that there's anything that I can really do about it.
@@ -169,7 +164,7 @@ const DeviceList: React.FC = () => {
             <>
                 <CenterCard>
                     <Heading>No devices have responded to requests for information.</Heading>
-                    <Text>Not what you're expecting to see?</Text>
+                    <Text>Not what you&apos;re expecting to see?</Text>
                     <Text>Check your profiles and network connections on each device.</Text>
                 </CenterCard>
             </>
@@ -201,7 +196,7 @@ const DeviceList: React.FC = () => {
 
     return (
         <Box>
-            <Heading as="h1" size="lg" mb={4}>Device List</Heading>
+            {/*<Heading as="h1" size="lg" mb={4}>Device List</Heading>*/}
             <Tabs>
                 <TabList>
                     <Tab>Checked-in Devices</Tab>
@@ -234,7 +229,7 @@ const DeviceList: React.FC = () => {
                                 <Tbody>
                                     {allDevicesTable.getRowModel().rows.map(row => (
                                         <Tr key={row.id}
-                                            onClick={() => router.push(`/${tenant?.tenant?._id}/devices/details/${row.original.UDID}`)}>
+                                            onClick={() => router.push(`/${tenant}/devices/details/${row.original.UDID}`)}>
                                             {row.getVisibleCells().map(cell => (
                                                 <Td key={cell.id}>
                                                     {flexRender(cell.column.columnDef.cell, cell.getContext())}
@@ -273,7 +268,7 @@ const DeviceList: React.FC = () => {
                                 <Tbody>
                                     {mdmTable.getRowModel().rows.map(row => (
                                         <Tr key={row.id}
-                                            onClick={() => router.push(`/${tenant?.tenant?._id}/devices/details/${row.original.udid}`)}>
+                                            onClick={() => router.push(`/${tenant}/devices/details/${row.original.udid}`)}>
                                             {row.getVisibleCells().map(cell => (
                                                 <Td key={cell.id}>
                                                     {flexRender(cell.column.columnDef.cell, cell.getContext())}
