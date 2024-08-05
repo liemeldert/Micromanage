@@ -10,11 +10,6 @@
     "path": "/devices"
   },
   {
-    "label": "Compliance Groups",
-    "icon": "MdGroup",
-    "path": "/compliance"
-  },
-  {
     "label": "Profiles",
     "icon": "MdFileOpen",
     "path": "/profiles"

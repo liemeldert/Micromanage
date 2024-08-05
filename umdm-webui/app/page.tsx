@@ -1,7 +1,8 @@
 'use client';
-import {Box, Heading} from "@chakra-ui/react";
+import { Heading} from "@chakra-ui/react";
 import React from "react";
 import {useRouter} from "next/navigation";
+import {CenterCardLogo} from "@/app/components/CenterCard";
 
 
 export default function Home() {
@@ -11,8 +12,8 @@ export default function Home() {
     });
 
     return (
-        <Box>
-            <Heading>Welcome to uMDM, redirecting to login.</Heading>
-        </Box>
+        <CenterCardLogo>
+            <Heading m={"4"} size={"md"}>Welcome to Micromanage, redirecting to login.</Heading>
+        </CenterCardLogo>
     );
 }
