@@ -6,8 +6,8 @@ on:
       - main
     paths:
       - 'umdm-webui/**'
-    paths-ignore:
-      - '**.md' # Ignore markdown files changes to avoid unnecessary builds
+    # paths-ignore:
+    #   - '**.md' # Ignore markdown files changes to avoid unnecessary builds
   pull_request:
     branches:
       - main
