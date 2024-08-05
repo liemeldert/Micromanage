@@ -1,10 +1,17 @@
 import mongoose from 'mongoose';
 
-const MONGODB_URI = process.env.MONGODB_URI;
+let MONGODB_URI: string | undefined;
 
-if (!MONGODB_URI) {
-  throw new Error('Please define the MONGODB_URI environment variable inside .env.local');
-}
+// Function to get the MONGODB_URI
+const getMongoDB_URI = () => {
+  if (MONGODB_URI === undefined) {
+    MONGODB_URI = process.env.MONGODB_URI;
+    if (!MONGODB_URI) {
+      throw new Error('Please define the MONGODB_URI environment variable');
+    }
+  }
+  return MONGODB_URI;
+};
 
 interface GlobalWithMongoose extends Global {
   mongoose: {
@@ -27,7 +34,8 @@ async function connectToDatabase() {
   }
 
   if (!cached.promise) {
-    cached.promise = mongoose.connect(MONGODB_URI || 'localhost:27017').then((mongoose) => {
+    const uri = getMongoDB_URI();
+    cached.promise = mongoose.connect(uri).then((mongoose) => {
       return mongoose;
     });
   }
