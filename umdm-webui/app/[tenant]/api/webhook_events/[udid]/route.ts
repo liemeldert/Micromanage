@@ -1,10 +1,11 @@
 import {NextResponse} from 'next/server';
 import connectToDatabase from '@/lib/mongodb';
 import WebhookEvent from '@/models/WebhookEvent';
+import {auth} from "@/app/auth";
 
-export async function GET(req: Request, {params}: { params: { tenant: string, udid: string } }) {
+export const GET = auth(async (req: Request, ctx) => {
     await connectToDatabase();
-    const {udid, tenant} = params;
+    const {udid, tenant} = ctx.params ?? {};
 
 
     try {
@@ -14,4 +15,4 @@ export async function GET(req: Request, {params}: { params: { tenant: string, ud
         console.error('Error fetching webhook events:', error);
         return NextResponse.json({error: 'Error fetching webhook events'}, {status: 500});
     }
-}
+});

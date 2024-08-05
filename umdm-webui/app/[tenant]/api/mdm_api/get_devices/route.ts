@@ -1,10 +1,17 @@
 import {NextResponse} from 'next/server';
 import axios from 'axios';
+import {auth} from "@/app/auth";
+import Tenant from "@/models/tenant";
 
-export async function GET() {
-    const API_URL = process.env.MICROMDM_URL;
-    const API_USERNAME = process.env.MICROMDM_API_USERNAME || 'micromdm';
-    const API_PASSWORD = process.env.MICROMDM_API_PASSWORD;
+export const GET = auth(async (req, ctx) => {
+    const tenant_id = ctx.params?.tenant ?? {};
+
+    const tenant = await Tenant.findById(tenant_id).exec();
+
+
+    const API_URL = tenant.mdm_url;
+    const API_USERNAME = 'micromdm';
+    const API_PASSWORD = tenant.mdm_secret;
 
     if (!API_URL || !API_USERNAME || !API_PASSWORD) {
         return NextResponse.json({error: 'Missing API configuration'}, {status: 500});
@@ -29,4 +36,4 @@ export async function GET() {
         console.error('Error fetching devices:', error);
         return NextResponse.json({error: 'Error fetching devices'}, {status: 500});
     }
-}
+});

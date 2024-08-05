@@ -17,7 +17,7 @@ const TenantSchema = new mongoose.Schema({
 
 TenantSchema.plugin(fieldEncryption, {
   fields: ["mdm_secret"],
-  secret: process.env.DB_SECRET,
+  secret: process.env.DB_SECRET || "PLEASE CHANGE THIS BY SETTING ENVIRONMENT VARIABLE", // todo:   find some other way to do this
   saltGenerator: (secret: string | any[]) => secret.slice(0, 16),
 });
 

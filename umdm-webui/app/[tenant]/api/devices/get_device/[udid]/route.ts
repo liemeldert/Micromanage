@@ -1,15 +1,16 @@
 import {NextResponse} from 'next/server';
 import connectToDatabase from '@/lib/mongodb';
 import Device from '@/models/device';
+import {auth} from "@/app/auth";
 
-export async function GET(req: Request, {params}: { params: { tenant: string, udid: string } }) {
+export const GET = auth(async (req: Request, ctx) => {
     await connectToDatabase();
 
     try {
-        const device = await Device.findOne({UDID: params.udid, tenant_id: params.tenant});
+        const device = await Device.findOne({UDID: ctx.params?.udid, tenant_id: ctx.params?.tenant});
 
         if (!device) {
-            console.log(params)
+            console.log(ctx.params)
             return NextResponse.json({error: 'Device not found'}, {status: 404});
         }
 
@@ -18,4 +19,5 @@ export async function GET(req: Request, {params}: { params: { tenant: string, ud
         console.error('Error fetching device:', error);
         return NextResponse.json({error: 'Error fetching device'}, {status: 500});
     }
-}
+});
+
