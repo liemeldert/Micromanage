@@ -15,7 +15,7 @@ export const {handlers, signIn, signOut, auth} = NextAuth({
                     return true;
                 }
             } else if (account && user) {
-                if (user.email && process.env.ALLOWED_USER_EMAILS?.split(',').includes(user.email.toString())) {
+                if (process.env.ALLOWED_USER_EMAILS && user.email && process.env.ALLOWED_USER_EMAILS?.split(',').includes(user.email.toString())) {
                     return true;
                 } else {
                     return '/auth/not_allowed';
