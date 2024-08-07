@@ -51,7 +51,7 @@ export default function ProfilesPage() {
 
     useEffect(() => {
         fetchProfiles();
-    });
+    }, []);
 
     const fetchProfiles = async () => {
         setIsLoading(true);
