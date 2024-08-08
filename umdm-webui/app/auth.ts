@@ -10,11 +10,7 @@ export const {handlers, signIn, signOut, auth} = NextAuth({
     ],
     callbacks: {
         async signIn({user, account, profile}): Promise<boolean | string> {
-            if (account && account.provider === "google") {
-                if (((profile?.email_verified ?? false) && profile?.email?.endsWith(process.env.AUTH_GOOGLE_ALLOWED_DOMAIN as string)) ?? false) {
-                    return true;
-                }
-            } else if (account && user) {
+            if (account && user) {
                 if (!process.env.ALLOWED_USER_EMAILS || (user.email && process.env.ALLOWED_USER_EMAILS?.split(',').includes(user.email.toString()))) {
                     return true;
                 } else {
@@ -36,6 +32,7 @@ export const {handlers, signIn, signOut, auth} = NextAuth({
             }
             return session;
         },
+
         async jwt({token, account}: { token: any, account: any }) {
             if (account) {
                 token.id = account.providerAccountId;
