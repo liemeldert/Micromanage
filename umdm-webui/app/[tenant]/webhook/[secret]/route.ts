@@ -42,8 +42,11 @@ export async function POST(request: Request, {params}: { params: { tenant: strin
         const deviceInfo = parsedPayload.QueryResponses;
         deviceInfo.UDID = udid;
         deviceInfo.tenant_id = tenant_id
-
-        console.log(`Got ${deviceInfo.topic}, ${deviceInfo.acknowledge_event.status} event for device ${udid}`);
+        try {
+            console.log(`Got ${deviceInfo.topic}, ${deviceInfo.acknowledge_event.status} event for device ${udid}`);
+        } catch (error) {
+            console.error('Error logging device event:', error);
+        }
 
         try {
             // Upsert the device information in the database
