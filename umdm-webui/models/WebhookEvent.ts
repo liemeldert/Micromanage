@@ -6,6 +6,7 @@ const WebhookEventSchema = new mongoose.Schema({
   event_id: String,
   created_at: Date,
   acknowledge_event: mongoose.Schema.Types.Mixed,
+  checkin_event: mongoose.Schema.Types.Mixed,
   decodedPayload: mongoose.Schema.Types.Mixed,
 }, { timestamps: true });
 
