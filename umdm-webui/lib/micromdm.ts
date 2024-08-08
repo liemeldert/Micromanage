@@ -4,18 +4,25 @@ import axios from "axios";
 
 export interface DeviceShard {
   serial_number: string;
-  udid: string;
+  UDID: string;
   enrollment_status: boolean;
   last_seen: string;
   dep_profile_status: string;
 }
+
+// fixes casing issue between MDM and DB
+const transformDeviceData = (device: any): DeviceShard => ({
+  ...device,
+  UDID: device.udid,
+});
 
 export const getDevices = async (tenantID: string): Promise<DeviceShard[]> => {
   try {
     const response = await axios.get<{ devices: DeviceShard[] }>(
       `/${tenantID}/api/mdm_api/get_devices`
     );
-    return response.data.devices;
+    const transformedDevices = response.data.devices.map(transformDeviceData);
+    return transformedDevices;
   } catch (error) {
     console.error("Error fetching devices:", error);
     return [];
@@ -95,6 +102,83 @@ export interface Device {
   ServiceSubscriptions?: any[];
 }
 
+// oh !
+export const device_queries = [
+  "UDID",
+  "Languages",
+  "Locales",
+  "DeviceID",
+  "OrganizationInfo",
+  "LastCloudBackupDate",
+  "AwaitingConfiguration",
+  "MDMOptions",
+  "iTunesStoreAccountIsActive",
+  "iTunesStoreAccountHash",
+  "DeviceName",
+  "OSVersion",
+  "BuildVersion",
+  "ModelName",
+  "Model",
+  "ProductName",
+  "SerialNumber",
+  "DeviceCapacity",
+  "AvailableDeviceCapacity",
+  "BatteryLevel",
+  "CellularTechnology",
+  "ICCID",
+  "BluetoothMAC",
+  "WiFiMAC",
+  "EthernetMACs",
+  "CurrentCarrierNetwork",
+  "SubscriberCarrierNetwork",
+  "CurrentMCC",
+  "CurrentMNC",
+  "SubscriberMCC",
+  "SubscriberMNC",
+  "SIMMCC",
+  "SIMMNC",
+  "SIMCarrierNetwork",
+  "CarrierSettingsVersion",
+  "PhoneNumber",
+  "DataRoamingEnabled",
+  "VoiceRoamingEnabled",
+  "PersonalHotspotEnabled",
+  "IsRoaming",
+  "IMEI",
+  "MEID",
+  "ModemFirmwareVersion",
+  "IsSupervised",
+  "IsDeviceLocatorServiceEnabled",
+  "IsActivationLockEnabled",
+  "IsDoNotDisturbInEffect",
+  "EASDeviceIdentifier",
+  "IsCloudBackupEnabled",
+  "OSUpdateSettings",
+  "LocalHostName",
+  "HostName",
+  "CatalogURL",
+  "IsDefaultCatalog",
+  "PreviousScanDate",
+  "PreviousScanResult",
+  "PerformPeriodicCheck",
+  "AutomaticCheckEnabled",
+  "BackgroundDownloadEnabled",
+  "AutomaticAppInstallationEnabled",
+  "AutomaticOSInstallationEnabled",
+  "AutomaticSecurityUpdatesEnabled",
+  "OSUpdateSettings",
+  "LocalHostName",
+  "HostName",
+  "IsMultiUser",
+  "IsMDMLostModeEnabled",
+  "MaximumResidentUsers",
+  "PushToken",
+  "DiagnosticSubmissionEnabled",
+  "AppAnalyticsEnabled",
+  "IsNetworkTethered",
+  "ServiceSubscriptions",
+]
+
 export const getDeviceDetails = async (
     tenantID: string,
     udid: string
@@ -131,9 +215,9 @@ export const sendCommand = async (tenant_id: string, udid: string, command: any)
   }
 };
 
-export const getWebhookEvents = async (udid: string): Promise<any[]> => {
+export const getWebhookEvents = async (tenant_id: string, udid: string): Promise<any[]> => {
   try {
-    const response = await axios.get(`/api/webhook_events/${udid}`);
+    const response = await axios.get(`/${tenant_id}/api/webhook_events/${udid}`);
     return response.data;
   } catch (error) {
     console.error("Error fetching webhook events:", error);

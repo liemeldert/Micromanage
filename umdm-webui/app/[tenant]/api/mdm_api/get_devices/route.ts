@@ -29,7 +29,6 @@ export const GET = auth(async (req, ctx) => {
                 password: API_PASSWORD,
             },
         });
-        console.log("response", response.data);
 
         return NextResponse.json(response.data);
     } catch (error) {

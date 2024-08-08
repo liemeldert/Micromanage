@@ -4,6 +4,7 @@ import Device from '@/models/device';
 import WebhookEvent from '@/models/WebhookEvent';
 import {parse} from '@plist/plist';
 import Tenant from "@/models/tenant";
+import device from "@/models/device";
 
 export async function POST(request: Request, {params}: { params: { tenant: string, secret: string } }) {
     await connectToDatabase();
@@ -42,6 +43,8 @@ export async function POST(request: Request, {params}: { params: { tenant: strin
         deviceInfo.UDID = udid;
         deviceInfo.tenant_id = tenant_id
 
+        console.log(`Got ${deviceInfo.topic}, ${deviceInfo.acknowledge_event.status} event for device ${udid}`);
+
         try {
             // Upsert the device information in the database
             const result = await Device.findOneAndUpdate(
@@ -55,6 +58,7 @@ export async function POST(request: Request, {params}: { params: { tenant: strin
             return NextResponse.json({success: false, error: (error as Error).message}, {status: 500});
         }
     } else {
+        console.log("No device information to update.");
         return NextResponse.json({success: true, message: 'Event logged but no device information to update.'});
     }
 }

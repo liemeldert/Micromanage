@@ -6,20 +6,21 @@ import {
     Box,
     Button,
     Card,
-    Center,
+    Center, Divider,
     Flex,
     FormControl,
     FormLabel,
     Heading,
     Icon,
     Input,
+    Image,
     Modal,
     ModalBody,
     ModalCloseButton,
     ModalContent,
     ModalFooter,
     ModalHeader,
-    ModalOverlay,
+    ModalOverlay, SimpleGrid,
     Spacer,
     Spinner,
     Table,
@@ -30,11 +31,11 @@ import {
     Thead,
     Tr,
     useDisclosure,
-    useToast,
+    useToast, HStack, VStack, TableContainer,
 } from "@chakra-ui/react";
-import {Device, getDeviceDetails, sendCommand} from "@/lib/micromdm";
+import {Device, device_queries, getDeviceDetails, sendCommand} from "@/lib/micromdm";
 import commands from "@/lib/commands.json";
-import WebhookEvents from "../../../../components/webhook_events";
+import WebhookEvents from "./webhook_events";
 
 const DeviceDetails: React.FC = () => {
     const toast = useToast();
@@ -94,81 +95,7 @@ const DeviceDetails: React.FC = () => {
             await sendCommand(tenant, udid as string, {
                 request_type: "DeviceInformation",
                 // todo: mode this elsewhere so I don't have to keep searing my eyes on this
-                queries: [
-                    "UDID",
-                    "Languages",
-                    "Locales",
-                    "DeviceID",
-                    "OrganizationInfo",
-                    "LastCloudBackupDate",
-                    "AwaitingConfiguration",
-                    "MDMOptions",
-                    "iTunesStoreAccountIsActive",
-                    "iTunesStoreAccountHash",
-                    "DeviceName",
-                    "OSVersion",
-                    "BuildVersion",
-                    "ModelName",
-                    "Model",
-                    "ProductName",
-                    "SerialNumber",
-                    "DeviceCapacity",
-                    "AvailableDeviceCapacity",
-                    "BatteryLevel",
-                    "CellularTechnology",
-                    "ICCID",
-                    "BluetoothMAC",
-                    "WiFiMAC",
-                    "EthernetMACs",
-                    "CurrentCarrierNetwork",
-                    "SubscriberCarrierNetwork",
-                    "CurrentMCC",
-                    "CurrentMNC",
-                    "SubscriberMCC",
-                    "SubscriberMNC",
-                    "SIMMCC",
-                    "SIMMNC",
-                    "SIMCarrierNetwork",
-                    "CarrierSettingsVersion",
-                    "PhoneNumber",
-                    "DataRoamingEnabled",
-                    "VoiceRoamingEnabled",
-                    "PersonalHotspotEnabled",
-                    "IsRoaming",
-                    "IMEI",
-                    "MEID",
-                    "ModemFirmwareVersion",
-                    "IsSupervised",
-                    "IsDeviceLocatorServiceEnabled",
-                    "IsActivationLockEnabled",
-                    "IsDoNotDisturbInEffect",
-                    "EASDeviceIdentifier",
-                    "IsCloudBackupEnabled",
-                    "OSUpdateSettings",
-                    "LocalHostName",
-                    "HostName",
-                    "CatalogURL",
-                    "IsDefaultCatalog",
-                    "PreviousScanDate",
-                    "PreviousScanResult",
-                    "PerformPeriodicCheck",
-                    "AutomaticCheckEnabled",
-                    "BackgroundDownloadEnabled",
-                    "AutomaticAppInstallationEnabled",
-                    "AutomaticOSInstallationEnabled",
-                    "AutomaticSecurityUpdatesEnabled",
-                    "OSUpdateSettings",
-                    "LocalHostName",
-                    "HostName",
-                    "IsMultiUser",
-                    "IsMDMLostModeEnabled",
-                    "MaximumResidentUsers",
-                    "PushToken",
-                    "DiagnosticSubmissionEnabled",
-                    "AppAnalyticsEnabled",
-                    "IsNetworkTethered",
-                    "ServiceSubscriptions",
-                ],
+                queries: device_queries,
             });
             toast({
                 title: "Ping sent successfully",
@@ -274,56 +201,113 @@ const DeviceDetails: React.FC = () => {
     }
 
     return (
-        <Box w="100%">
+        <Box maxW="100%">
             <Heading>{device.DeviceName}</Heading>
-            <Box mt={5}>
-                <Button
-                    onClick={() => {
-                        pingDevice();
-                    }}
-                >
-                    Ping device for new information
-                </Button>
-                <Text>UDID: {device.UDID}</Text>
-                <Text>Serial Number: {device.SerialNumber}</Text>
-                <Text>Model: {device.Model}</Text>
-                <Text>OS Version: {device.OSVersion}</Text>
-            </Box>
+            <HStack spacing={10} alignItems={"stretch"} overflowX={"scroll"} whiteSpace={"nowrap"} p={4} maxW={"90%"}>
+                <Card p={4} mt={5} flex={"1 0 0"} minW={"450px"}>
+                    <Center>
+                        <VStack>
+                            <Image src={`https://img.appledb.dev/device@256/${device.Model}/0.avif`} maxH={"256px"} maxW={"256px"} />
+                            <Box>
+                                <HStack>
+                                    <Button
+                                        onClick={() => {
+                                            pingDevice();
+                                        }}
+                                        w={"50%"}
+                                    >
+                                        Refresh
+                                    </Button>
+                                    <Button
+                                        onClick={() => {
+                                            pingDevice();
+                                        }}
+                                        w={"50%"}
+                                    >
+                                        Placeholder
+                                    </Button>
+                                </HStack>
+                                <Text>UDID: {device.UDID}</Text>
+                                <Text>Serial Number: {device.SerialNumber}</Text>
+                                <Text>Model: {device.Model}</Text>
+                                <Text>OS Version: {device.OSVersion}</Text>
+                            </Box>
+                        </VStack>
+                    </Center>
+                </Card>
 
-            <Heading size="md" mt={5}>
-                Advanced Device Commmands
-            </Heading>
-            <Box mt={"0.25rem"}>{renderCommandsBySection()}</Box>
+                <Card p={4} mt={5} flex={"1 0 0"} minW={"450px"}>
+                    <Heading>Placeholder</Heading>
+                </Card>
 
-            <Flex w="100%">
-                <Box>
+                <Card p={4} mt={5} flex={"1 0 0"} minW={"450px"}>
+                    <Heading>Placeholder</Heading>
+                </Card>
+
+                <Card p={4} mt={5} flex={"1 0 0"} minW={"450px"}>
+                    <Heading>Placeholder</Heading>
+                </Card>
+
+                <Card p={4} mt={5} flex={"1 0 0"} minW={"450px"}>
+                    <Heading>Placeholder</Heading>
+                </Card>
+
+                <Card p={4} mt={5} flex={"1 0 0"} minW={"450px"}>
+                    <Heading>Placeholder</Heading>
+                </Card>
+
+                <Card p={4} mt={5} flex={"1 0 0"} minW={"450px"}>
+                    <Heading>Placeholder</Heading>
+                </Card>
+
+                <Card p={4} mt={5} flex={"1 0 0"} minW={"450px"}>
+                    <Heading>Placeholder</Heading>
+                </Card>
+
+                <Box minW={"75%"} />
+            </HStack>
+
+
+            <Divider mt={8}/>
+
+            <SimpleGrid minChildWidth={"450px"} w="100%" spacing={10} mt={4}>
+                <Card p={4} maxH={"80%"} overflow={"scroll"} >
                     <Heading size="md" mt={5}>
                         Device Details
                     </Heading>
-                    <Table variant="simple">
-                        <Thead>
-                            <Tr>
-                                <Th>Field</Th>
-                                <Th>Value</Th>
-                            </Tr>
-                        </Thead>
-                        <Tbody>
-                            {Object.entries(device).map(([key, value]) => (
-                                <Tr key={key}>
-                                    <Td>{key}</Td>
-                                    <Td>
-                                        {Array.isArray(value) ? value.join(", ") : value?.toString()}
-                                    </Td>
+                    <TableContainer>
+                        <Table variant="simple">
+                            <Thead>
+                                <Tr>
+                                    <Th>Field</Th>
+                                    <Th>Value</Th>
                                 </Tr>
-                            ))}
-                        </Tbody>
-                    </Table>
-                </Box>
-                <Spacer/>
-                <Box flex="1">
+                            </Thead>
+                            <Tbody>
+                                {Object.entries(device).map(([key, value]) => (
+                                    <Tr key={key}>
+                                        <Td>{key}</Td>
+                                        <Td>
+                                            {Array.isArray(value) ? value.join(", ") : value?.toString()}
+                                        </Td>
+                                    </Tr>
+                                ))}
+                            </Tbody>
+                        </Table>
+                    </TableContainer>
+                </Card>
+
+                <Card p={4} maxH={"80%"} overflow={"scroll"} overflowX={"scroll"}>
+                    <Heading size="md" mt={5}>
+                        Advanced Device Commands
+                    </Heading>
+                    <Box mt={"0.25rem"}>{renderCommandsBySection()}</Box>
+                </Card>
+
+                <Card p={4} maxH={"80%"} overflow={"scroll"} overflowX={"scroll"}>
                     <WebhookEvents udid={device.UDID}/>
-                </Box>
-            </Flex>
+                </Card>
+            </SimpleGrid>
 
             <Modal isOpen={isOpen} onClose={onClose}>
                 <ModalOverlay/>

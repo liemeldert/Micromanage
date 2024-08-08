@@ -1,14 +1,17 @@
 import React, {useEffect, useState} from 'react';
 import {Box, Button, Code, Collapse, Heading, Text} from '@chakra-ui/react';
 import {getWebhookEvents} from '@/lib/micromdm';
+import {useParams} from "next/navigation";
 
 const WebhookEvents: React.FC<{ udid: string }> = ({udid}) => {
     const [events, setEvents] = useState<any[]>([]);
     const [expanded, setExpanded] = useState<number | null>(null);
 
+    const {tenant} = useParams() as { tenant: string };
+
     useEffect(() => {
         const fetchEvents = async () => {
-            const fetchedEvents = await getWebhookEvents(udid);
+            const fetchedEvents = await getWebhookEvents(tenant, udid);
             setEvents(fetchedEvents);
         };
 
