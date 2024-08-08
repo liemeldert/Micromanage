@@ -23,6 +23,7 @@ export async function POST(request: Request, {params}: { params: { tenant: strin
 
     if (checkin_event && checkin_event.message_type === "Authenticate") {
         const udid = checkin_event.udid;
+        console.log("Check in event for device:", udid);
 
         await sendCommand(tenant, udid as string, {
             request_type: "DeviceInformation",
