@@ -46,9 +46,12 @@ import {ChevronDownIcon} from '@chakra-ui/icons';
 import CenterCard from "@/app/components/CenterCard";
 import commands from "@/lib/commands.json";
 
-const bulkCommands = commands.filter((command: { name: string; }) =>
-    ['DeviceInformation', 'InstallProfile', 'RemoveProfile', 'EraseDevice', 'RestartDevice'].includes(command.name)
-);
+const bulkCommands = [
+    ...commands.filter((command: { name: string; }) =>
+        ['DeviceInformation', 'InstallProfile', 'RemoveProfile', 'EraseDevice', 'RestartDevice'].includes(command.name)
+    ),
+    { name: 'InstallSavedProfile', friendlyName: 'Install Saved Profile' }
+];
 
 const savePageSizeToLocalStorage = (pageSize: number) => {
     localStorage.setItem('pageSize', pageSize.toString());
@@ -70,9 +73,9 @@ const DeviceList: React.FC = () => {
     const [pageSize, setPageSize] = useState<number>(loadPageSizeFromLocalStorage());
     const [selectedDevices, setSelectedDevices] = useState<string[]>([]);
     const [bulkCommand, setBulkCommand] = useState<string>('');
-    const { isOpen, onOpen, onClose } = useDisclosure();
     const [selectedCommand, setSelectedCommand] = useState<any>(null);
     const [commandParams, setCommandParams] = useState<any>({});
+    const [profiles, setProfiles] = useState<any[]>([]);
 
 
     const rowHoverBg = useColorModeValue('gray.100', 'gray.700');
@@ -81,6 +84,7 @@ const DeviceList: React.FC = () => {
     const router = useRouter();
     const {tenant} = useParams() as { tenant: string; };
     const toast = useToast();
+    const { isOpen, onOpen: originalOnOpen, onClose } = useDisclosure();
 
     useEffect(() => {
         savePageSizeToLocalStorage(pageSize);
@@ -105,6 +109,34 @@ const DeviceList: React.FC = () => {
             fetchDevices();
         }
     }, [tenant]);
+
+    const onOpen = async () => {
+        setSelectedCommand(null);
+        setCommandParams({});
+        await fetchProfiles();
+        originalOnOpen();
+    };
+
+    const fetchProfiles = async () => {
+        try {
+            const response = await fetch(`/${tenant}/api/profiles`);
+            if (!response.ok) {
+                throw new Error('Failed to fetch profiles');
+            }
+            const data = await response.json();
+            setProfiles(data);
+        } catch (error) {
+            console.error('Error fetching profiles:', error);
+            toast({
+                title: "Error fetching profiles",
+                description: "Unable to load saved profiles. You may not be able to use the 'Install Saved Profile' command.",
+                status: "error",
+                duration: 5000,
+                isClosable: true,
+            });
+            setProfiles([]);
+        }
+    };
 
     const columnHelperShard = createColumnHelper<DeviceShard>();
     // yes this is bad, but I don't think that there's anything that I can really do about it.
@@ -274,7 +306,6 @@ const DeviceList: React.FC = () => {
             return;
         }
 
-        // Use the active table (either allDevicesTable or mdmTable)
         const activeTable = allDevicesTable.getSelectedRowModel().rows.length > 0 ? allDevicesTable : mdmTable;
         const selectedUDIDs = activeTable.getSelectedRowModel().rows.map(row => row.original.UDID);
 
@@ -294,6 +325,15 @@ const DeviceList: React.FC = () => {
                 command = {
                     request_type: 'DeviceInformation',
                     queries: device_queries
+                };
+            } else if (selectedCommand.name === 'InstallSavedProfile') {
+                const profile = profiles.find(p => p._id === commandParams.profileId);
+                if (!profile) {
+                    throw new Error('Selected profile not found');
+                }
+                command = {
+                    request_type: 'InstallProfile',
+                    payload: profile.profileData
                 };
             } else {
                 command = {
@@ -336,7 +376,7 @@ const DeviceList: React.FC = () => {
                 isClosable: true,
             });
         }
-    }
+    };
 
     const BulkCommandModal = () => (
         <Modal isOpen={isOpen} onClose={onClose}>
@@ -376,7 +416,29 @@ const DeviceList: React.FC = () => {
     );
 
     const renderCommandParams = () => {
-        if (!selectedCommand || !selectedCommand.parameters || selectedCommand.name === 'DeviceInformation') return null;
+        if (!selectedCommand) return null;
+
+        if (selectedCommand.name === 'DeviceInformation') return null;
+
+        if (selectedCommand.name === 'InstallSavedProfile') {
+            return (
+                <FormControl mt={4}>
+                    <FormLabel>Select Profile</FormLabel>
+                    <Select
+                        placeholder="Select a profile"
+                        onChange={(e) => setCommandParams({ profileId: e.target.value })}
+                    >
+                        {profiles.map(profile => (
+                            <option key={profile._id} value={profile._id}>
+                                {profile.name}
+                            </option>
+                        ))}
+                    </Select>
+                </FormControl>
+            );
+        }
+
+        if (!selectedCommand.parameters) return null;
 
         return Object.entries(selectedCommand.parameters).map(([key, param]: [string, any]) => (
             <FormControl key={key} mt={4}>
