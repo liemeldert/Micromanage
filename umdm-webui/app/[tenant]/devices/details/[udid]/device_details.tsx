@@ -270,7 +270,7 @@ const DeviceDetails: React.FC = () => {
 
             <Divider mt={8}/>
 
-            <SimpleGrid minChildWidth={"450px"} w="100%" spacing={10} mt={4}>
+            <SimpleGrid minChildWidth={"450px"} w="100%" spacing={10} mt={4} maxW={"100vw"}>
                 <Card p={4} maxH={"80%"} overflow={"scroll"} >
                     <Heading size="md" mt={5}>
                         Device Details
