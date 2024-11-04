@@ -15,6 +15,11 @@ const TenantSchema = new mongoose.Schema({
   mdm_secret: String,
 }, { timestamps: true });
 
+if (!process.env.DB_SECRET) {
+  console.error("DB Secret not set. Please set DB_SECRET environment variable. Until this is done, encryption will not work correctly.");
+}
+
+
 TenantSchema.plugin(fieldEncryption, {
   fields: ["mdm_secret"],
   secret: process.env.DB_SECRET || "PLEASE CHANGE THIS BY SETTING ENVIRONMENT VARIABLE", // todo:   find some other way to do this
