@@ -18,7 +18,7 @@
     "axios": "^1.8.2",
     "axios-curlirize": "^2.0.0",
     "framer-motion": "^11.2.14",
-    "mongoose": "^8.8.3",
+    "mongoose": "^8.9.5",
     "mongoose-field-encryption": "^7.0.1",
     "next": "14.2.25",
     "next-auth": "^5.0.0-beta.19",
