@@ -1,4 +1,3 @@
-# webhook_server.py
 from fastapi import FastAPI, Request
 import os
 from redis import Redis
