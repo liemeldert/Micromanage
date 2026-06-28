@@ -1,0 +1,139 @@
+"use client";
+
+import { useEffect } from "react";
+import { useRouter, usePathname } from "next/navigation";
+import {
+  AppShell,
+  Box,
+  Burger,
+  Group,
+  NavLink,
+  ScrollArea,
+  Text,
+  Avatar,
+  ActionIcon,
+  Divider,
+  useMantineColorScheme,
+} from "@mantine/core";
+import { useDisclosure } from "@mantine/hooks";
+import {
+  IconLayoutDashboard,
+  IconDeviceLaptop,
+  IconFileCode,
+  IconListCheck,
+  IconSettings,
+  IconLogout,
+  IconMoon,
+  IconSun,
+} from "@tabler/icons-react";
+import { useAuth } from "../../../lib/auth-context";
+
+const NAV_ITEMS = [
+  { label: "Dashboard",  icon: IconLayoutDashboard, href: "/dashboard" },
+  { label: "Devices",    icon: IconDeviceLaptop,    href: "/devices" },
+  { label: "Compliance", icon: IconFileCode,         href: "/compliance" },
+  { label: "Tasks",      icon: IconListCheck,        href: "/tasks" },
+  { label: "Settings",   icon: IconSettings,         href: "/settings" },
+];
+
+export default function DashboardLayout({ children }: { children: React.ReactNode }) {
+  const { isAuthenticated, email, logout } = useAuth();
+  const router = useRouter();
+  const pathname = usePathname();
+  const [opened, { toggle }] = useDisclosure();
+  const { colorScheme, toggleColorScheme } = useMantineColorScheme();
+
+  useEffect(() => {
+    if (!isAuthenticated) router.replace("/login");
+  }, [isAuthenticated, router]);
+
+  if (!isAuthenticated) return null;
+
+  return (
+    <AppShell
+      navbar={{ width: 220, breakpoint: "sm", collapsed: { mobile: !opened } }}
+      padding={0}
+    >
+      {/* ── Navbar ────────────────────────────────────────────────── */}
+      <AppShell.Navbar
+        style={{ background: "var(--mantine-color-dark-8, #1a1b1e)", borderRight: "none" }}
+      >
+        <AppShell.Section p="md">
+          <Group gap="xs">
+            <Burger opened={opened} onClick={toggle} hiddenFrom="sm" size="sm" color="white" />
+            <Text fw={700} fz="lg" c="white">
+              MicromanageIAC
+            </Text>
+          </Group>
+        </AppShell.Section>
+
+        <Divider color="dark.6" />
+
+        <AppShell.Section grow component={ScrollArea} p="xs" mt="xs">
+          {NAV_ITEMS.map((item) => {
+            const active = pathname === item.href || pathname.startsWith(item.href + "/");
+            return (
+              <NavLink
+                key={item.href}
+                label={item.label}
+                leftSection={<item.icon size={18} />}
+                active={active}
+                onClick={() => router.push(item.href)}
+                mb={4}
+                styles={{
+                  root: {
+                    borderRadius: 6,
+                    color: active ? "white" : "var(--mantine-color-dark-2)",
+                    "&:hover": { background: "var(--mantine-color-dark-6)" },
+                  },
+                }}
+              />
+            );
+          })}
+        </AppShell.Section>
+
+        <Divider color="dark.6" />
+
+        <AppShell.Section p="sm">
+          <Group justify="space-between">
+            <Group gap="xs">
+              <Avatar size="sm" color="blue" radius="xl">
+                {(email ?? "?")[0].toUpperCase()}
+              </Avatar>
+              <Text fz="xs" c="dark.2" truncate maw={110}>
+                {email}
+              </Text>
+            </Group>
+            <Group gap={4}>
+              <ActionIcon
+                variant="subtle"
+                color="gray"
+                size="sm"
+                onClick={() => toggleColorScheme()}
+                title="Toggle color scheme"
+              >
+                {colorScheme === "dark" ? <IconSun size={14} /> : <IconMoon size={14} />}
+              </ActionIcon>
+              <ActionIcon
+                variant="subtle"
+                color="red"
+                size="sm"
+                onClick={() => { logout(); router.push("/login"); }}
+                title="Sign out"
+              >
+                <IconLogout size={14} />
+              </ActionIcon>
+            </Group>
+          </Group>
+        </AppShell.Section>
+      </AppShell.Navbar>
+
+      {/* ── Main ─────────────────────────────────────────────────── */}
+      <AppShell.Main>
+        <Box p="lg" style={{ minHeight: "100vh" }}>
+          {children}
+        </Box>
+      </AppShell.Main>
+    </AppShell>
+  );
+}
