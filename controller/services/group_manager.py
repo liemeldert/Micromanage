@@ -96,6 +96,5 @@ class GroupManager:
                 return device_date.date() == cond_date.date()
         except:
             return False
-        
+
         return False
-l

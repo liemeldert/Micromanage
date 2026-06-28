@@ -6,6 +6,7 @@ import "./globals.css";
 import type { Metadata } from "next";
 import { ColorSchemeScript, MantineProvider } from "@mantine/core";
 import { Notifications } from "@mantine/notifications";
+import { ModalsProvider } from "@mantine/modals";
 import { AuthProvider } from "../../lib/auth-context";
 
 export const metadata: Metadata = {
@@ -22,7 +23,9 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
       <body>
         <MantineProvider defaultColorScheme="light">
           <Notifications />
-          <AuthProvider>{children}</AuthProvider>
+          <ModalsProvider>
+            <AuthProvider>{children}</AuthProvider>
+          </ModalsProvider>
         </MantineProvider>
       </body>
     </html>

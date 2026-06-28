@@ -49,10 +49,16 @@ class Group(BaseModel):
 class AppVersion(BaseModel):
     version: str
     s3_key: str
-    sha256: Optional[str]
+    sha256: str  # required: device verifies package integrity against this
     groups: List[str]
     conditions: Optional[List[Condition]] = []
     install_options: Optional[Dict[str, Any]] = {}
+
+    @validator('sha256')
+    def validate_sha256(cls, v):
+        if not re.match(r'^[a-fA-F0-9]{64}$', v or ''):
+            raise ValueError("sha256 must be a 64-character hex digest")
+        return v.lower()
 
 
 class App(BaseModel):
@@ -73,9 +79,30 @@ class Profile(BaseModel):
     name: str
     description: Optional[str]
     payload_type: Optional[str]
+    # "configuration" (managed config profile pushed to groups) or
+    # "enrollment" (Automated Device Enrollment / DEP profile).
+    type: Optional[str] = "configuration"
+    # Target platforms (iOS | macOS | tvOS); empty/None means all.
+    platforms: Optional[List[str]] = None
     groups: Optional[List[str]] = []
     dep_profile: Optional[bool] = False
-    payload: Dict[str, Any]
+    # A profile may carry a single payload (legacy) or a list of payloads.
+    payload: Optional[Dict[str, Any]] = None
+    payloads: Optional[List[Dict[str, Any]]] = None
+
+    @validator('type')
+    def validate_type(cls, v):
+        if v not in (None, 'configuration', 'enrollment'):
+            raise ValueError("type must be 'configuration' or 'enrollment'")
+        return v or 'configuration'
+
+    @validator('payloads', always=True)
+    def require_payload_for_config(cls, v, values):
+        ptype = values.get('type') or 'configuration'
+        is_dep = ptype == 'enrollment' or values.get('dep_profile')
+        if not is_dep and not v and not values.get('payload'):
+            raise ValueError("a configuration profile requires 'payload' or 'payloads'")
+        return v
 
 
 class TenantConfig(BaseModel):
@@ -252,8 +279,8 @@ class YAMLValidator:
                     if group not in group_names:
                         self.errors.append(f"Profile '{profile.id}' references unknown group: {group}")
 
-                # Validate payload
-                if not profile.payload:
+                # Validate payload (single or list)
+                if not profile.payload and not profile.payloads and profile.type != "enrollment":
                     self.warnings.append(f"Profile '{profile.id}' has empty payload")
 
                 profiles.append(profile)

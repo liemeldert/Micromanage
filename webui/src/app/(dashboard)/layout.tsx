@@ -19,7 +19,10 @@ import { useDisclosure } from "@mantine/hooks";
 import {
   IconLayoutDashboard,
   IconDeviceLaptop,
-  IconFileCode,
+  IconDeviceMobileShare,
+  IconStack2,
+  IconApps,
+  IconFileCertificate,
   IconListCheck,
   IconSettings,
   IconLogout,
@@ -29,25 +32,30 @@ import {
 import { useAuth } from "../../../lib/auth-context";
 
 const NAV_ITEMS = [
-  { label: "Dashboard",  icon: IconLayoutDashboard, href: "/dashboard" },
-  { label: "Devices",    icon: IconDeviceLaptop,    href: "/devices" },
-  { label: "Compliance", icon: IconFileCode,         href: "/compliance" },
-  { label: "Tasks",      icon: IconListCheck,        href: "/tasks" },
-  { label: "Settings",   icon: IconSettings,         href: "/settings" },
+  { label: "Dashboard",  icon: IconLayoutDashboard,    href: "/dashboard" },
+  { label: "Devices",    icon: IconDeviceLaptop,       href: "/devices" },
+  { label: "Enrollment", icon: IconDeviceMobileShare,  href: "/enrollment" },
+  { label: "Groups",     icon: IconStack2,             href: "/groups" },
+  { label: "Apps",       icon: IconApps,               href: "/apps" },
+  { label: "Profiles",   icon: IconFileCertificate,    href: "/profiles" },
+  { label: "Tasks",      icon: IconListCheck,          href: "/tasks" },
+  { label: "Settings",   icon: IconSettings,           href: "/settings" },
 ];
 
 export default function DashboardLayout({ children }: { children: React.ReactNode }) {
-  const { isAuthenticated, email, logout } = useAuth();
+  const { isAuthenticated, hydrated, email, logout } = useAuth();
   const router = useRouter();
   const pathname = usePathname();
   const [opened, { toggle }] = useDisclosure();
   const { colorScheme, toggleColorScheme } = useMantineColorScheme();
 
   useEffect(() => {
-    if (!isAuthenticated) router.replace("/login");
-  }, [isAuthenticated, router]);
+    // Wait until persisted auth is restored before deciding to redirect,
+    // otherwise a page refresh bounces a logged-in user to /login.
+    if (hydrated && !isAuthenticated) router.replace("/login");
+  }, [hydrated, isAuthenticated, router]);
 
-  if (!isAuthenticated) return null;
+  if (!hydrated || !isAuthenticated) return null;
 
   return (
     <AppShell

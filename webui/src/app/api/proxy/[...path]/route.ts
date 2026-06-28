@@ -13,9 +13,11 @@ async function proxy(req: NextRequest, segments: string[]) {
   const auth = req.headers.get("authorization");
   if (auth) headers["Authorization"] = auth;
 
+  // Use arrayBuffer (not text) so binary bodies — e.g. multipart app-package
+  // uploads — pass through to the controller without corruption.
   const body =
     req.method !== "GET" && req.method !== "HEAD"
-      ? await req.text()
+      ? await req.arrayBuffer()
       : undefined;
 
   let upstream: Response;

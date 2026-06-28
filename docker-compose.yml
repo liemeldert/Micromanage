@@ -50,8 +50,9 @@ services:
       - ./certs:/certs:ro
       - nanomdm_data:/var/lib/nanomdm
     ports:
-      - "443:443"   # MDM HTTPS endpoint for devices
-      - "9000:9000" # NanoMDM management API (keep internal in prod)
+      - "443:443"   # MDM HTTPS endpoint for devices (must be public)
+      # Management API: bound to loopback only — never expose to the network.
+      - "127.0.0.1:9000:9000"
     depends_on:
       postgres:
         condition: service_healthy
@@ -61,7 +62,7 @@ services:
       -cert /certs/server.crt
       -key /certs/server.key
       -api "${NANOMDM_API_KEY}"
-      -webhook-url "http://controller:8000/webhook/mdm"
+      -webhook-url "http://controller:8000/webhook/mdm?secret=${WEBHOOK_SECRET:?Set WEBHOOK_SECRET in .env}"
       -debug="${NANOMDM_DEBUG:-false}"
     restart: unless-stopped
 
@@ -88,6 +89,22 @@ services:
       # Public URL used in app manifests sent to devices
       PUBLIC_API_URL: ${PUBLIC_API_URL:-https://mdm.example.com}
       JWT_SECRET: ${JWT_SECRET:?Set JWT_SECRET in .env}
+      JWT_ISSUER: ${JWT_ISSUER:-micromanage-controller}
+      JWT_AUDIENCE: ${JWT_AUDIENCE:-micromanage-api}
+      # Shared secret NanoMDM presents on the webhook callback.
+      WEBHOOK_SECRET: ${WEBHOOK_SECRET:?Set WEBHOOK_SECRET in .env}
+      # Allowed browser origins for the REST API (the web UI proxies server-side).
+      CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS:-http://localhost:3000}
+      # ── Device enrollment (auto-generated enrollment profile) ──────────────
+      MDM_HOSTNAME: ${MDM_HOSTNAME:-mdm.example.com}
+      MDM_TOPIC: ${MDM_TOPIC:-}                # APNs push topic from your MDM push cert
+      MDM_SERVER_URL: ${MDM_SERVER_URL:-}      # defaults to https://${MDM_HOSTNAME}/mdm
+      SCEP_URL: ${SCEP_URL:-}                  # defaults to https://${MDM_HOSTNAME}/scep/<name>
+      SCEP_NAME: ${SCEP_NAME:-mdm_device_scep}
+      SCEP_CHALLENGE: ${SCEP_CHALLENGE:-}      # SCEP provisioner challenge
+      # Optional first-run admin bootstrap (leave unset to provision via the CLI).
+      CONTROLLER_BOOTSTRAP_ADMIN_EMAIL: ${CONTROLLER_BOOTSTRAP_ADMIN_EMAIL:-}
+      CONTROLLER_BOOTSTRAP_ADMIN_PASSWORD: ${CONTROLLER_BOOTSTRAP_ADMIN_PASSWORD:-}
     volumes:
       - ./yaml-configs:/app/yaml-configs
     ports:

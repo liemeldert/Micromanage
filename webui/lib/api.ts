@@ -35,7 +35,15 @@ async function request<T>(
     let detail = res.statusText;
     try {
       const body = await res.json();
-      detail = body.detail || JSON.stringify(body);
+      const d = body?.detail;
+      if (d && typeof d === "object") {
+        // Config validation errors arrive as { errors: [...], warnings: [...] }.
+        detail = Array.isArray(d.errors) && d.errors.length
+          ? d.errors.join("; ")
+          : JSON.stringify(d);
+      } else {
+        detail = d || JSON.stringify(body);
+      }
     } catch {}
     throw new ApiError(res.status, detail);
   }
@@ -46,11 +54,21 @@ async function request<T>(
 
 export const api = {
   // Auth
-  login(tenantId: string, email: string) {
+  login(tenantId: string, email: string, password: string) {
     return request<{ access_token: string; token_type: string; expires_in: number }>(
       "/api/v1/auth/login",
       undefined,
-      { method: "POST", body: JSON.stringify({ tenant_id: tenantId, user_email: email }) },
+      {
+        method: "POST",
+        body: JSON.stringify({ tenant_id: tenantId, user_email: email, password }),
+      },
+    );
+  },
+
+  me(token: string) {
+    return request<{ tenant_id: string; email: string; role: string; is_admin: boolean }>(
+      "/api/v1/auth/me",
+      token,
     );
   },
 
@@ -135,6 +153,29 @@ export const api = {
     );
   },
 
+  // App package upload (multipart). Returns the S3 key the controller stored it under.
+  async uploadApp(token: string, file: File, appId: string, version: string) {
+    const fd = new FormData();
+    fd.append("file", file);
+    const qs = new URLSearchParams({ app_id: appId, version }).toString();
+    // Direct fetch (not the JSON `request` helper) so the browser sets the
+    // multipart Content-Type + boundary itself.
+    const res = await fetch(proxyPath(`/api/v1/apps/upload?${qs}`), {
+      method: "POST",
+      headers: { Authorization: `Bearer ${token}` },
+      body: fd,
+    });
+    if (!res.ok) {
+      let detail = res.statusText;
+      try {
+        const body = await res.json();
+        detail = body.detail || JSON.stringify(body);
+      } catch {}
+      throw new ApiError(res.status, detail);
+    }
+    return res.json() as Promise<{ s3_key: string; message: string }>;
+  },
+
   // Tasks
   listTasks(
     token: string,
@@ -160,6 +201,15 @@ export const api = {
   // Tenant
   getTenant(token: string) {
     return request<TenantInfo>("/api/v1/tenant", token);
+  },
+
+  // Enrollment
+  getEnrollment(token: string) {
+    return request<EnrollmentDetails>("/api/v1/enrollment", token);
+  },
+  // Same-origin download path (through the proxy) for the enrollment profile.
+  enrollmentDownloadPath(tenantId: string, enrollToken: string) {
+    return `/api/proxy/api/v1/enroll/${encodeURIComponent(tenantId)}/${encodeURIComponent(enrollToken)}`;
   },
 
   // Health
@@ -203,10 +253,26 @@ export interface Task {
   details: Record<string, unknown>;
 }
 
+export interface EnrollmentDetails {
+  tenant_id: string;
+  organization: string;
+  mdm_server_url: string;
+  scep_url: string;
+  scep_name: string;
+  topic: string | null;
+  hostname: string;
+  enroll_url: string | null;
+  token: string;
+  configured: boolean;
+  missing: string[];
+}
+
 export interface TenantInfo {
   id: string;
   name: string;
   allowed_users: string[];
+  s3_config?: Record<string, unknown>;
+  auth_provider?: string;
   dep_enabled: boolean;
   created_at: string;
   is_active: boolean;

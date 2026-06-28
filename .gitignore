@@ -1,0 +1,40 @@
+# ── Secrets & local config ────────────────────────────────────────────────
+.env
+.env.*
+!.env.example
+!.env.prod.example
+
+# ── TLS / signing material ────────────────────────────────────────────────
+certs/
+*.pem
+*.key
+*.crt
+*.csr
+*.p12
+*.mobileconfig
+
+# ── Python ────────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+.mypy_cache/
+.pytest_cache/
+
+# ── Node / Next.js ────────────────────────────────────────────────────────
+node_modules/
+.next/
+webui/.next/
+*.tsbuildinfo
+
+# ── Editors / OS ──────────────────────────────────────────────────────────
+.idea/
+.vscode/
+.DS_Store
+
+# ── Local CLI state ───────────────────────────────────────────────────────
+.mmmdm/

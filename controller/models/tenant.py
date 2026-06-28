@@ -7,18 +7,47 @@ from datetime import datetime
 class Tenant(Model):
     id = fields.CharField(max_length=100, pk=True)
     name = fields.CharField(max_length=255)
-    allowed_users = fields.JSONField(default=list)  # List of user IDs
+    allowed_users = fields.JSONField(default=list)  # Deprecated: advisory only; authz is via User rows
     s3_config = fields.JSONField(default=dict)
+    # Per-tenant authentication backend, e.g. {"provider": "local"} or
+    # {"provider": "clerk", "issuer": "https://...", ...}. See controller.auth.
+    auth_config = fields.JSONField(default=dict)
     dep_enabled = fields.BooleanField(default=False)
     created_at = fields.DatetimeField(auto_now_add=True)
     updated_at = fields.DatetimeField(auto_now=True)
     is_active = fields.BooleanField(default=True)
-    
+
     class Meta:
         table = "tenants"
-    
+
+    @property
+    def auth_provider(self) -> str:
+        return (self.auth_config or {}).get("provider", "local")
+
     def is_user_allowed(self, user_id: str) -> bool:
         return user_id in self.allowed_users
+
+
+class User(Model):
+    """A principal that may authenticate to a tenant.
+
+    Local users authenticate with ``password_hash``; external (Clerk/OIDC)
+    users are matched by ``external_id`` (the provider subject) or ``email``.
+    The ``role`` column drives RBAC (admin | member).
+    """
+    id = fields.UUIDField(pk=True)
+    tenant = fields.ForeignKeyField("models.Tenant", related_name="users")
+    email = fields.CharField(max_length=255)
+    password_hash = fields.CharField(max_length=255, null=True)  # local auth only
+    role = fields.CharField(max_length=20, default="member")  # admin | member
+    external_id = fields.CharField(max_length=255, null=True)  # OIDC/Clerk subject
+    is_active = fields.BooleanField(default=True)
+    created_at = fields.DatetimeField(auto_now_add=True)
+    updated_at = fields.DatetimeField(auto_now=True)
+
+    class Meta:
+        table = "users"
+        unique_together = (("tenant", "email"),)
 
 class Device(Model):
     id = fields.UUIDField(pk=True)

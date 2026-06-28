@@ -44,10 +44,12 @@ cmd_env() {
   local db_pass; db_pass=$(openssl rand -hex 20)
   local api_key; api_key=$(openssl rand -hex 20)
   local jwt_sec; jwt_sec=$(openssl rand -hex 32)
+  local wh_sec;  wh_sec=$(openssl rand -hex 32)
 
   sed -i "s/changeme_strong_password/${db_pass}/" .env
   sed -i "s/changeme_random_api_key/${api_key}/" .env
   sed -i "s/changeme_long_random_secret/${jwt_sec}/" .env
+  sed -i "s/changeme_webhook_secret/${wh_sec}/" .env
 
   echo
   read -rp "Enter your MDM public hostname (e.g. mdm.example.com): " hostname
@@ -296,8 +298,9 @@ EOF
 
   ok "Tenant '${tenant_id}' scaffolded at ${tenant_dir}"
   echo
-  info "Next: create the tenant in the database via the controller API or CLI:"
-  echo "  docker compose exec controller python -m controller.tenant_cli create ${tenant_id}"
+  info "Next: create the tenant + an admin user in the database via the CLI:"
+  echo "  docker compose exec controller python -m controller.tenant_cli tenant create ${tenant_id} --name \"${tenant_name}\""
+  echo "  docker compose exec controller python -m controller.tenant_cli user add ${tenant_id} you@example.com --role admin"
 }
 
 # ── up ────────────────────────────────────────────────────────────────────────
@@ -418,9 +421,11 @@ cmd_dev() {
     local db_pass; db_pass=$(openssl rand -hex 20)
     local api_key; api_key=$(openssl rand -hex 20)
     local jwt_sec; jwt_sec=$(openssl rand -hex 32)
+    local wh_sec;  wh_sec=$(openssl rand -hex 32)
     sed -i "s/changeme_strong_password/${db_pass}/"  .env
     sed -i "s/changeme_random_api_key/${api_key}/"   .env
     sed -i "s/changeme_long_random_secret/${jwt_sec}/" .env
+    sed -i "s/changeme_webhook_secret/${wh_sec}/"    .env
     # Leave hostname as-is for now; NanoMDM still needs a cert
     ok ".env created"
   else

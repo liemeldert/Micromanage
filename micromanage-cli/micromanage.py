@@ -1,4 +1,4 @@
-mport typer
+import typer
 import httpx
 import yaml
 import json
@@ -40,14 +40,25 @@ class Config:
                 self.user_email = data.get('user_email')
     
     def save(self):
+        # The config holds a bearer token — keep it private to the current user.
         CONFIG_FILE.parent.mkdir(parents=True, exist_ok=True)
-        with open(CONFIG_FILE, 'w') as f:
+        try:
+            os.chmod(CONFIG_FILE.parent, 0o700)
+        except OSError:
+            pass
+        # Create with restrictive perms before writing any secret material.
+        fd = os.open(CONFIG_FILE, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, 'w') as f:
             json.dump({
                 'api_url': self.api_url,
                 'token': self.token,
                 'tenant_id': self.tenant_id,
                 'user_email': self.user_email
             }, f)
+        try:
+            os.chmod(CONFIG_FILE, 0o600)
+        except OSError:
+            pass
     
     def clear(self):
         self.token = None
@@ -69,7 +80,7 @@ async def make_request(method: str, endpoint: str, **kwargs):
     if config.token:
         headers['Authorization'] = f'Bearer {config.token}'
     
-    async with httpx.AsyncClient() as client:
+    async with httpx.AsyncClient(timeout=30.0) as client:
         response = await client.request(
             method,
             f"{config.api_url}/api/v1{endpoint}",
@@ -88,7 +99,8 @@ async def make_request(method: str, endpoint: str, **kwargs):
 @async_command
 async def login(
     tenant_id: str = typer.Option(..., prompt=True),
-    user_email: str = typer.Option(..., prompt=True)
+    user_email: str = typer.Option(..., prompt=True),
+    password: str = typer.Option(..., prompt=True, hide_input=True)
 ):
     """Login to MDM system"""
     with Progress(
@@ -97,11 +109,11 @@ async def login(
         console=console,
     ) as progress:
         progress.add_task("Authenticating...", total=None)
-        
+
         response = await make_request(
             'POST',
             '/auth/login',
-            json={'tenant_id': tenant_id, 'user_email': user_email}
+            json={'tenant_id': tenant_id, 'user_email': user_email, 'password': password}
         )
     
     if response.status_code == 200:

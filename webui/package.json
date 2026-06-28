@@ -30,6 +30,7 @@
     "next": "15.3.4",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
+    "react-qr-code": "^2.2.0",
     "recharts": "2"
   },
   "devDependencies": {

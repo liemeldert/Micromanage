@@ -7,6 +7,7 @@ import {
   Button,
   Center,
   Paper,
+  PasswordInput,
   Stack,
   Text,
   TextInput,
@@ -23,17 +24,18 @@ export default function LoginPage() {
   const [loading, setLoading] = useState(false);
 
   const form = useForm({
-    initialValues: { tenantId: "default", email: "" },
+    initialValues: { tenantId: "default", email: "", password: "" },
     validate: {
       tenantId: (v) => (v.trim() ? null : "Tenant ID required"),
       email: (v) => (/\S+@\S+\.\S+/.test(v) ? null : "Valid email required"),
+      password: (v) => (v ? null : "Password required"),
     },
   });
 
   const handleSubmit = async (values: typeof form.values) => {
     setLoading(true);
     try {
-      await login(values.tenantId.trim(), values.email.trim());
+      await login(values.tenantId.trim(), values.email.trim(), values.password);
       router.push("/dashboard");
     } catch (e) {
       const msg = e instanceof ApiError ? e.message : "Login failed";
@@ -82,6 +84,12 @@ export default function LoginPage() {
                   label="Email address"
                   placeholder="you@example.com"
                   {...form.getInputProps("email")}
+                />
+
+                <PasswordInput
+                  label="Password"
+                  placeholder="Your password"
+                  {...form.getInputProps("password")}
                 />
 
                 <Button type="submit" loading={loading} fullWidth mt="xs">

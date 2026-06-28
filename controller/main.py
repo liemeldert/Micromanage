@@ -7,8 +7,9 @@ from typing import Dict, Any
 import yaml
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
+from controller.auth.passwords import hash_password
 from controller.models.database import init_db, close_db
-from controller.models.tenant import Tenant, Device, AppDeployment, ProfileDeployment
+from controller.models.tenant import Tenant, User, Device, AppDeployment, ProfileDeployment
 from controller.services.app_manager import AppManager
 from controller.services.mdm_connector import MDMConnector
 from controller.services.profile_manager import ProfileManager
@@ -29,6 +30,9 @@ class MDMController:
         """Start the MDM controller"""
         await init_db()
 
+        # Optional first-run admin bootstrap (explicit + password-based).
+        await self._bootstrap_admin()
+
         # Schedule periodic sync
         self.scheduler.add_job(
             self.sync_all_tenants,
@@ -41,6 +45,42 @@ class MDMController:
         await self.sync_all_tenants()
 
         logger.info("MDM Controller started")
+
+    async def _bootstrap_admin(self):
+        """Create a first admin user from env vars, if configured.
+
+        Set CONTROLLER_BOOTSTRAP_ADMIN_EMAIL and CONTROLLER_BOOTSTRAP_ADMIN_PASSWORD
+        (and optionally CONTROLLER_BOOTSTRAP_TENANT, default "default") to seed an
+        initial local admin so someone can log in on a fresh deployment. This is a
+        no-op once that user exists, and is skipped entirely if the vars are unset —
+        there is no implicit credential-free admin.
+        """
+        email = os.getenv("CONTROLLER_BOOTSTRAP_ADMIN_EMAIL")
+        password = os.getenv("CONTROLLER_BOOTSTRAP_ADMIN_PASSWORD")
+        tenant_id = os.getenv("CONTROLLER_BOOTSTRAP_TENANT", "default")
+        if not email:
+            return
+        if not password:
+            logger.warning(
+                "CONTROLLER_BOOTSTRAP_ADMIN_EMAIL set but no password; skipping admin bootstrap"
+            )
+            return
+
+        tenant = await Tenant.get_or_none(id=tenant_id)
+        if not tenant:
+            tenant = await Tenant.create(
+                id=tenant_id, name=tenant_id, auth_config={"provider": "local"}
+            )
+            logger.info(f"Bootstrap created tenant '{tenant_id}'")
+
+        existing = await User.get_or_none(tenant=tenant, email=email)
+        if existing:
+            return
+        await User.create(
+            tenant=tenant, email=email, role="admin",
+            password_hash=hash_password(password),
+        )
+        logger.info(f"Bootstrap created admin user {email} for tenant {tenant_id}")
 
     async def sync_all_tenants(self):
         """Sync all active tenants, auto-creating DB rows for any YAML-configured tenants."""
@@ -113,7 +153,7 @@ class MDMController:
         # Process enrollment profiles
         profile_manager = ProfileManager(tenant)
         for profile in profiles_config.get('profiles', []):
-            if profile.get('dep_profile'):
+            if profile.get('dep_profile') or profile.get('type') == 'enrollment':
                 await profile_manager.create_enrollment_profile(profile)
 
         # Process devices

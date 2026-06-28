@@ -1,0 +1,195 @@
+# ── MicromanageIAC — production / Portainer stack ─────────────────────────────
+# Fully compose-based: pulls prebuilt images from ghcr, uses named volumes only
+# (safe to paste into Portainer's stack editor — no host bind mounts), generates
+# the NanoMDM TLS cert itself, and uploads the APNs push cert from environment.
+#
+# Set the variables from .env.prod.example in Portainer's "Environment variables"
+# section (or an attached .env). Nothing here depends on setup.sh.
+#
+# Image names default to this repo's ghcr path; override CONTROLLER_IMAGE /
+# WEBUI_IMAGE if your repository path differs.
+
+services:
+  postgres:
+    image: postgres:15-alpine
+    environment:
+      POSTGRES_DB: mdm_iac
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${DB_PASSWORD:?set DB_PASSWORD}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  # One-shot: generate a self-signed TLS cert into the shared volume if absent.
+  # For real device enrollment over the internet, replace it with a publicly
+  # trusted cert (drop server.crt/server.key into the `certs` volume) or front
+  # NanoMDM with a TLS-terminating reverse proxy.
+  certs-init:
+    image: alpine:3.20
+    volumes:
+      - certs:/certs
+    environment:
+      MDM_HOSTNAME: ${MDM_HOSTNAME:?set MDM_HOSTNAME}
+    command:
+      - sh
+      - -ec
+      - |
+        apk add --no-cache openssl >/dev/null
+        if [ ! -f /certs/server.crt ]; then
+          openssl req -x509 -newkey rsa:4096 -sha256 -days 3650 -nodes \
+            -keyout /certs/server.key -out /certs/server.crt \
+            -subj "/CN=$$MDM_HOSTNAME" \
+            -addext "subjectAltName=DNS:$$MDM_HOSTNAME,DNS:nanomdm,DNS:localhost,IP:127.0.0.1"
+          chmod 600 /certs/server.key
+          echo "certs-init: generated self-signed TLS cert for $$MDM_HOSTNAME"
+        else
+          echo "certs-init: TLS cert already present"
+        fi
+    restart: "no"
+
+  step-ca:
+    image: smallstep/step-ca:latest
+    environment:
+      DOCKER_STEPCA_INIT_NAME: ${STEPCA_NAME:-MicromanageCA}
+      DOCKER_STEPCA_INIT_DNS_NAMES: step-ca,localhost,${MDM_HOSTNAME:?set MDM_HOSTNAME}
+      DOCKER_STEPCA_INIT_REMOTE_MANAGEMENT: "true"
+      DOCKER_STEPCA_INIT_ACME: "true"
+    volumes:
+      - step_ca_data:/home/step
+    ports:
+      - "${STEPCA_PORT:-9443}:9000" # CA + SCEP endpoint (devices reach this for identity)
+    healthcheck:
+      test: ["CMD", "step", "ca", "health", "--ca-url", "https://localhost:9000"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    restart: unless-stopped
+
+  nanomdm:
+    image: ghcr.io/micromdm/nanomdm:latest
+    environment:
+      NANOMDM_API_KEY: ${NANOMDM_API_KEY:?set NANOMDM_API_KEY}
+    volumes:
+      - certs:/certs:ro
+      - nanomdm_data:/var/lib/nanomdm
+    ports:
+      - "${MDM_PORT:-443}:443" # device-facing MDM HTTPS endpoint (must be public)
+      # Management API stays loopback-only — never expose to the network.
+      - "127.0.0.1:9000:9000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      certs-init:
+        condition: service_completed_successfully
+    command: >
+      -storage postgres
+      -storage-dsn "postgres://postgres:${DB_PASSWORD}@postgres:5432/mdm_iac?sslmode=disable"
+      -cert /certs/server.crt
+      -key /certs/server.key
+      -api "${NANOMDM_API_KEY}"
+      -webhook-url "http://controller:8000/webhook/mdm?secret=${WEBHOOK_SECRET:?set WEBHOOK_SECRET}"
+      -debug="${NANOMDM_DEBUG:-false}"
+    restart: unless-stopped
+
+  # One-shot: upload the APNs push certificate to NanoMDM from base64 env vars.
+  # Obtain the cert from Apple (mdmcert.download or the Apple Push Cert Portal),
+  # then set PUSH_CERT_PEM_B64 / PUSH_KEY_PEM_B64 (base64 of the PEM files).
+  # Skips cleanly if not provided.
+  apns-init:
+    image: alpine:3.20
+    depends_on:
+      nanomdm:
+        condition: service_started
+    environment:
+      NANOMDM_API_KEY: ${NANOMDM_API_KEY:?set NANOMDM_API_KEY}
+      PUSH_CERT_PEM_B64: ${PUSH_CERT_PEM_B64:-}
+      PUSH_KEY_PEM_B64: ${PUSH_KEY_PEM_B64:-}
+    command:
+      - sh
+      - -ec
+      - |
+        apk add --no-cache curl >/dev/null
+        if [ -z "$$PUSH_CERT_PEM_B64" ]; then
+          echo "apns-init: PUSH_CERT_PEM_B64 not set; skipping push-cert upload"; exit 0
+        fi
+        echo "$$PUSH_CERT_PEM_B64" | base64 -d > /tmp/push.pem
+        echo "$$PUSH_KEY_PEM_B64"  | base64 -d > /tmp/push.key
+        echo "apns-init: waiting for nanomdm…"
+        i=0
+        until curl -sf -u "nanomdm:$$NANOMDM_API_KEY" http://nanomdm:9000/version >/dev/null 2>&1; do
+          i=$$((i+1)); [ $$i -gt 30 ] && { echo "apns-init: nanomdm unreachable"; exit 1; }; sleep 2
+        done
+        if cat /tmp/push.pem /tmp/push.key | curl -sf -u "nanomdm:$$NANOMDM_API_KEY" \
+             -X PUT -H "Content-Type: text/plain" --data-binary @- \
+             http://nanomdm:9000/v1/pushcert >/dev/null; then
+          echo "apns-init: APNs push certificate uploaded"
+        else
+          echo "apns-init: push-cert upload failed"; exit 1
+        fi
+    restart: "no"
+
+  controller:
+    image: ${CONTROLLER_IMAGE:-ghcr.io/lemurrhino/micromanage_2-controller:stable}
+    environment:
+      DATABASE_URL: postgres://postgres:${DB_PASSWORD}@postgres:5432/mdm_iac
+      NANOMDM_URL: http://nanomdm:9000
+      NANOMDM_API_KEY: ${NANOMDM_API_KEY:?set NANOMDM_API_KEY}
+      YAML_CONFIG_PATH: /app/yaml-configs
+      SYNC_INTERVAL_MINUTES: ${SYNC_INTERVAL_MINUTES:-5}
+      JWT_SECRET: ${JWT_SECRET:?set JWT_SECRET}
+      JWT_ISSUER: ${JWT_ISSUER:-micromanage-controller}
+      JWT_AUDIENCE: ${JWT_AUDIENCE:-micromanage-api}
+      WEBHOOK_SECRET: ${WEBHOOK_SECRET:?set WEBHOOK_SECRET}
+      CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS:-https://${MDM_HOSTNAME}}
+      PUBLIC_API_URL: ${PUBLIC_API_URL:?set PUBLIC_API_URL}
+      # Enrollment profile generation
+      MDM_HOSTNAME: ${MDM_HOSTNAME}
+      MDM_TOPIC: ${MDM_TOPIC:-}
+      MDM_SERVER_URL: ${MDM_SERVER_URL:-}
+      SCEP_URL: ${SCEP_URL:-}
+      SCEP_NAME: ${SCEP_NAME:-mdm_device_scep}
+      SCEP_CHALLENGE: ${SCEP_CHALLENGE:-}
+      # First-run admin (set on first deploy so you can log in, then remove)
+      CONTROLLER_BOOTSTRAP_ADMIN_EMAIL: ${CONTROLLER_BOOTSTRAP_ADMIN_EMAIL:-}
+      CONTROLLER_BOOTSTRAP_ADMIN_PASSWORD: ${CONTROLLER_BOOTSTRAP_ADMIN_PASSWORD:-}
+      CONTROLLER_BOOTSTRAP_TENANT: ${CONTROLLER_BOOTSTRAP_TENANT:-default}
+      # S3 / object store (optional — for hosting app packages)
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-}
+      AWS_DEFAULT_REGION: ${AWS_DEFAULT_REGION:-us-east-1}
+      AWS_S3_ENDPOINT_URL: ${AWS_S3_ENDPOINT_URL:-}
+      AWS_S3_BUCKET: ${AWS_S3_BUCKET:-}
+      AWS_S3_USE_SSL: ${AWS_S3_USE_SSL:-true}
+      AWS_S3_PATH_STYLE: ${AWS_S3_PATH_STYLE:-false}
+    volumes:
+      - yaml_configs:/app/yaml-configs
+    ports:
+      - "${CONTROLLER_PORT:-8001}:8001" # device-facing: app manifests + enrollment download
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+
+  webui:
+    image: ${WEBUI_IMAGE:-ghcr.io/lemurrhino/micromanage_2-webui:stable}
+    environment:
+      CONTROLLER_URL: http://controller:8001
+      NEXT_PUBLIC_APP_NAME: ${APP_NAME:-MicromanageIAC}
+    ports:
+      - "${WEBUI_PORT:-3000}:3000"
+    depends_on:
+      - controller
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+  nanomdm_data:
+  step_ca_data:
+  yaml_configs:
+  certs:

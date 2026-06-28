@@ -11,16 +11,32 @@ class ProfileManager:
         self.tenant = tenant
         self.group_manager = GroupManager(tenant.id)
     
+    @staticmethod
+    def _device_platform(device: Device) -> str:
+        """Best-effort map a device model to an Apple platform."""
+        model = (device.device_model or '').lower()
+        if 'mac' in model:
+            return 'macOS'
+        if 'appletv' in model or 'apple tv' in model:
+            return 'tvOS'
+        return 'iOS'  # iPhone / iPad / iPod
+
     async def evaluate_device_profiles(self, device: Device, profiles_config: List[Dict[str, Any]], groups_config: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """Determine which profiles should be installed on a device"""
         device_groups = self.group_manager.evaluate_device_groups(device, groups_config)
-        
+        device_platform = self._device_platform(device)
+
         profiles_to_install = []
-        
+
         for profile in profiles_config:
-            if profile.get('dep_profile'):
-                continue  # Skip DEP profiles for regular evaluation
-            
+            if profile.get('dep_profile') or profile.get('type') == 'enrollment':
+                continue  # Enrollment/DEP profiles are not pushed as managed config
+
+            # Skip profiles that don't target this device's platform.
+            profile_platforms = profile.get('platforms')
+            if profile_platforms and device_platform not in profile_platforms:
+                continue
+
             profile_groups = profile.get('groups', [])
             if any(group in device_groups for group in profile_groups):
                 profiles_to_install.append(profile)
@@ -126,9 +142,28 @@ class ProfileManager:
             return False
     
     def _build_profile_payload(self, profile_info: Dict[str, Any]) -> Dict[str, Any]:
-        """Build a configuration profile payload"""
+        """Build a configuration profile (PayloadContent) from one or more payloads.
+
+        Accepts either a single ``payload`` dict (legacy) or a ``payloads`` list.
+        Each contained payload is given the per-payload metadata Apple requires
+        (PayloadType is expected to already be set on each payload).
+        """
+        raw = profile_info.get('payloads')
+        if not raw:
+            single = profile_info.get('payload')
+            raw = [single] if single else []
+
+        content = []
+        for idx, payload in enumerate(raw):
+            item = dict(payload or {})
+            item.setdefault('PayloadVersion', 1)
+            item.setdefault('PayloadIdentifier', f"com.mdm.{self.tenant.id}.{profile_info['id']}.{idx}")
+            item.setdefault('PayloadUUID', str(uuid.uuid4()))
+            item.setdefault('PayloadDisplayName', profile_info.get('name', profile_info['id']))
+            content.append(item)
+
         return {
-            'PayloadContent': [profile_info['payload']],
+            'PayloadContent': content,
             'PayloadDisplayName': profile_info['name'],
             'PayloadIdentifier': f"com.mdm.{self.tenant.id}.{profile_info['id']}",
             'PayloadOrganization': self.tenant.name,
@@ -141,21 +176,25 @@ class ProfileManager:
     
     async def create_enrollment_profile(self, profile_config: Dict[str, Any]) -> EnrollmentProfile:
         """Create or update an enrollment profile"""
+        is_dep = profile_config.get('dep_profile', False) or profile_config.get('type') == 'enrollment'
+        payload = profile_config.get('payload') or {}
+
         profile, created = await EnrollmentProfile.get_or_create(
             tenant=self.tenant,
             profile_id=profile_config['id'],
             defaults={
                 'name': profile_config['name'],
                 'description': profile_config.get('description'),
-                'is_dep_profile': profile_config.get('dep_profile', False),
-                'payload': profile_config['payload']
+                'is_dep_profile': is_dep,
+                'payload': payload
             }
         )
-        
+
         if not created:
             profile.name = profile_config['name']
             profile.description = profile_config.get('description')
-            profile.payload = profile_config['payload']
+            profile.is_dep_profile = is_dep
+            profile.payload = payload
             await profile.save()
         
         return profile
