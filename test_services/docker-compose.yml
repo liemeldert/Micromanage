@@ -1,0 +1,35 @@
+services:
+  step-ca:
+    image: smallstep/step-ca:latest
+    container_name: step-ca
+    restart: unless-stopped
+    ports:
+      - "9009:9000"      # HTTPS API for management
+      - "8080:8080"      # HTTP for SCEP clients
+    environment:
+      - STEPPATH=/home/step
+      - DOCKER_STEPCA_INIT_NAME=Micromanage CA
+      - DOCKER_STEPCA_INIT_DNS_NAMES=micromanage.app,localhost
+      - DOCKER_STEPCA_INIT_PROVISIONER_NAME=admin
+      - DOCKER_STEPCA_INIT_PASSWORD=testing123
+    volumes:
+      - step_ca_data:/home/step
+    networks:
+      - ca_network
+    healthcheck:
+      test: ["CMD", "step", "ca", "health", "--ca-url", "https://localhost:9000", "--root", "/home/step/certs/root_ca.crt"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+volumes:
+  step_ca_data:
+    driver: local
+
+networks:
+  ca_network:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.25.0.0/16

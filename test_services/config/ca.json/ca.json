@@ -1,0 +1,47 @@
+{
+  "root": "/home/step/certs/root_ca.crt",
+  "crt": "/home/step/certs/intermediate_ca.crt",
+  "key": "/home/step/secrets/intermediate_ca_key",
+  "address": ":9000",
+  "insecureAddress": ":8080",
+  "dnsNames": ["ca.internal.corp", "step-ca", "localhost"],
+  "logger": {"format": "text"},
+  "db": {
+    "type": "postgresql",
+    "dataSource": "postgresql://stepca:password@postgres:5432/step_ca?sslmode=require",
+    "database": "step_ca"
+  },
+  "authority": {
+    "provisioners": [
+      {
+        "type": "JWK",
+        "name": "admin",
+        "key": {
+          "use": "sig",
+          "kty": "EC",
+          "kid": "admin-key-id",
+          "crv": "P-256",
+          "alg": "ES256",
+          "x": "example_x_value",
+          "y": "example_y_value"
+        },
+        "encryptedKey": "encrypted_key_content"
+      },
+      {
+        "type": "SCEP",
+        "name": "mdm_device_scep",
+        "forceCN": true,
+        "challenge": "mdm_enrollment_secret_2024",
+        "minimumPublicKeyLength": 2048,
+        "includeRoot": true,
+        "encryptionAlgorithmIdentifier": 2,
+        "capabilities": ["Renewal", "SHA-256", "AES", "SCEPStandard"],
+        "claims": {
+          "minTLSCertDuration": "5m",
+          "maxTLSCertDuration": "8760h",
+          "defaultTLSCertDuration": "720h"
+        }
+      }
+    ]
+  }
+}

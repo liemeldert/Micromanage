@@ -1,0 +1,39 @@
+# Dev overlay — use with:
+#   docker compose -f docker-compose.yml -f docker-compose.dev.yml up
+#
+# What changes vs production:
+#   - NanoMDM on 8443 instead of 443 (no root/privilege required)
+#   - step-ca behind --profile=ca (skip it unless testing real device enrollment)
+#   - Controller mounts live source, shorter sync interval
+#   - WebUI disabled here — run `yarn dev` on the host for HMR (see below)
+#
+# Recommended dev workflow:
+#   Terminal 1:  docker compose -f docker-compose.yml -f docker-compose.dev.yml up postgres nanomdm controller
+#   Terminal 2:  cd webui && yarn dev
+#
+# If you have a tunnel for real device testing:
+#   DEV_TUNNEL_URL=https://xxxx.ngrok.io docker compose ... up
+
+services:
+  nanomdm:
+    ports:
+      - "8443:443"   # use localhost:8443 instead of :443 (no root needed)
+      - "9000:9000"
+
+  step-ca:
+    profiles: ["ca"]   # only starts with: docker compose ... --profile ca up
+
+  controller:
+    volumes:
+      - ./yaml-configs:/app/yaml-configs
+      - ./controller:/app/controller   # live source mount
+    environment:
+      SYNC_INTERVAL_MINUTES: "1"         # reconcile every minute in dev
+      PUBLIC_API_URL: "${DEV_TUNNEL_URL:-http://localhost:8001}"
+    ports:
+      - "8000:8000"   # also expose the webhook port in dev (useful for ngrok tunnels)
+      - "8001:8001"
+
+  # Disable the built webui image — run `cd webui && yarn dev` on the host instead
+  webui:
+    profiles: ["webui-docker"]   # opt-in: docker compose ... --profile webui-docker up webui

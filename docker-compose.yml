@@ -1,0 +1,119 @@
+services:
+  # ── Infrastructure ──────────────────────────────────────────────────────────
+  postgres:
+    image: postgres:15-alpine
+    environment:
+      POSTGRES_DB: mdm_iac
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-changeme}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./controller/scripts/initdb.sql:/docker-entrypoint-initdb.d/init.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  # ── Certificate Authority / SCEP ─────────────────────────────────────────
+  # step-ca issues device identity certs during MDM enrollment via SCEP.
+  # On first boot it generates a root CA. Run `./setup.sh ca-init` to bootstrap.
+  step-ca:
+    image: smallstep/step-ca:latest
+    environment:
+      DOCKER_STEPCA_INIT_NAME: MicromanageCA
+      DOCKER_STEPCA_INIT_DNS_NAMES: step-ca,localhost,${MDM_HOSTNAME:-mdm.example.com}
+      DOCKER_STEPCA_INIT_REMOTE_MANAGEMENT: "true"
+      DOCKER_STEPCA_INIT_ACME: "true"
+    volumes:
+      - step_ca_data:/home/step
+    ports:
+      - "9443:9000"
+    healthcheck:
+      test: ["CMD", "step", "ca", "health", "--ca-url", "https://localhost:9000"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    restart: unless-stopped
+
+  # ── NanoMDM ──────────────────────────────────────────────────────────────
+  # Handles Apple MDM protocol (device check-in, commands, push).
+  # Requires TLS certs in ./certs/ — run `./setup.sh certs` to generate.
+  # Requires APNs push cert — run `./setup.sh apns` for guided setup.
+  nanomdm:
+    image: ghcr.io/micromdm/nanomdm:latest
+    environment:
+      NANOMDM_API_KEY: ${NANOMDM_API_KEY:?Set NANOMDM_API_KEY in .env}
+    volumes:
+      - ./certs:/certs:ro
+      - nanomdm_data:/var/lib/nanomdm
+    ports:
+      - "443:443"   # MDM HTTPS endpoint for devices
+      - "9000:9000" # NanoMDM management API (keep internal in prod)
+    depends_on:
+      postgres:
+        condition: service_healthy
+    command: >
+      -storage postgres
+      -storage-dsn "postgres://postgres:${DB_PASSWORD:-changeme}@postgres:5432/mdm_iac?sslmode=disable"
+      -cert /certs/server.crt
+      -key /certs/server.key
+      -api "${NANOMDM_API_KEY}"
+      -webhook-url "http://controller:8000/webhook/mdm"
+      -debug="${NANOMDM_DEBUG:-false}"
+    restart: unless-stopped
+
+  # ── Controller ───────────────────────────────────────────────────────────
+  # Python service: syncs YAML compliance state, enqueues MDM commands.
+  controller:
+    build:
+      context: .
+      dockerfile: Dockerfile.controller
+    environment:
+      DATABASE_URL: postgres://postgres:${DB_PASSWORD:-changeme}@postgres:5432/mdm_iac
+      NANOMDM_URL: http://nanomdm:9000
+      NANOMDM_API_KEY: ${NANOMDM_API_KEY:?Set NANOMDM_API_KEY in .env}
+      YAML_CONFIG_PATH: /app/yaml-configs
+      SYNC_INTERVAL_MINUTES: ${SYNC_INTERVAL_MINUTES:-5}
+      # S3 / object store (optional — for hosting app packages)
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-}
+      AWS_DEFAULT_REGION: ${AWS_DEFAULT_REGION:-us-east-1}
+      AWS_S3_ENDPOINT_URL: ${AWS_S3_ENDPOINT_URL:-}
+      AWS_S3_BUCKET: ${AWS_S3_BUCKET:-}
+      AWS_S3_USE_SSL: ${AWS_S3_USE_SSL:-true}
+      AWS_S3_PATH_STYLE: ${AWS_S3_PATH_STYLE:-false}
+      # Public URL used in app manifests sent to devices
+      PUBLIC_API_URL: ${PUBLIC_API_URL:-https://mdm.example.com}
+      JWT_SECRET: ${JWT_SECRET:?Set JWT_SECRET in .env}
+    volumes:
+      - ./yaml-configs:/app/yaml-configs
+    ports:
+      - "8001:8001" # REST API consumed by webui
+      # Port 8000 (webhook) is internal only — NanoMDM calls it directly
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # ── Web UI ───────────────────────────────────────────────────────────────
+  # Next.js 15 management console with YAML compliance editor.
+  webui:
+    build:
+      context: ./webui
+      dockerfile: Dockerfile
+    environment:
+      CONTROLLER_URL: http://controller:8001
+      NEXT_PUBLIC_APP_NAME: MicromanageIAC
+    ports:
+      - "3000:3000"
+    depends_on:
+      - controller
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+  nanomdm_data:
+  step_ca_data:

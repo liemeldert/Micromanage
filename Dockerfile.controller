@@ -1,0 +1,31 @@
+FROM python:3.11-slim
+
+WORKDIR /app
+
+# Install system dependencies
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+    gcc \
+    postgresql-client \
+    supervisor \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy requirements
+COPY controller/requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Copy application
+COPY controller/ /app/controller/
+
+# Create supervisor config
+RUN mkdir -p /etc/supervisor/conf.d
+COPY supervisord.conf /etc/supervisor/conf.d/supervisord.conf
+
+# Create log directory
+RUN mkdir -p /var/log
+
+# Create non-root user
+RUN useradd -m -u 1000 mdm && chown -R mdm:mdm /app && chown -R mdm:mdm /var/log
+USER mdm
+
+CMD ["/usr/bin/supervisord", "-c", "/etc/supervisor/conf.d/supervisord.conf"]
