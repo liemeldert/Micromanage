@@ -24,6 +24,11 @@ COPY supervisord.conf /etc/supervisor/conf.d/supervisord.conf
 # Create log directory
 RUN mkdir -p /var/log
 
+# Pre-create the config volume mountpoint. When a named volume is mounted here
+# (prod compose) Docker seeds its ownership from this path; without it the volume
+# defaults to root:root and the app (uid 1000) can't write tenant YAML.
+RUN mkdir -p /app/yaml-configs/tenants
+
 # Create non-root user
 RUN useradd -m -u 1000 mdm && chown -R mdm:mdm /app && chown -R mdm:mdm /var/log
 USER mdm

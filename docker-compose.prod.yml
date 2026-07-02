@@ -165,8 +165,20 @@ services:
         fi
     restart: "no"
 
+  # The controller runs as uid 1000 (non-root). Docker creates the named config
+  # volume below owned by root:root, so uid 1000 can't write tenant YAML — every
+  # config save 500s. This one-shot, idempotent step (root) fixes the ownership
+  # before the controller starts. Reuses the controller image (no extra pull).
+  yaml-init:
+    image: ${CONTROLLER_IMAGE:-ghcr.io/liemeldert/micromanage_2-controller:stable}
+    user: "0:0"
+    command: ["sh", "-c", "mkdir -p /app/yaml-configs/tenants && chown -R 1000:1000 /app/yaml-configs"]
+    volumes:
+      - yaml_configs:/app/yaml-configs
+    restart: "no"
+
   controller:
-    image: ${CONTROLLER_IMAGE:-ghcr.io/lemurrhino/micromanage_2-controller:stable}
+    image: ${CONTROLLER_IMAGE:-ghcr.io/liemeldert/micromanage_2-controller:stable}
     environment:
       DATABASE_URL: postgres://postgres:${DB_PASSWORD}@postgres:5432/mdm_iac
       NANOMDM_URL: http://nanomdm:9000
@@ -205,10 +217,12 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      yaml-init:
+        condition: service_completed_successfully
     restart: unless-stopped
 
   webui:
-    image: ${WEBUI_IMAGE:-ghcr.io/lemurrhino/micromanage_2-webui:stable}
+    image: ${WEBUI_IMAGE:-ghcr.io/liemeldert/micromanage_2-webui:stable}
     environment:
       CONTROLLER_URL: http://controller:8001
       NEXT_PUBLIC_APP_NAME: ${APP_NAME:-MicromanageIAC}

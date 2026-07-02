@@ -38,6 +38,17 @@ from controller.services import enrollment as enrollment_svc
 app = FastAPI(title="MDM IAC API", version="1.0.0")
 logger = logging.getLogger(__name__)
 
+# Base directory for per-tenant YAML config. Mirror the sync service
+# (controller/main.py), which honors YAML_CONFIG_PATH, so the API (writer) and the
+# sync loop (reader) always resolve to the same directory. Defaults to
+# ./yaml-configs (== /app/yaml-configs under the image WORKDIR).
+YAML_BASE = Path(os.getenv("YAML_CONFIG_PATH", "./yaml-configs"))
+
+
+def _tenant_dir(tenant_id: str) -> Path:
+    """Filesystem config dir for a tenant."""
+    return YAML_BASE / "tenants" / str(tenant_id)
+
 # Shared task manager so cancellation/state is visible across requests within
 # this process (a per-request instance made cancel a no-op).
 task_manager = TaskManager()
@@ -319,20 +330,28 @@ async def update_tenant(update: TenantUpdate, admin: Principal = Depends(require
     await tenant.save()
 
     # Mirror non-secret fields into the YAML config (atomic write).
-    yaml_path = Path(f"./yaml-configs/tenants/{tenant.id}/config.yaml")
+    yaml_path = _tenant_dir(tenant.id) / "config.yaml"
     if yaml_path.exists():
-        with open(yaml_path, "r") as f:
-            config = yaml.safe_load(f) or {}
+        try:
+            with open(yaml_path, "r") as f:
+                config = yaml.safe_load(f) or {}
 
-        config.setdefault("tenant", {})
-        config["tenant"]["name"] = tenant.name
-        config["tenant"]["allowed_users"] = tenant.allowed_users
-        if tenant.s3_config:
-            config["tenant"]["s3"] = tenant.s3_config
-        config["tenant"].setdefault("dep", {})
-        config["tenant"]["dep"]["enabled"] = tenant.dep_enabled
+            config.setdefault("tenant", {})
+            config["tenant"]["name"] = tenant.name
+            config["tenant"]["allowed_users"] = tenant.allowed_users
+            if tenant.s3_config:
+                config["tenant"]["s3"] = tenant.s3_config
+            config["tenant"].setdefault("dep", {})
+            config["tenant"]["dep"]["enabled"] = tenant.dep_enabled
 
-        _atomic_write_yaml(yaml_path, config)
+            _atomic_write_yaml(yaml_path, config)
+        except OSError as exc:
+            # The DB row is already saved; only the on-disk mirror failed.
+            logger.exception("Cannot mirror tenant config to %s", yaml_path)
+            raise HTTPException(
+                status_code=500,
+                detail=f"Tenant saved, but updating its config file failed: {exc}",
+            )
 
     return {"message": "Tenant updated successfully"}
 
@@ -345,7 +364,7 @@ async def get_yaml_config(config_type: str, principal: Principal = Depends(get_c
         raise HTTPException(status_code=400, detail="Invalid config type")
 
     tenant = principal.tenant
-    yaml_path = Path(f"./yaml-configs/tenants/{tenant.id}/{config_type}.yaml")
+    yaml_path = _tenant_dir(tenant.id) / f"{config_type}.yaml"
 
     if not yaml_path.exists():
         raise HTTPException(status_code=404, detail="Configuration not found")
@@ -377,17 +396,31 @@ async def update_yaml_config(
         raise HTTPException(status_code=400, detail="Invalid config type")
 
     tenant = principal.tenant
-    tenant_dir = Path(f"./yaml-configs/tenants/{tenant.id}")
+    tenant_dir = _tenant_dir(tenant.id)
     yaml_path = tenant_dir / f"{config_type}.yaml"
     # Tenants created via the admin console / bootstrap exist in the DB but may have
     # no on-disk config dir yet — scaffold it (and a minimal config.yaml) lazily so
     # the first save works instead of 404-ing.
-    tenant_dir.mkdir(parents=True, exist_ok=True)
-    config_yaml = tenant_dir / "config.yaml"
-    if not config_yaml.exists():
-        _atomic_write_yaml(
-            config_yaml,
-            {"tenant": {"id": tenant.id, "name": tenant.name, "allowed_users": []}},
+    try:
+        tenant_dir.mkdir(parents=True, exist_ok=True)
+        config_yaml = tenant_dir / "config.yaml"
+        if not config_yaml.exists():
+            _atomic_write_yaml(
+                config_yaml,
+                {"tenant": {"id": tenant.id, "name": tenant.name, "allowed_users": []}},
+            )
+    except OSError as exc:
+        # Almost always a permissions problem: the controller runs as uid 1000 but
+        # the yaml-configs volume is root-owned. Surface it instead of a bare 500.
+        logger.exception("Cannot prepare tenant config dir %s", tenant_dir)
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                f"Server cannot write the config directory ({tenant_dir}): {exc}. "
+                "The controller runs as uid 1000 — ensure the yaml-configs volume is "
+                "owned by 1000:1000 (the yaml-init service in docker-compose.prod.yml "
+                "handles this)."
+            ),
         )
 
     # Validate the candidate config against a private copy of the tenant dir so
@@ -420,7 +453,14 @@ async def update_yaml_config(
             status_code=400, detail={"errors": errors, "warnings": warnings}
         )
 
-    _atomic_write_yaml(yaml_path, config_data)
+    try:
+        _atomic_write_yaml(yaml_path, config_data)
+    except OSError as exc:
+        logger.exception("Cannot write %s", yaml_path)
+        raise HTTPException(
+            status_code=500,
+            detail=f"Server failed to persist {config_type} configuration: {exc}",
+        )
     return {"message": f"{config_type} configuration updated", "warnings": warnings}
 
 
@@ -428,7 +468,7 @@ async def update_yaml_config(
 async def validate_yaml_configs(principal: Principal = Depends(get_current_principal)):
     """Validate all YAML configurations"""
     tenant = principal.tenant
-    validator = YAMLValidator(Path(f"./yaml-configs/tenants/{tenant.id}"))
+    validator = YAMLValidator(_tenant_dir(tenant.id))
 
     valid, errors, warnings = validator.validate_all()
 
@@ -822,7 +862,7 @@ async def get_app_manifest(deployment_id: str):
 
     # Get app configuration
     tenant = deployment.tenant
-    yaml_path = Path(f"./yaml-configs/tenants/{tenant.id}/apps.yaml")
+    yaml_path = _tenant_dir(tenant.id) / "apps.yaml"
 
     if not yaml_path.exists():
         raise HTTPException(status_code=404, detail="App configuration not found")
