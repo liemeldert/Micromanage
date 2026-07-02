@@ -2,27 +2,19 @@
 #   docker compose -f docker-compose.yml -f docker-compose.dev.yml up
 #
 # What changes vs production:
-#   - NanoMDM on 8443 instead of 443 (no root/privilege required)
-#   - step-ca behind --profile=ca (skip it unless testing real device enrollment)
 #   - Controller mounts live source, shorter sync interval
 #   - WebUI disabled here — run `yarn dev` on the host for HMR (see below)
+# (NanoMDM serves HTTP on 8443 and validates device certs against step-ca, which now
+#  starts automatically as its dependency — both configured in the base compose.)
 #
 # Recommended dev workflow:
-#   Terminal 1:  docker compose -f docker-compose.yml -f docker-compose.dev.yml up postgres nanomdm controller
+#   Terminal 1:  docker compose -f docker-compose.yml -f docker-compose.dev.yml up postgres step-ca nanomdm controller
 #   Terminal 2:  cd webui && yarn dev
 #
 # If you have a tunnel for real device testing:
 #   DEV_TUNNEL_URL=https://xxxx.ngrok.io docker compose ... up
 
 services:
-  nanomdm:
-    ports:
-      - "8443:443"   # use localhost:8443 instead of :443 (no root needed)
-      - "127.0.0.1:9000:9000"   # management API — loopback only, even in dev
-
-  step-ca:
-    profiles: ["ca"]   # only starts with: docker compose ... --profile ca up
-
   controller:
     volumes:
       - ./yaml-configs:/app/yaml-configs

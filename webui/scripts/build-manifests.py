@@ -2,57 +2,64 @@
 """Generate webui/lib/manifests.generated.json from the community ProfileManifests
 project (https://github.com/ProfileManifests/ProfileManifests).
 
-Each Apple payload manifest plist is downloaded, its real (non-PFC, non-Payload-meta)
-subkeys are extracted with full metadata, per-platform variants (…-iOS / …-macOS) are
-merged with per-field platform tags, and a single level of nesting under a
-``PayloadContent`` container dict (SCEP, certificates) is flattened into the form
-(tagged with ``parent``). The emitted ``domain`` is the manifest's real ``pfm_domain``
-(which can differ from the filename, e.g. MCX-EnergySaver -> com.apple.MCX).
+Enumerates *every* Apple payload manifest (Manifests/ManifestsApple), rather than a
+hand-maintained subset, so the profile editor's payload catalog stays in sync with
+upstream. For each manifest the real (non-PFC, non-Payload-meta) subkeys are extracted
+with full metadata; per-platform variants (…-iOS / …-macOS / …-tvOS) are merged with
+per-field platform tags; a single level of nesting under a ``PayloadContent`` container
+dict (SCEP, certificates) is flattened (tagged with ``parent``). Title comes from the
+manifest's ``pfm_title`` and category from a keyword heuristic on the domain/title.
 
-So the editor always has the *full* key set per payload type rather than a hand-
-maintained subset. Run:  python3 webui/scripts/build-manifests.py
+Run:  python3 webui/scripts/build-manifests.py   (needs git + network)
 """
 
-import glob
 import json
 import os
 import plistlib
+import subprocess
 import tempfile
-import urllib.request
 
-BASE = "https://raw.githubusercontent.com/ProfileManifests/ProfileManifests/master/Manifests/ManifestsApple"
+REPO = "https://github.com/ProfileManifests/ProfileManifests"
+SUBDIR = os.path.join("Manifests", "ManifestsApple")
 
-# filename-base -> (display title, editor category). Emitted domain is pfm_domain.
-DOMAINS = {
-    "com.apple.wifi.managed": ("Wi-Fi", "Network"),
-    "com.apple.applicationaccess": ("Restrictions", "Security"),
-    "com.apple.mobiledevice.passwordpolicy": ("Passcode policy", "Security"),
-    "com.apple.MCX.FileVault2": ("FileVault", "Security"),
-    "com.apple.security.firewall": ("Firewall", "Security"),
-    "com.apple.security.scep": ("SCEP", "Security"),
-    "com.apple.security.pkcs1": ("Certificate (PEM/DER)", "Security"),
-    "com.apple.security.pkcs12": ("Certificate (PKCS#12)", "Security"),
-    "com.apple.security.root": ("Root Certificate", "Security"),
-    "com.apple.mail.managed": ("Mail", "Accounts"),
-    "com.apple.caldav.account": ("Calendar (CalDAV)", "Accounts"),
-    "com.apple.carddav.account": ("Contacts (CardDAV)", "Accounts"),
-    "com.apple.webClip.managed": ("Web Clip", "Web"),
-    "com.apple.dock": ("Dock", "System"),
-    "com.apple.loginwindow": ("Login Window", "System"),
-    "com.apple.SoftwareUpdate": ("Software Update", "System"),
-    "com.apple.notificationsettings": ("Notifications", "System"),
-    "com.apple.MCX-EnergySaver": ("Energy Saver", "System"),
-}
+# Manifests that aren't addable payloads (the profile wrapper, deprecated shells).
+SKIP_FILES = {"Configuration.plist"}
 
 META = {"PayloadType", "PayloadVersion", "PayloadIdentifier", "PayloadUUID",
         "PayloadDisplayName", "PayloadDescription", "PayloadOrganization"}
 TYPES = {"string", "integer", "real", "boolean", "array", "dictionary", "data", "date"}
 KEEP = {"iOS", "macOS", "tvOS"}
-SUFFIXES = ["", "-iOS", "-macOS", "-tvOS"]
+PLAT_SUFFIXES = ("-iOS", "-macOS", "-tvOS")
+
+# First matching keyword wins (order matters, e.g. firewall -> Network before Security).
+CATEGORY_RULES = [
+    ("Network", ("wifi", "vpn", "network", "proxy", "cellular", "apn", "dns",
+                 "firewall", "carrier", "relay", "airplay", "globalproxy", "hotspot")),
+    ("Certificates", ("scep", "pkcs", "certificate", ".cert", "acme", "adcertificate",
+                      "security.root", "activedirectorycertificate")),
+    ("Accounts", ("mail", "caldav", "carddav", "exchange", "ldap", "account",
+                  "subscribed", "googleaccount", "jabber", "aim", "contacts", "calendar")),
+    ("Restrictions", ("applicationaccess", "restriction", "parental", "screentime")),
+    ("Web", ("webclip", "webcontent", "domains", "safari")),
+    ("Security", ("security", "passcode", "passwordpolicy", "password", "filevault",
+                  "smartcard", "keychain", "identification", "screensaver", "gatekeeper",
+                  "systempolicy", "privacy")),
+    ("System", ("dock", "loginwindow", "softwareupdate", "energy", "mcx", "finder",
+                "timemachine", "timeserver", "setupassistant", "dictionary", "printing",
+                "menu", "desktop", "diagnostic", "notification", "system", "update", "mobileaccounts")),
+]
 
 
 def clean(s):
     return " ".join(str(s).split()) if s else None
+
+
+def categorize(domain, title):
+    hay = f"{domain} {title or ''}".lower()
+    for cat, kws in CATEGORY_RULES:
+        if any(k in hay for k in kws):
+            return cat
+    return "Other"
 
 
 def make_field(s, platforms, parent=None):
@@ -104,32 +111,37 @@ def extract(subkeys, platforms):
     return out
 
 
-def download(tmp):
-    for base in DOMAINS:
-        for sfx in SUFFIXES:
-            fn = f"{base}{sfx}.plist"
-            try:
-                with urllib.request.urlopen(f"{BASE}/{fn}", timeout=30) as r:
-                    open(os.path.join(tmp, fn), "wb").write(r.read())
-            except Exception:
-                pass
+def base_name(fn):
+    b = fn[:-6]  # strip ".plist"
+    for sfx in PLAT_SUFFIXES:
+        if b.endswith(sfx):
+            return b[: -len(sfx)]
+    return b
 
 
-def build(tmp):
-    result = []
-    for base, (title, category) in DOMAINS.items():
-        variants = []
-        for sfx in SUFFIXES:
-            p = os.path.join(tmp, f"{base}{sfx}.plist")
-            if os.path.exists(p):
-                d = plistlib.load(open(p, "rb"))
-                plats = ([sfx[1:]] if sfx
-                         else [x for x in (d.get("pfm_platforms") or ["iOS", "macOS"]) if x in KEEP] or ["iOS"])
-                variants.append((plats, d))
-        if not variants:
-            print(f"  skip (not found): {base}")
+def build(apple_dir):
+    # Group platform variants (…-iOS/…-macOS/…-tvOS) under a common base.
+    groups = {}
+    for fn in os.listdir(apple_dir):
+        if not fn.endswith(".plist") or fn in SKIP_FILES:
             continue
-        domain = variants[0][1].get("pfm_domain") or base
+        groups.setdefault(base_name(fn), []).append(fn)
+
+    result = []
+    for base, files in sorted(groups.items()):
+        variants = []
+        for fn in sorted(files):
+            d = plistlib.load(open(os.path.join(apple_dir, fn), "rb"))
+            sfx = next((s for s in PLAT_SUFFIXES if fn[:-6].endswith(s)), "")
+            plats = ([sfx[1:]] if sfx
+                     else [x for x in (d.get("pfm_platforms") or ["iOS", "macOS"]) if x in KEEP] or ["iOS"])
+            variants.append((plats, d))
+
+        domain = variants[0][1].get("pfm_domain")
+        if not domain:
+            continue
+        title = clean(variants[0][1].get("pfm_title")) or domain
+
         fields, order, unique, plats_all = {}, [], False, set()
         for plats, d in variants:
             if d.get("pfm_unique"):
@@ -142,20 +154,26 @@ def build(tmp):
                 else:
                     fields[key] = f
                     order.append(key)
-        result.append({"domain": domain, "title": title, "category": category,
+        if not order:  # meta-only manifest with no editable keys
+            continue
+        result.append({"domain": domain, "title": title, "category": categorize(domain, title),
                        "platforms": sorted(plats_all), "multiple": not unique,
                        "fields": [fields[k] for k in order]})
-        print(f"  {title} ({domain}): {len(order)} fields {sorted(plats_all)}")
     return result
 
 
 def main():
     dest = os.path.join(os.path.dirname(__file__), "..", "lib", "manifests.generated.json")
     with tempfile.TemporaryDirectory() as tmp:
-        download(tmp)
-        result = build(tmp)
+        subprocess.run(["git", "clone", "--depth", "1", "-q", REPO, tmp], check=True)
+        result = build(os.path.join(tmp, SUBDIR))
+    result.sort(key=lambda m: (m["category"], m["title"].lower()))
     json.dump(result, open(dest, "w"), ensure_ascii=False, separators=(",", ":"))
-    print(f"\nWrote {len(result)} manifests, {sum(len(m['fields']) for m in result)} fields -> {dest}")
+    by_cat = {}
+    for m in result:
+        by_cat[m["category"]] = by_cat.get(m["category"], 0) + 1
+    print(f"Wrote {len(result)} manifests, {sum(len(m['fields']) for m in result)} fields -> {dest}")
+    print("by category:", dict(sorted(by_cat.items())))
 
 
 if __name__ == "__main__":

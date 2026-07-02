@@ -69,8 +69,8 @@ groups:
 
 * **Local / dev:** `docker compose -f docker-compose.yml -f docker-compose.dev.yml up` (or `./setup.sh dev`).
 * **Server / Portainer (prod):** see [DEPLOY.md](DEPLOY.md) — a fully compose-based stack
-  ([`docker-compose.prod.yml`](docker-compose.prod.yml)) that pulls images from GHCR,
-  generates its TLS cert, and uploads the APNs push cert from environment variables.
+  ([`docker-compose.prod.yml`](docker-compose.prod.yml)) that pulls images from GHCR
+  and uploads the APNs push cert from environment variables (TLS terminated by your proxy).
 
 Container images are published to GHCR by [`.github/workflows/build-publish.yml`](.github/workflows/build-publish.yml):
 `:dev` on every push to the default branch, and `:stable` / `:latest` / `:<version>` on each GitHub release.

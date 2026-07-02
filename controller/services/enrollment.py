@@ -38,6 +38,14 @@ def _mdm_server_url() -> str:
     return os.getenv("MDM_SERVER_URL") or f"https://{_hostname()}/mdm"
 
 
+def _server_url_for(tenant_id: str) -> str:
+    """MDM ServerURL with the tenant encoded as a query param so NanoMDM forwards it
+    to the webhook (url_params), letting the controller map check-ins to the tenant."""
+    base = _mdm_server_url()
+    sep = "&" if "?" in base else "?"
+    return f"{base}{sep}tenant={tenant_id}"
+
+
 def _scep_url() -> str:
     return os.getenv("SCEP_URL") or f"https://{_hostname()}/scep/{_scep_name()}"
 
@@ -105,6 +113,9 @@ def build_enrollment_profile(tenant) -> Dict[str, Any]:
                     "Challenge": _scep_challenge(),
                     "Keysize": 2048,
                     "Key Type": "RSA",
+                    # 5 = digitalSignature(1) | keyEncipherment(4). keyEncipherment is
+                    # required: step-ca's SCEP flow encrypts the issued cert back to the
+                    # device key, so a signing-only key (1) would break SCEP. Keep at 5.
                     "Key Usage": 5,
                     "Retries": 3,
                     "RetryDelay": 10,
@@ -117,7 +128,7 @@ def build_enrollment_profile(tenant) -> Dict[str, Any]:
                 "PayloadUUID": str(uuid.uuid4()).upper(),
                 "PayloadDisplayName": "Mobile Device Management",
                 "IdentityCertificateUUID": scep_uuid,
-                "ServerURL": _mdm_server_url(),
+                "ServerURL": _server_url_for(tenant.id),
                 "Topic": _topic(),
                 "AccessRights": 8191,
                 "CheckOutWhenRemoved": True,

@@ -379,8 +379,16 @@ async def update_yaml_config(
     tenant = principal.tenant
     tenant_dir = Path(f"./yaml-configs/tenants/{tenant.id}")
     yaml_path = tenant_dir / f"{config_type}.yaml"
-    if not tenant_dir.exists():
-        raise HTTPException(status_code=404, detail="Tenant configuration not found")
+    # Tenants created via the admin console / bootstrap exist in the DB but may have
+    # no on-disk config dir yet — scaffold it (and a minimal config.yaml) lazily so
+    # the first save works instead of 404-ing.
+    tenant_dir.mkdir(parents=True, exist_ok=True)
+    config_yaml = tenant_dir / "config.yaml"
+    if not config_yaml.exists():
+        _atomic_write_yaml(
+            config_yaml,
+            {"tenant": {"id": tenant.id, "name": tenant.name, "allowed_users": []}},
+        )
 
     # Validate the candidate config against a private copy of the tenant dir so
     # cross-file checks run, without ever touching live files until it's valid.
@@ -946,6 +954,15 @@ async def download_enrollment_profile(tenant_id: str, token: str):
         raise HTTPException(status_code=404, detail="Not found")
     if not enrollment_svc.verify_enrollment_token(tenant_id, token):
         raise HTTPException(status_code=403, detail="Forbidden")
+
+    # Refuse to hand a device a structurally-valid but dead profile (empty APNs
+    # topic, SCEP challenge, or URLs) — it would install and never check in.
+    details = enrollment_svc.enrollment_details(tenant)
+    if not details["configured"]:
+        raise HTTPException(
+            status_code=503,
+            detail=f"Enrollment is not fully configured; missing: {', '.join(details['missing'])}",
+        )
 
     data = enrollment_svc.build_enrollment_mobileconfig(tenant)
     return Response(

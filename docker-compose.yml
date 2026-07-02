@@ -17,17 +17,42 @@ services:
     restart: unless-stopped
 
   # ── Certificate Authority / SCEP ─────────────────────────────────────────
-  # step-ca issues device identity certs during MDM enrollment via SCEP.
-  # On first boot it generates a root CA. Run `./setup.sh ca-init` to bootstrap.
+  # step-ca issues device identity certs during MDM enrollment via SCEP. On first
+  # boot it initialises an **RSA** CA chain (SCEP needs an RSA intermediate to
+  # decrypt the enrollment pkcsPKIEnvelope — step ca init only makes ECDSA) and
+  # registers the SCEP provisioner that devices enrol against.
   step-ca:
     image: smallstep/step-ca:latest
     environment:
-      DOCKER_STEPCA_INIT_NAME: MicromanageCA
-      DOCKER_STEPCA_INIT_DNS_NAMES: step-ca,localhost,${MDM_HOSTNAME:-mdm.example.com}
-      DOCKER_STEPCA_INIT_REMOTE_MANAGEMENT: "true"
-      DOCKER_STEPCA_INIT_ACME: "true"
+      STEPCA_NAME: ${STEPCA_NAME:-MicromanageCA}
+      STEPCA_PASSWORD: ${STEPCA_PASSWORD:-changeme-ca-password}   # encrypts the CA keys at rest
+      MDM_HOSTNAME: ${MDM_HOSTNAME:-mdm.example.com}
+      SCEP_NAME: ${SCEP_NAME:-mdm_device_scep}
+      SCEP_CHALLENGE: ${SCEP_CHALLENGE:-changeme-scep-challenge}  # must match the controller's SCEP_CHALLENGE
     volumes:
       - step_ca_data:/home/step
+    entrypoint: ["sh", "-ec"]
+    command:
+      - |
+        export STEPPATH=/home/step
+        PW="$$STEPPATH/password"
+        if [ ! -f "$$STEPPATH/config/ca.json" ]; then
+          echo "step-ca: first-run init with an RSA chain for SCEP…"
+          printf '%s' "$$STEPCA_PASSWORD" > "$$PW"
+          step ca init --name "$$STEPCA_NAME" --dns "step-ca,localhost,$$MDM_HOSTNAME" \
+            --provisioner admin --password-file "$$PW" --provisioner-password-file "$$PW" \
+            --address :9000 --acme
+          step certificate create "$$STEPCA_NAME Root CA" "$$STEPPATH/certs/root_ca.crt" "$$STEPPATH/secrets/root_ca_key" \
+            --profile root-ca --kty RSA --size 2048 --password-file "$$PW" --force
+          step certificate create "$$STEPCA_NAME Intermediate CA" "$$STEPPATH/certs/intermediate_ca.crt" "$$STEPPATH/secrets/intermediate_ca_key" \
+            --profile intermediate-ca --ca "$$STEPPATH/certs/root_ca.crt" --ca-key "$$STEPPATH/secrets/root_ca_key" \
+            --kty RSA --size 2048 --password-file "$$PW" --ca-password-file "$$PW" --force
+          step ca provisioner add "$$SCEP_NAME" --type SCEP --challenge "$$SCEP_CHALLENGE" \
+            --encryption-algorithm-identifier 2 --x509-default-dur 8760h --x509-max-dur 8760h \
+            --ca-config "$$STEPPATH/config/ca.json"
+          echo "step-ca: init complete (RSA chain + SCEP provisioner '$$SCEP_NAME')"
+        fi
+        exec step-ca "$$STEPPATH/config/ca.json" --password-file "$$PW"
     ports:
       - "9443:9000"
     healthcheck:
@@ -35,32 +60,64 @@ services:
       interval: 15s
       timeout: 5s
       retries: 5
-      start_period: 30s
+      start_period: 40s
     restart: unless-stopped
 
   # ── NanoMDM ──────────────────────────────────────────────────────────────
-  # Handles Apple MDM protocol (device check-in, commands, push).
-  # Requires TLS certs in ./certs/ — run `./setup.sh certs` to generate.
-  # Requires APNs push cert — run `./setup.sh apns` for guided setup.
+  # Handles the Apple MDM protocol (device check-in, commands, push). NanoMDM has
+  # no built-in TLS — it serves plain HTTP on :9000 behind a TLS-terminating proxy.
+  # It reads each device's identity cert from the signed `Mdm-Signature` header
+  # (the enrollment profile sets SignMessage=true) and validates the chain against
+  # step-ca's CA, so no client-cert / mTLS is needed at the proxy.
+  # Requires an APNs push cert — upload it to /v1/pushcert (see ./setup.sh apns).
+  # One-shot: NanoMDM needs its OWN database (its table names — devices, users… —
+  # collide with the controller's) plus its pgsql schema (the backend doesn't
+  # self-create tables). Idempotent; the schema ref must match the nanomdm image tag.
+  nanomdm-schema:
+    image: postgres:15-alpine
+    environment:
+      PGPASSWORD: ${DB_PASSWORD:-changeme}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    entrypoint: ["sh", "-ec"]
+    command:
+      - |
+        psql -h postgres -U postgres -tAc "SELECT 1 FROM pg_database WHERE datname='nanomdm'" | grep -q 1 \
+          || psql -h postgres -U postgres -c "CREATE DATABASE nanomdm"
+        if psql -h postgres -U postgres -d nanomdm -tAc "select to_regclass('public.push_certs')" | grep -q push_certs; then
+          echo "nanomdm-schema: tables already present"
+        else
+          echo "nanomdm-schema: applying NanoMDM 0.9.0 pgsql schema to db 'nanomdm'…"
+          wget -qO- https://raw.githubusercontent.com/micromdm/nanomdm/v0.9.0/storage/pgsql/schema.sql \
+            | psql -h postgres -U postgres -d nanomdm -v ON_ERROR_STOP=1
+          echo "nanomdm-schema: done"
+        fi
+    restart: "no"
+
   nanomdm:
-    image: ghcr.io/micromdm/nanomdm:latest
+    image: ghcr.io/micromdm/nanomdm:0.9.0
     environment:
       NANOMDM_API_KEY: ${NANOMDM_API_KEY:?Set NANOMDM_API_KEY in .env}
     volumes:
-      - ./certs:/certs:ro
+      - step_ca_data:/stepca:ro   # read step-ca's CA certs to validate device identity certs
       - nanomdm_data:/var/lib/nanomdm
     ports:
-      - "443:443"   # MDM HTTPS endpoint for devices (must be public)
+      - "8443:9000"   # device-facing MDM endpoint (HTTP — front it with your TLS proxy)
       # Management API: bound to loopback only — never expose to the network.
       - "127.0.0.1:9000:9000"
     depends_on:
       postgres:
         condition: service_healthy
+      step-ca:
+        condition: service_healthy
+      nanomdm-schema:
+        condition: service_completed_successfully
     command: >
-      -storage postgres
-      -storage-dsn "postgres://postgres:${DB_PASSWORD:-changeme}@postgres:5432/mdm_iac?sslmode=disable"
-      -cert /certs/server.crt
-      -key /certs/server.key
+      -storage pgsql
+      -storage-dsn "postgres://postgres:${DB_PASSWORD:-changeme}@postgres:5432/nanomdm?sslmode=disable"
+      -ca /stepca/certs/root_ca.crt
+      -intermediate /stepca/certs/intermediate_ca.crt
       -api "${NANOMDM_API_KEY}"
       -webhook-url "http://controller:8000/webhook/mdm?secret=${WEBHOOK_SECRET:?Set WEBHOOK_SECRET in .env}"
       -debug="${NANOMDM_DEBUG:-false}"
@@ -101,7 +158,8 @@ services:
       MDM_SERVER_URL: ${MDM_SERVER_URL:-}      # defaults to https://${MDM_HOSTNAME}/mdm
       SCEP_URL: ${SCEP_URL:-}                  # defaults to https://${MDM_HOSTNAME}/scep/<name>
       SCEP_NAME: ${SCEP_NAME:-mdm_device_scep}
-      SCEP_CHALLENGE: ${SCEP_CHALLENGE:-}      # SCEP provisioner challenge
+      # Must match step-ca's SCEP_CHALLENGE (same default) so the provisioner accepts enrollments.
+      SCEP_CHALLENGE: ${SCEP_CHALLENGE:-changeme-scep-challenge}
       # Optional first-run admin bootstrap (leave unset to provision via the CLI).
       CONTROLLER_BOOTSTRAP_ADMIN_EMAIL: ${CONTROLLER_BOOTSTRAP_ADMIN_EMAIL:-}
       CONTROLLER_BOOTSTRAP_ADMIN_PASSWORD: ${CONTROLLER_BOOTSTRAP_ADMIN_PASSWORD:-}

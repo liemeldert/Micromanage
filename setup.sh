@@ -4,7 +4,6 @@
 #   ./setup.sh               → interactive full setup (production)
 #   ./setup.sh dev           → laptop/dev setup (no root, HMR, no real devices needed)
 #   ./setup.sh env           → generate .env from .env.example
-#   ./setup.sh certs         → generate self-signed TLS certs for NanoMDM
 #   ./setup.sh apns          → guided Apple Push Notification cert setup
 #   ./setup.sh push-cert     → upload APNs cert to running NanoMDM
 #   ./setup.sh tenant <id>   → scaffold YAML configs for a new tenant
@@ -426,27 +425,13 @@ cmd_dev() {
     sed -i "s/changeme_random_api_key/${api_key}/"   .env
     sed -i "s/changeme_long_random_secret/${jwt_sec}/" .env
     sed -i "s/changeme_webhook_secret/${wh_sec}/"    .env
-    # Leave hostname as-is for now; NanoMDM still needs a cert
     ok ".env created"
   else
     ok ".env already exists — skipping"
   fi
   echo
-
-  # 2. TLS cert for NanoMDM (self-signed, localhost)
-  if [[ ! -f certs/server.crt ]]; then
-    info "Generating self-signed TLS cert for NanoMDM (localhost)..."
-    mkdir -p certs
-    openssl req -x509 -newkey rsa:2048 -sha256 -days 3650 -nodes \
-      -keyout certs/server.key -out certs/server.crt \
-      -subj "/CN=localhost" \
-      -addext "subjectAltName=DNS:localhost,DNS:nanomdm,IP:127.0.0.1" 2>/dev/null
-    chmod 600 certs/server.key
-    ok "TLS cert written to certs/"
-  else
-    ok "TLS cert already exists — skipping"
-  fi
-  echo
+  # NanoMDM no longer needs its own TLS cert — it serves plain HTTP and validates
+  # device identity certs against step-ca's CA (wired in the compose).
 
   # 3. Ensure yaml-configs is user-writable (Docker may have created it as root)
   if [[ -d yaml-configs && ! -w yaml-configs ]]; then
@@ -466,13 +451,13 @@ cmd_dev() {
   fi
   echo
 
-  # 4. Start infrastructure services (skip step-ca and webui-docker)
-  info "Starting infrastructure services (postgres, nanomdm, controller)..."
-  info "NanoMDM will be on https://localhost:8443 (no root required)"
+  # 4. Start infrastructure services (step-ca issues the device certs NanoMDM validates)
+  info "Starting infrastructure services (postgres, step-ca, nanomdm, controller)..."
+  info "NanoMDM will be on http://localhost:8443 (plain HTTP, no root required)"
   docker compose \
     -f docker-compose.yml \
     -f docker-compose.dev.yml \
-    up -d postgres nanomdm controller
+    up -d postgres step-ca nanomdm controller
   echo
   ok "Infrastructure is up."
   echo
@@ -484,7 +469,7 @@ cmd_dev() {
   echo
   echo -e "  Then open ${GRN}http://localhost:3000${NC}"
   echo -e "  Controller API: ${GRN}http://localhost:8001/docs${NC}"
-  echo -e "  NanoMDM API:    ${GRN}https://localhost:9000${NC} (self-signed cert)"
+  echo -e "  NanoMDM API:    ${GRN}http://localhost:9000${NC} (loopback mgmt API)"
   echo
 
   # 6. Tunnel hint

@@ -38,7 +38,15 @@ export interface ManifestField {
   parent?: string; // nested container key (e.g. "PayloadContent" for SCEP/certs)
 }
 
-export type PayloadCategory = "Network" | "Accounts" | "Security" | "System" | "Web";
+export type PayloadCategory =
+  | "Network"
+  | "Security"
+  | "Certificates"
+  | "Accounts"
+  | "Web"
+  | "Restrictions"
+  | "System"
+  | "Other";
 
 export interface PayloadManifest {
   domain: string;
@@ -93,7 +101,9 @@ export function fieldSupportsPlatforms(f: ManifestField, platforms?: Platform[])
 export function manifestsByCategory(
   platforms?: Platform[],
 ): { category: PayloadCategory; items: PayloadManifest[] }[] {
-  const cats: PayloadCategory[] = ["Network", "Security", "Accounts", "Web", "System"];
+  const cats: PayloadCategory[] = [
+    "Network", "Security", "Certificates", "Accounts", "Web", "Restrictions", "System", "Other",
+  ];
   return cats
     .map((category) => ({
       category,

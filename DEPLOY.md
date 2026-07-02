@@ -1,8 +1,8 @@
 # Deploying MicromanageIAC (Portainer / Docker Compose)
 
 A fully compose-based deployment — no `setup.sh`. The stack pulls prebuilt images
-from GHCR, generates its own TLS cert, and uploads the APNs push cert from
-environment variables. Use [`docker-compose.prod.yml`](docker-compose.prod.yml)
+from GHCR and uploads the APNs push cert from environment variables; TLS is
+terminated by your reverse proxy (§6). Use [`docker-compose.prod.yml`](docker-compose.prod.yml)
 and the variables from [`.env.prod.example`](.env.prod.example).
 
 ## 1. Prerequisites
@@ -51,9 +51,8 @@ Under **Environment variables**, add the values from `.env.prod.example`. At min
 + `CONTROLLER_BOOTSTRAP_ADMIN_PASSWORD`. Set `CONTROLLER_IMAGE` / `WEBUI_IMAGE` if
 your GHCR path differs from the defaults.
 
-Deploy the stack. On first boot: `certs-init` writes a self-signed TLS cert,
-the controller creates the bootstrap admin, and `apns-init` uploads the push cert
-(if provided).
+Deploy the stack. On first boot: step-ca initialises its CA, the controller creates
+the bootstrap admin, and `apns-init` uploads the push cert (if provided).
 
 ## 5. First login & enrollment
 
@@ -73,29 +72,33 @@ docker compose -f docker-compose.prod.yml exec controller \
 
 ## 6. Production topology (TLS + SCEP)
 
-Apple requires **HTTPS** for every device-facing endpoint, and the controller/webui
-serve plain HTTP internally. So for real enrollment put a **TLS-terminating reverse
-proxy** (Traefik/Caddy/nginx) in front and route your public hostname to:
+Apple requires **HTTPS** for every device-facing endpoint. Every service here serves
+**plain HTTP** (NanoMDM included — it has no built-in TLS), so put a **TLS-terminating
+reverse proxy** (Traefik/Caddy/nginx/NPM) in front and route your public hostname to:
 
 | Public path/host | Internal target |
 | --- | --- |
-| MDM endpoint (`/mdm`, `/checkin`) | `nanomdm:443` (or terminate TLS at the proxy → NanoMDM) |
+| MDM endpoint (`/mdm`, `/checkin`) | `nanomdm:9000` (plain HTTP — proxy passes headers through) |
 | App manifests + enrollment (`/api/...`) | `controller:8001` |
 | SCEP (`/scep/...`) | `step-ca:9000` |
 | Admin web UI | `webui:3000` |
 
-Then set `PUBLIC_API_URL`, `MDM_SERVER_URL`, and `SCEP_URL` to those **public HTTPS**
-URLs. `certs-init` only generates a self-signed internal cert so the stack boots; it
-is not sufficient for devices on its own.
+No client-cert / mTLS config is needed at the proxy: the enrollment profile sets
+`SignMessage=true`, so each device signs its check-ins and NanoMDM reads the identity
+cert from the `Mdm-Signature` header, validating it against step-ca's CA (wired via
+`-ca`/`-intermediate`). Just forward the request headers (proxies do by default).
 
-**SCEP provisioner:** step-ca needs a SCEP provisioner matching `SCEP_NAME` /
-`SCEP_CHALLENGE`. After first boot, add it once:
+Then set `PUBLIC_API_URL`, `MDM_SERVER_URL`, and `SCEP_URL` to those **public HTTPS**
+URLs.
+
+**SCEP provisioner:** created automatically on step-ca's first boot from `SCEP_NAME`
+/ `SCEP_CHALLENGE` (step-ca also initialises an RSA CA chain, which SCEP requires). No
+manual step. To change the challenge later, run:
 
 ```sh
 docker compose -f docker-compose.prod.yml exec step-ca \
-  step ca provisioner add mdm_device_scep --type SCEP \
-  --challenge "$SCEP_CHALLENGE" --encryption-algorithm-identifier 2
-# then restart step-ca
+  step ca provisioner update mdm_device_scep --challenge "$NEW_CHALLENGE"
+# then restart step-ca, and update SCEP_CHALLENGE in the controller env to match
 ```
 
 The Enrollment page shows exactly which of these values are still missing.

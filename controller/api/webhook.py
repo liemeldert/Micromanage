@@ -35,25 +35,17 @@ async def mdm_webhook(request: Request):
     if not _authorized(request):
         raise HTTPException(status_code=403, detail="Forbidden")
 
+    payload = await request.json()
+    logger.info(f"Received MDM webhook: topic={payload.get('topic', 'unknown')}")
     try:
-        # Get webhook payload
-        payload = await request.json()
-
-        # Log webhook for debugging
-        logger.info(f"Received MDM webhook: {payload.get('message_type', 'unknown')}")
-
-        # Process webhook
-        handler = WebhookHandler()
-        await handler.handle_webhook(payload)
-
+        await WebhookHandler().handle_webhook(payload)
         return {"status": "success"}
-
-    except HTTPException:
-        raise
-    except Exception as e:
-        # Log the detail server-side; do not leak internals to the caller.
-        logger.error(f"Error processing webhook: {e}")
-        raise HTTPException(status_code=500, detail="Internal error processing webhook")
+    except Exception:
+        # Webhook delivery is best-effort: never return 5xx to NanoMDM — that would
+        # just spam its logs and the device's MDM flow must not depend on the
+        # controller recording the event. Log the full traceback for diagnosis.
+        logger.exception(f"Error processing webhook (topic={payload.get('topic')})")
+        return {"status": "error", "detail": "logged"}
 
 
 # The webhook runs as its own process (supervisord) and needs its own DB

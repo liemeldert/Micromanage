@@ -149,7 +149,7 @@ class Task(Model):
             'id': str(self.id),
             'type': self.type,
             'status': self.status,
-            'device_id': str(self.device.id) if self.device else None,
+            'device_id': str(self.device_id) if self.device_id else None,
             'description': self.description,
             'progress': self.progress,
             'error': self.error,
