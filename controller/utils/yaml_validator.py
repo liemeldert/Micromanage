@@ -198,6 +198,13 @@ class YAMLValidator:
                     self.errors.append(f"Duplicate group name: {group.name}")
                 group_names.add(group.name)
 
+                # An empty conditions list matches NO devices — surface it, since
+                # a profile scoped to such a group silently deploys nowhere.
+                if not group.conditions:
+                    self.warnings.append(
+                        f"Group '{group.name}' has no conditions and will match no devices"
+                    )
+
                 # Validate regex patterns
                 for condition in group.conditions:
                     if condition.operator == 'regex':

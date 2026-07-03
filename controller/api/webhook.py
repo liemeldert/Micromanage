@@ -57,3 +57,10 @@ register_tortoise(
     generate_schemas=True,
     add_exception_handlers=True,
 )
+
+
+# Late-added columns (after register_tortoise so the connection exists on startup).
+@app.on_event("startup")
+async def _apply_aux_ddl():
+    from controller.models.database import ensure_aux_columns
+    await ensure_aux_columns()

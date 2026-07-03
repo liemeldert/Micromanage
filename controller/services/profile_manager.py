@@ -1,6 +1,8 @@
 from typing import List, Dict, Any, Optional
 from controller.models.tenant import Device, ProfileDeployment, Tenant, EnrollmentProfile
 from controller.services.group_manager import GroupManager
+import hashlib
+import json
 import uuid
 import logging
 
@@ -10,6 +12,19 @@ class ProfileManager:
     def __init__(self, tenant: Tenant):
         self.tenant = tenant
         self.group_manager = GroupManager(tenant.id)
+
+    @staticmethod
+    def desired_hash(profile_info: Dict[str, Any]) -> str:
+        """Stable content hash of a profile definition (as authored in YAML).
+
+        Stored on ProfileDeployment at deploy time so the reconcile loop can
+        detect edits to an already-installed profile and re-push it. Hashes the
+        YAML definition (not the built plist, whose PayloadUUIDs are regenerated
+        per render and would never be stable).
+        """
+        return hashlib.sha256(
+            json.dumps(profile_info, sort_keys=True, default=str).encode()
+        ).hexdigest()
     
     @staticmethod
     def _device_platform(device: Device) -> str:
@@ -70,16 +85,17 @@ class ProfileManager:
         try:
             # Build profile payload
             profile_payload = self._build_profile_payload(profile_info)
-            
+
             # Send profile installation command
             result = await mdm_connector.install_profile(
                 device.udid,
                 profile_payload
             )
-            
+
             deployment.status = 'installing'
+            deployment.payload_hash = self.desired_hash(profile_info)
             await deployment.save()
-            
+
             if task_id:
                 task = await Task.get(id=task_id)
                 task.status = 'running'
@@ -114,21 +130,23 @@ class ProfileManager:
             profile_identifier = f"com.mdm.{self.tenant.id}.{profile_id}"
             
             result = await mdm_connector.remove_profile(device.udid, profile_identifier)
-            
-            # Update deployment status
+
+            # Delete the deployment record optimistically so the reconcile loop
+            # doesn't keep re-issuing removals while the device processes this one.
             deployment = await ProfileDeployment.get_or_none(
                 device=device,
                 profile_id=profile_id
             )
             if deployment:
                 await deployment.delete()
-            
+
             if task_id:
+                # Await the device's response — the webhook completes the task.
                 task = await Task.get(id=task_id)
-                task.status = 'completed'
+                task.status = 'running'
                 task.details['command_uuid'] = result.get('command_uuid')
                 await task.save()
-            
+
             return True
             
         except Exception as e:

@@ -31,24 +31,32 @@ class TaskManager:
         return task
     
     async def execute_task(self, task: Task, handler: Callable):
-        """Execute a task with the given handler"""
+        """Execute a task with the given handler.
+
+        The handler (and the deploy helpers it calls) own the task's status. If,
+        after the handler returns, the task is 'running' with a command_uuid in
+        its details, the command is queued on the device and the WEBHOOK will
+        complete/fail it when the device responds — do not mark it completed
+        here. Only synchronous tasks (no command enqueued) complete immediately.
+        """
         task_id = str(task.id)
-        
+
         try:
             # Update task status
             await task.update_progress(0, 'running')
-            
+
             # Create asyncio task
             async_task = asyncio.create_task(handler(task))
             self.running_tasks[task_id] = async_task
-            
+
             # Wait for completion
             await async_task
-            
-            # If we get here without exception, mark as completed
-            if task.status != 'failed':
+
+            # Re-read: the handler/deploy path updates the row via separate objects.
+            await task.refresh_from_db()
+            if task.status in ('pending', 'running') and not (task.details or {}).get('command_uuid'):
                 await task.update_progress(100, 'completed')
-                
+
         except asyncio.CancelledError:
             await task.update_progress(task.progress, 'cancelled')
             raise
@@ -59,9 +67,14 @@ class TaskManager:
         finally:
             # Remove from running tasks
             self.running_tasks.pop(task_id, None)
-    
+
     async def cancel_task(self, task_id: str) -> bool:
-        """Cancel a running task"""
+        """Cancel the in-process asyncio task, if this process is running it.
+
+        Returns whether an in-memory task was cancelled. Callers must still
+        cancel the DB row — tasks created by other processes (sync service) or
+        awaiting a device response have no in-memory handle here.
+        """
         if task_id in self.running_tasks:
             self.running_tasks[task_id].cancel()
             return True

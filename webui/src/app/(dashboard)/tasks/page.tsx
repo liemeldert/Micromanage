@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   ActionIcon,
   Badge,
@@ -18,19 +18,13 @@ import {
   Tooltip,
 } from "@mantine/core";
 import { notifications } from "@mantine/notifications";
-import { IconRefresh, IconX } from "@tabler/icons-react";
+import { IconRefresh, IconRotateClockwise, IconX } from "@tabler/icons-react";
 import { api, type Task } from "../../../../lib/api";
 import { useAuth } from "../../../../lib/auth-context";
+import { TaskDetailDrawer, TASK_STATUS_COLORS } from "../../../components/TaskDetailDrawer";
 
 const PAGE_SIZE = 25;
-
-const STATUS_COLORS: Record<string, string> = {
-  pending: "yellow",
-  running: "blue",
-  completed: "teal",
-  failed: "red",
-  cancelled: "gray",
-};
+const POLL_MS = 10_000;
 
 const STATUSES = ["pending", "running", "completed", "failed", "cancelled"];
 
@@ -47,10 +41,14 @@ export default function TasksPage() {
   const [statusFilter, setStatus]   = useState<string | null>(null);
   const [loading, setLoading]       = useState(true);
   const [cancelling, setCancelling] = useState<string | null>(null);
+  const [syncing, setSyncing]       = useState(false);
+  const [selected, setSelected]     = useState<Task | null>(null);
+  const loadingRef = useRef(false);
 
-  const load = useCallback(async () => {
-    if (!token) return;
-    setLoading(true);
+  const load = useCallback(async (background = false) => {
+    if (!token || loadingRef.current) return;
+    loadingRef.current = true;
+    if (!background) setLoading(true);
     try {
       const res = await api.listTasks(token, {
         skip: (page - 1) * PAGE_SIZE,
@@ -59,14 +57,26 @@ export default function TasksPage() {
       });
       setTasks(res.tasks);
       setTotal(res.total);
+      // Keep the open drawer in sync with fresh data.
+      setSelected((cur) => (cur ? res.tasks.find((t) => t.id === cur.id) ?? cur : cur));
     } catch (e: unknown) {
-      notifications.show({ color: "red", message: (e as Error).message });
+      if (!background) notifications.show({ color: "red", message: (e as Error).message });
     } finally {
-      setLoading(false);
+      loadingRef.current = false;
+      if (!background) setLoading(false);
     }
   }, [token, page, statusFilter]);
 
   useEffect(() => { load(); }, [load]);
+
+  // Task statuses change as devices respond — poll quietly so the page
+  // doesn't sit on stale "running" rows.
+  useEffect(() => {
+    const id = setInterval(() => {
+      if (document.visibilityState === "visible") load(true);
+    }, POLL_MS);
+    return () => clearInterval(id);
+  }, [load]);
 
   const handleCancel = async (id: string) => {
     if (!token) return;
@@ -74,7 +84,7 @@ export default function TasksPage() {
     try {
       const res = await api.cancelTask(token, id);
       notifications.show({ color: "teal", message: res.message });
-      load();
+      load(true);
     } catch (e: unknown) {
       notifications.show({ color: "red", message: (e as Error).message });
     } finally {
@@ -82,8 +92,33 @@ export default function TasksPage() {
     }
   };
 
+  const handleSyncNow = async () => {
+    if (!token) return;
+    setSyncing(true);
+    try {
+      const res = await api.syncNow(token);
+      const queued = res.profiles_queued + res.removals_queued + res.apps_queued;
+      notifications.show({
+        color: "teal",
+        title: "Sync complete",
+        message: queued
+          ? `${res.profiles_queued} profile install(s), ${res.removals_queued} removal(s), ${res.apps_queued} app install(s) queued across ${res.devices} device(s)`
+          : `Everything already matches the declared state (${res.devices} device(s) checked)`,
+      });
+      load(true);
+    } catch (e: unknown) {
+      notifications.show({ color: "red", message: (e as Error).message });
+    } finally {
+      setSyncing(false);
+    }
+  };
+
   const rows = tasks.map((t) => (
-    <Table.Tr key={t.id}>
+    <Table.Tr
+      key={t.id}
+      onClick={() => setSelected(t)}
+      style={{ cursor: "pointer" }}
+    >
       <Table.Td>
         <Text fz="sm" fw={500}>{t.description}</Text>
         <Text fz="xs" c="dimmed">{t.type}</Text>
@@ -91,7 +126,7 @@ export default function TasksPage() {
       <Table.Td>
         <Badge
           size="sm"
-          color={STATUS_COLORS[t.status] ?? "gray"}
+          color={TASK_STATUS_COLORS[t.status] ?? "gray"}
           variant="light"
         >
           {t.status}
@@ -101,9 +136,13 @@ export default function TasksPage() {
         )}
       </Table.Td>
       <Table.Td>
-        <Text fz="xs" c="dimmed" style={{ fontFamily: "monospace" }}>
-          {t.device_id ? t.device_id.slice(0, 8) + "…" : "—"}
-        </Text>
+        {t.device?.serial_number ? (
+          <Text fz="xs">{t.device.serial_number}</Text>
+        ) : (
+          <Text fz="xs" c="dimmed" style={{ fontFamily: "monospace" }}>
+            {t.device_id ? t.device_id.slice(0, 8) + "…" : "—"}
+          </Text>
+        )}
       </Table.Td>
       <Table.Td><Text fz="xs">{fmt(t.created_at)}</Text></Table.Td>
       <Table.Td>
@@ -117,7 +156,7 @@ export default function TasksPage() {
           <Text fz="xs" c="dimmed">—</Text>
         )}
       </Table.Td>
-      <Table.Td>
+      <Table.Td onClick={(e) => e.stopPropagation()}>
         {(t.status === "pending" || t.status === "running") && (
           <Tooltip label="Cancel task">
             <ActionIcon
@@ -139,9 +178,22 @@ export default function TasksPage() {
     <Stack gap="lg">
       <Group justify="space-between">
         <Title order={2}>Tasks</Title>
-        <Button leftSection={<IconRefresh size={14} />} variant="light" onClick={load}>
-          Refresh
-        </Button>
+        <Group gap="sm">
+          <Tooltip label="Reconcile the declared YAML state against all devices now">
+            <Button
+              leftSection={<IconRotateClockwise size={14} />}
+              variant="light"
+              color="teal"
+              loading={syncing}
+              onClick={handleSyncNow}
+            >
+              Sync now
+            </Button>
+          </Tooltip>
+          <Button leftSection={<IconRefresh size={14} />} variant="light" onClick={() => load()}>
+            Refresh
+          </Button>
+        </Group>
       </Group>
 
       <Group gap="sm">
@@ -183,6 +235,14 @@ export default function TasksPage() {
           />
         </>
       )}
+
+      <TaskDetailDrawer
+        task={selected}
+        opened={selected !== null}
+        onClose={() => setSelected(null)}
+        onCancel={handleCancel}
+        cancelling={cancelling !== null}
+      />
     </Stack>
   );
 }

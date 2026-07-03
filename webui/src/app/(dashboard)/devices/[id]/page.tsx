@@ -29,8 +29,9 @@ import {
   IconRestore,
   IconLockOpen,
 } from "@tabler/icons-react";
-import { api, type DeviceDetail } from "../../../../../lib/api";
+import { api, type DeviceDetail, type Task } from "../../../../../lib/api";
 import { useAuth } from "../../../../../lib/auth-context";
+import { TaskDetailDrawer } from "../../../../components/TaskDetailDrawer";
 
 function timeSince(iso: string) {
   const diff = Date.now() - new Date(iso).getTime();
@@ -62,20 +63,34 @@ export default function DeviceDetailPage({
   const [detail, setDetail]   = useState<DeviceDetail | null>(null);
   const [loading, setLoading] = useState(true);
   const [cmdLoading, setCmdLoading] = useState(false);
+  const [selectedTask, setSelectedTask] = useState<Task | null>(null);
 
-  const load = async () => {
+  const load = async (background = false) => {
     if (!token) return;
-    setLoading(true);
+    if (!background) setLoading(true);
     try {
-      setDetail(await api.getDevice(token, id));
+      const d = await api.getDevice(token, id);
+      setDetail(d);
+      // Keep an open task drawer in sync with fresh data.
+      setSelectedTask((cur) =>
+        cur ? d.recent_tasks.find((t) => t.id === cur.id) ?? cur : cur,
+      );
     } catch (e: unknown) {
-      notifications.show({ color: "red", message: (e as Error).message });
+      if (!background) notifications.show({ color: "red", message: (e as Error).message });
     } finally {
-      setLoading(false);
+      if (!background) setLoading(false);
     }
   };
 
   useEffect(() => { load(); }, [token, id]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Task/deployment statuses change as the device responds — refresh quietly.
+  useEffect(() => {
+    const iv = setInterval(() => {
+      if (document.visibilityState === "visible") load(true);
+    }, 15_000);
+    return () => clearInterval(iv);
+  }, [token, id]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const sendCommand = async (type: string, label: string) => {
     if (!token) return;
@@ -270,7 +285,12 @@ export default function DeviceDetailPage({
               <Box
                 key={t.id}
                 p="sm"
-                style={{ border: "1px solid var(--mantine-color-default-border)", borderRadius: 6 }}
+                onClick={() => setSelectedTask(t)}
+                style={{
+                  border: "1px solid var(--mantine-color-default-border)",
+                  borderRadius: 6,
+                  cursor: "pointer",
+                }}
               >
                 <Group justify="space-between" mb={4}>
                   <Text fz="sm" fw={500}>{t.description}</Text>
@@ -294,6 +314,12 @@ export default function DeviceDetailPage({
           </Stack>
         )}
       </Card>
+
+      <TaskDetailDrawer
+        task={selectedTask}
+        opened={selectedTask !== null}
+        onClose={() => setSelectedTask(null)}
+      />
     </Stack>
   );
 }

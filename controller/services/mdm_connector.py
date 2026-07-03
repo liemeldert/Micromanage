@@ -3,7 +3,6 @@ from typing import Dict, Any, Optional, List, Tuple
 import os
 import plistlib
 import uuid
-import base64
 from datetime import datetime
 import logging
 
@@ -87,12 +86,14 @@ class MDMConnector:
 
     async def install_profile(self, device_udid: str, profile_data: Dict[str, Any]) -> Dict[str, Any]:
         """Install a configuration profile on a device"""
-        # Create InstallProfile command
+        # Create InstallProfile command. Apple requires Payload to be a plist
+        # <data> element — plistlib emits <data> for Python bytes and handles the
+        # base64 itself. Pre-encoding to a str produced a <string> of base64,
+        # which devices reject with a command Error.
         profile_plist = plistlib.dumps(profile_data)
-        encoded_profile = base64.b64encode(profile_plist).decode('utf-8')
 
         command_dict = {
-            'Payload': encoded_profile
+            'Payload': profile_plist
         }
 
         command_plist, command_uuid = self._create_command_plist('InstallProfile', command_dict)

@@ -321,11 +321,12 @@ class AppManager:
                 await deployment.delete()
             
             if task_id:
+                # Await the device's response — the webhook completes the task.
                 task = await Task.get(id=task_id)
-                task.status = 'completed'
+                task.status = 'running'
                 task.details['command_uuid'] = result.get('command_uuid')
                 await task.save()
-            
+
             return True
             
         except Exception as e:

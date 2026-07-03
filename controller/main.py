@@ -9,11 +9,9 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 from controller.auth.passwords import hash_password
 from controller.models.database import init_db, close_db
-from controller.models.tenant import Tenant, User, Device, AppDeployment, ProfileDeployment
-from controller.services.app_manager import AppManager
+from controller.models.tenant import Tenant, User
 from controller.services.mdm_connector import MDMConnector
 from controller.services.profile_manager import ProfileManager
-from controller.services.task_manager import TaskManager
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -136,97 +134,36 @@ class MDMController:
             logger.warning(f"No configuration found for tenant {tenant.id}")
             return
 
-        # Load configurations
-        config = self.load_yaml(tenant_path / 'config.yaml')
-        groups_config = self.load_yaml(tenant_path / 'groups.yaml')
-        apps_config = self.load_yaml(tenant_path / 'apps.yaml')
-        profiles_config = self.load_yaml(tenant_path / 'profiles.yaml')
+        # Each section is guarded so a failure in one (e.g. a malformed
+        # config.yaml) can't silently abort profile/app reconciliation.
 
         # Update tenant configuration
-        if config:
-            tenant.name = config['tenant']['name']
-            tenant.allowed_users = config['tenant']['allowed_users']
-            tenant.s3_config = config['tenant'].get('s3', {})
-            tenant.dep_enabled = config['tenant'].get('dep', {}).get('enabled', False)
-            await tenant.save()
+        try:
+            config = self.load_yaml(tenant_path / 'config.yaml')
+            if config and isinstance(config.get('tenant'), dict):
+                tcfg = config['tenant']
+                tenant.name = tcfg.get('name', tenant.name)
+                tenant.allowed_users = tcfg.get('allowed_users', tenant.allowed_users)
+                tenant.s3_config = tcfg.get('s3', {})
+                tenant.dep_enabled = tcfg.get('dep', {}).get('enabled', False)
+                await tenant.save()
+        except Exception:
+            logger.exception(f"sync[{tenant.id}]: updating tenant from config.yaml failed")
 
         # Process enrollment profiles
-        profile_manager = ProfileManager(tenant)
-        for profile in profiles_config.get('profiles', []):
-            if profile.get('dep_profile') or profile.get('type') == 'enrollment':
-                await profile_manager.create_enrollment_profile(profile)
-
-        # Process devices
-        devices = await Device.filter(tenant=tenant).all()
-        app_manager = AppManager(tenant)
-        mdm_connector = MDMConnector()
-        task_manager = TaskManager()
-
         try:
-            for device in devices:
-                # Evaluate and deploy apps
-                apps_to_install = await app_manager.evaluate_device_apps(
-                    device,
-                    apps_config.get('apps', []),
-                    groups_config.get('groups', [])
-                )
+            profiles_config = self.load_yaml(tenant_path / 'profiles.yaml')
+            profile_manager = ProfileManager(tenant)
+            for profile in profiles_config.get('profiles', []):
+                if profile.get('dep_profile') or profile.get('type') == 'enrollment':
+                    await profile_manager.create_enrollment_profile(profile)
+        except Exception:
+            logger.exception(f"sync[{tenant.id}]: enrollment profile processing failed")
 
-                for app in apps_to_install:
-                    # Check if app is already installed with this version
-                    existing = await AppDeployment.get_or_none(
-                        device=device,
-                        app_id=app['app_id'],
-                        app_version=app['version'],
-                        status__in=['installed', 'installing']
-                    )
-
-                    if not existing:
-                        # Create task for app installation
-                        task = await task_manager.create_task(
-                            tenant=tenant,
-                            task_type='app_install',
-                            description=f"Install {app['name']} v{app['version']}",
-                            device=device,
-                            user='system',
-                            details={'app_info': app}
-                        )
-
-                        # Execute task asynchronously
-                        from controller.services.task_handlers import handle_app_install_task
-                        asyncio.create_task(task_manager.execute_task(task, handle_app_install_task))
-
-                # Evaluate and deploy profiles
-                profiles_to_install = await profile_manager.evaluate_device_profiles(
-                    device,
-                    profiles_config.get('profiles', []),
-                    groups_config.get('groups', [])
-                )
-
-                for profile in profiles_to_install:
-                    # Check if profile is already installed
-                    existing = await ProfileDeployment.get_or_none(
-                        device=device,
-                        profile_id=profile['id'],
-                        status__in=['installed', 'installing']
-                    )
-
-                    if not existing:
-                        # Create task for profile installation
-                        task = await task_manager.create_task(
-                            tenant=tenant,
-                            task_type='profile_install',
-                            description=f"Install profile: {profile['name']}",
-                            device=device,
-                            user='system',
-                            details={'profile_info': profile}
-                        )
-
-                        # Execute task asynchronously
-                        from controller.services.task_handlers import handle_profile_install_task
-                        asyncio.create_task(task_manager.execute_task(task, handle_profile_install_task))
-
-        finally:
-            await mdm_connector.close()
+        # Reconcile declared state (profiles/apps) against devices. Shared with
+        # the API, which also triggers it reactively on config saves.
+        from controller.services.reconciler import reconcile_tenant
+        await reconcile_tenant(tenant, self.yaml_base_path)
 
     def load_yaml(self, path: Path) -> Dict[str, Any]:
         """Load a YAML file"""

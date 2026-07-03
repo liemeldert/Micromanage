@@ -20,6 +20,17 @@ def _decode_plist(raw_b64: Optional[str]) -> Dict[str, Any]:
         return {}
 
 
+def _json_safe(value: Any):
+    """Make a decoded plist JSON-serializable (datetimes → ISO strings, bytes dropped)."""
+    if isinstance(value, dict):
+        return {k: _json_safe(v) for k, v in value.items() if not isinstance(v, bytes)}
+    if isinstance(value, (list, tuple)):
+        return [_json_safe(v) for v in value if not isinstance(v, bytes)]
+    if isinstance(value, datetime):
+        return value.isoformat()
+    return value
+
+
 async def _resolve_tenant(url_params: Dict[str, Any]) -> Optional[Tenant]:
     """Map an enrolling device to a tenant.
 
@@ -150,6 +161,12 @@ class WebhookHandler:
         if not task:
             logger.info(f"webhook: no task for command {command_uuid}")
             return
+        # Never resurrect a task the user cancelled (or that already finished).
+        if task.status not in ("pending", "running"):
+            logger.info(
+                f"webhook: task {task.id} already {task.status}; ignoring {status} response"
+            )
+            return
         details = task.details or {}
         remove = bool(details.get("remove") or details.get("action") == "remove")
         if details.get("app_info"):
@@ -162,49 +179,84 @@ class WebhookHandler:
                 await self._handle_profile_remove_response(task, response, status)
             else:
                 await self._handle_profile_install_response(task, response, status)
+        else:
+            # Direct commands (refresh_info, restart, shutdown, clear_passcode,
+            # profile_remove, ...) carry only a command_uuid. Previously NO branch
+            # handled them, so they sat at "running" forever.
+            await self._handle_generic_response(task, response, status)
+
+    @staticmethod
+    def _error_message(response: Dict[str, Any], fallback: str) -> str:
+        chain = response.get("ErrorChain") or []
+        if chain and isinstance(chain, list):
+            return chain[0].get("LocalizedDescription") or fallback
+        return fallback
+
+    async def _handle_generic_response(self, task: Task, response: Dict[str, Any], status: str):
+        """Complete/fail a plain command task from the device's response."""
+        if status == "Acknowledged":
+            # Keep a trimmed copy of the response so the task detail view shows
+            # what the device answered (e.g. DeviceInformation QueryResponses).
+            trimmed = {
+                k: v for k, v in response.items()
+                if k not in ("CommandUUID", "UDID", "Status") and not isinstance(v, bytes)
+            }
+            if trimmed:
+                task.details = {**(task.details or {}), "response": _json_safe(trimmed)}
+                await task.save(update_fields=["details"])
+            if task.type == "refresh_info":
+                await self._apply_device_info(task, response)
+            await task.update_progress(100, "completed")
+        elif status in ("Error", "CommandFormatError"):
+            task.error = self._error_message(response, f"{task.type} failed")
+            await task.update_progress(task.progress, "failed")
+        # NotNow: device is busy; NanoMDM redelivers on its next connect — keep waiting.
+
+    async def _apply_device_info(self, task: Task, response: Dict[str, Any]):
+        """Enrich the device record from a DeviceInformation QueryResponses."""
+        info = response.get("QueryResponses") or {}
+        if not info:
+            return
+        device = await Device.get_or_none(id=task.device_id)
+        if not device:
+            return
+        if info.get("SerialNumber"):
+            device.serial_number = info["SerialNumber"]
+        model = info.get("ProductName") or info.get("Model")
+        if model:
+            device.device_model = model
+        if info.get("OSVersion"):
+            device.os_version = info["OSVersion"]
+        if info.get("DeviceName"):
+            device.hostname = info["DeviceName"]
+        await device.save()
 
     # ── Per-command response handlers ─────────────────────────────────────────
+    # Note on Apple MDM semantics: a device responds "Acknowledged" AFTER it has
+    # executed the command (for InstallProfile that means the profile IS
+    # installed). Idle never carries a command_uuid — it's filtered upstream in
+    # _handle_acknowledge — so completion must happen on Acknowledged, not Idle.
+    # NotNow means "busy, redeliver later": leave the task running.
+
     async def _handle_app_install_response(self, task: Task, response: Dict[str, Any], status: str):
         """Handle app installation response"""
         app_id = task.details.get('app_info', {}).get('app_id')
+        deployment = await AppDeployment.get_or_none(device_id=task.device_id, app_id=app_id)
 
         if status == 'Acknowledged':
-            # Command accepted, installation starting
-            await task.update_progress(50, 'running')
-
-            deployment = await AppDeployment.get_or_none(
-                device_id=task.device_id,
-                app_id=app_id
-            )
-            if deployment:
-                deployment.status = 'installing'
-                await deployment.save()
-
-        elif status == 'Idle':
-            # Installation complete
+            # The device accepted InstallApplication; the actual download/install
+            # continues on-device (tracking that would need InstalledApplicationList
+            # polling). The MDM command itself succeeded — complete the task.
             await task.update_progress(100, 'completed')
-
-            deployment = await AppDeployment.get_or_none(
-                device_id=task.device_id,
-                app_id=app_id
-            )
             if deployment:
                 deployment.status = 'installed'
                 deployment.install_date = datetime.utcnow()
                 await deployment.save()
 
-        elif status in ['Error', 'NotNow']:
-            # Installation failed
-            error_chain = response.get('ErrorChain', [])
-            error_msg = error_chain[0].get('LocalizedDescription', 'Unknown error') if error_chain else 'Installation failed'
-
+        elif status in ('Error', 'CommandFormatError'):
+            error_msg = self._error_message(response, 'Installation failed')
             task.error = error_msg
             await task.update_progress(task.progress, 'failed')
-
-            deployment = await AppDeployment.get_or_none(
-                device_id=task.device_id,
-                app_id=app_id
-            )
             if deployment:
                 deployment.status = 'failed'
                 deployment.last_error = error_msg
@@ -212,50 +264,32 @@ class WebhookHandler:
 
     async def _handle_app_remove_response(self, task: Task, response: Dict[str, Any], status: str):
         """Handle app removal response"""
-        if status in ['Acknowledged', 'Idle']:
+        if status == 'Acknowledged':
             await task.update_progress(100, 'completed')
-        else:
-            task.error = 'App removal failed'
+        elif status in ('Error', 'CommandFormatError'):
+            task.error = self._error_message(response, 'App removal failed')
             await task.update_progress(task.progress, 'failed')
 
     async def _handle_profile_install_response(self, task: Task, response: Dict[str, Any], status: str):
         """Handle profile installation response"""
         profile_id = task.details.get('profile_info', {}).get('id')
+        deployment = await ProfileDeployment.get_or_none(
+            device_id=task.device_id, profile_id=profile_id
+        )
 
         if status == 'Acknowledged':
-            await task.update_progress(50, 'running')
-
-            deployment = await ProfileDeployment.get_or_none(
-                device_id=task.device_id,
-                profile_id=profile_id
-            )
-            if deployment:
-                deployment.status = 'installing'
-                await deployment.save()
-
-        elif status == 'Idle':
+            # For InstallProfile, Acknowledged == the profile is installed.
             await task.update_progress(100, 'completed')
-
-            deployment = await ProfileDeployment.get_or_none(
-                device_id=task.device_id,
-                profile_id=profile_id
-            )
             if deployment:
                 deployment.status = 'installed'
                 deployment.install_date = datetime.utcnow()
+                deployment.last_error = None
                 await deployment.save()
 
-        elif status in ['Error', 'NotNow']:
-            error_chain = response.get('ErrorChain', [])
-            error_msg = error_chain[0].get('LocalizedDescription', 'Unknown error') if error_chain else 'Installation failed'
-
+        elif status in ('Error', 'CommandFormatError'):
+            error_msg = self._error_message(response, 'Installation failed')
             task.error = error_msg
             await task.update_progress(task.progress, 'failed')
-
-            deployment = await ProfileDeployment.get_or_none(
-                device_id=task.device_id,
-                profile_id=profile_id
-            )
             if deployment:
                 deployment.status = 'failed'
                 deployment.last_error = error_msg
@@ -263,8 +297,8 @@ class WebhookHandler:
 
     async def _handle_profile_remove_response(self, task: Task, response: Dict[str, Any], status: str):
         """Handle profile removal response"""
-        if status in ['Acknowledged', 'Idle']:
+        if status == 'Acknowledged':
             await task.update_progress(100, 'completed')
-        else:
-            task.error = 'Profile removal failed'
+        elif status in ('Error', 'CommandFormatError'):
+            task.error = self._error_message(response, 'Profile removal failed')
             await task.update_progress(task.progress, 'failed')

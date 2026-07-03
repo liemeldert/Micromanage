@@ -12,25 +12,33 @@ import {
   List,
   Loader,
   Stack,
+  Switch,
   Text,
   ThemeIcon,
   Title,
 } from "@mantine/core";
+import { useLocalStorage } from "@mantine/hooks";
 import { notifications } from "@mantine/notifications";
 import {
   IconCheck,
+  IconCode,
   IconInfoCircle,
   IconShieldLock,
   IconCloud,
 } from "@tabler/icons-react";
 import { api, type TenantInfo } from "../../../../lib/api";
 import { useAuth } from "../../../../lib/auth-context";
+import { SHOW_YAML_STORAGE_KEY } from "../../../../lib/preferences";
 
 export default function SettingsPage() {
   const { token, tenantId, email } = useAuth();
   const [tenant, setTenant]         = useState<TenantInfo | null>(null);
   const [loading, setLoading]       = useState(true);
   const [health, setHealth]         = useState<"ok" | "error" | "loading">("loading");
+  const [showYaml, setShowYaml]     = useLocalStorage({
+    key: SHOW_YAML_STORAGE_KEY,
+    defaultValue: false,
+  });
 
   useEffect(() => {
     if (!token) return;
@@ -63,6 +71,22 @@ export default function SettingsPage() {
           The controller syncs YAML compliance state every{" "}
           <Code fz="xs">SYNC_INTERVAL_MINUTES</Code> minutes and enqueues MDM commands.
         </Text>
+      </Card>
+
+      {/* Interface preferences (stored in this browser) */}
+      <Card withBorder radius="md" p="md">
+        <Group mb="xs">
+          <ThemeIcon variant="light" color="indigo" size="sm">
+            <IconCode size={14} />
+          </ThemeIcon>
+          <Text fz="sm" fw={600}>Interface</Text>
+        </Group>
+        <Switch
+          label="Show YAML configuration tab"
+          description="Adds a read-only YAML view to the sidebar showing the tenant's declarative config (groups, apps, profiles) as the controller sees it."
+          checked={showYaml}
+          onChange={(e) => setShowYaml(e.currentTarget.checked)}
+        />
       </Card>
 
       {/* Tenant info */}

@@ -88,6 +88,9 @@ class ProfileDeployment(Model):
     device = fields.ForeignKeyField("models.Device", related_name="profile_deployments")
     profile_id = fields.CharField(max_length=100)
     status = fields.CharField(max_length=20)  # pending, installing, installed, failed
+    # Hash of the profile definition as deployed — lets the sync loop detect edits
+    # to an already-installed profile and re-push it (declared state reconciliation).
+    payload_hash = fields.CharField(max_length=64, null=True)
     install_date = fields.DatetimeField(null=True)
     last_error = fields.TextField(null=True)
     created_at = fields.DatetimeField(auto_now_add=True)
@@ -133,15 +136,21 @@ class Task(Model):
         ordering = ["-created_at"]
     
     async def update_progress(self, progress: int, status: str = None):
-        """Update task progress"""
+        """Update task progress.
+
+        Saves ONLY the lifecycle fields. Several code paths (API process, sync
+        service, webhook) hold separate Python objects for the same row; a full
+        save() from a stale copy silently clobbered details.command_uuid and
+        broke webhook→task correlation (tasks stuck "running" forever).
+        """
         self.progress = min(100, max(0, progress))
         if status:
             self.status = status
         if status == 'running' and not self.started_at:
             self.started_at = datetime.utcnow()
-        elif status in ['completed', 'failed'] and not self.completed_at:
+        elif status in ['completed', 'failed', 'cancelled'] and not self.completed_at:
             self.completed_at = datetime.utcnow()
-        await self.save()
+        await self.save(update_fields=['progress', 'status', 'started_at', 'completed_at', 'error'])
     
     def to_dict(self) -> Dict[str, Any]:
         """Convert task to dictionary for API responses"""
@@ -150,6 +159,7 @@ class Task(Model):
             'type': self.type,
             'status': self.status,
             'device_id': str(self.device_id) if self.device_id else None,
+            'user': self.user,
             'description': self.description,
             'progress': self.progress,
             'error': self.error,

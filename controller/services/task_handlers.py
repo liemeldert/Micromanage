@@ -24,24 +24,20 @@ async def handle_app_install_task(task: Task):
         try:
             # Update progress
             await task.update_progress(20)
-            
-            # Deploy the app
+
+            # Deploy the app. This enqueues the MDM command and stores the
+            # command_uuid on the task; the WEBHOOK completes/fails the task
+            # when the device responds — do not mark it completed here.
             await app_manager.deploy_app(
-                device, 
+                device,
                 app_info,
                 mdm_connector,
                 str(task.id)
             )
-            
-            # Wait for installation (in production, this would be event-driven)
-            await task.update_progress(80)
-            
-            # Mark as completed (in production, based on MDM feedback)
-            await task.update_progress(100, 'completed')
-            
+
         finally:
             await mdm_connector.close()
-            
+
     except Exception as e:
         logger.error(f"App install task {task.id} failed: {e}")
         task.error = str(e)
@@ -62,7 +58,9 @@ async def handle_app_remove_task(task: Task):
         
         try:
             await task.update_progress(20)
-            
+
+            # Enqueues RemoveApplication; the webhook completes the task on the
+            # device's Acknowledged response.
             await app_manager.remove_app(
                 device,
                 app_id,
@@ -70,12 +68,10 @@ async def handle_app_remove_task(task: Task):
                 mdm_connector,
                 str(task.id)
             )
-            
-            await task.update_progress(100, 'completed')
-            
+
         finally:
             await mdm_connector.close()
-            
+
     except Exception as e:
         logger.error(f"App remove task {task.id} failed: {e}")
         task.error = str(e)
@@ -95,19 +91,19 @@ async def handle_profile_install_task(task: Task):
         
         try:
             await task.update_progress(20)
-            
+
+            # Enqueues InstallProfile and stores the command_uuid on the task;
+            # the WEBHOOK completes/fails it when the device responds.
             await profile_manager.deploy_profile(
                 device,
                 profile_info,
                 mdm_connector,
                 str(task.id)
             )
-            
-            await task.update_progress(100, 'completed')
-            
+
         finally:
             await mdm_connector.close()
-            
+
     except Exception as e:
         logger.error(f"Profile install task {task.id} failed: {e}")
         task.error = str(e)
@@ -127,19 +123,19 @@ async def handle_profile_remove_task(task: Task):
         
         try:
             await task.update_progress(20)
-            
+
+            # Enqueues RemoveProfile; the webhook completes the task on the
+            # device's Acknowledged response.
             await profile_manager.remove_profile(
                 device,
                 profile_id,
                 mdm_connector,
                 str(task.id)
             )
-            
-            await task.update_progress(100, 'completed')
-            
+
         finally:
             await mdm_connector.close()
-            
+
     except Exception as e:
         logger.error(f"Profile remove task {task.id} failed: {e}")
         task.error = str(e)

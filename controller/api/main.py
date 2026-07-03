@@ -358,8 +358,17 @@ async def update_tenant(update: TenantUpdate, admin: Principal = Depends(require
 
 # YAML Configuration Management
 @app.get("/api/v1/config/{config_type}")
-async def get_yaml_config(config_type: str, principal: Principal = Depends(get_current_principal)):
-    """Get YAML configuration by type (groups, apps, profiles, config)"""
+async def get_yaml_config(
+        config_type: str,
+        raw: bool = False,
+        principal: Principal = Depends(get_current_principal),
+):
+    """Get YAML configuration by type (groups, apps, profiles, config).
+
+    With ``raw=true`` the response is the YAML document itself (text/plain) —
+    used by the YAML viewer. config.yaml is re-rendered after credential
+    redaction in raw mode too, so S3 secrets never leave the server.
+    """
     if config_type not in ["groups", "apps", "profiles", "config"]:
         raise HTTPException(status_code=400, detail="Invalid config type")
 
@@ -370,12 +379,21 @@ async def get_yaml_config(config_type: str, principal: Principal = Depends(get_c
         raise HTTPException(status_code=404, detail="Configuration not found")
 
     with open(yaml_path, "r") as f:
-        config = yaml.safe_load(f) or {}
+        text = f.read()
+    config = yaml.safe_load(text) or {}
 
     # config.yaml embeds tenant.s3 which may carry credentials — never return them.
+    redacted = False
     if config_type == "config" and isinstance(config.get("tenant"), dict):
         if "s3" in config["tenant"]:
             config["tenant"]["s3"] = _redact_s3_config(config["tenant"]["s3"])
+            redacted = True
+
+    if raw:
+        # Serve the authored file verbatim (comments intact) unless redaction
+        # forced a re-render.
+        body = yaml.safe_dump(config, default_flow_style=False, sort_keys=False) if redacted else text
+        return Response(content=body, media_type="text/plain; charset=utf-8")
 
     return config
 
@@ -461,6 +479,22 @@ async def update_yaml_config(
             status_code=500,
             detail=f"Server failed to persist {config_type} configuration: {exc}",
         )
+
+    # Reconcile reactively so the change produces tasks now, not at the next
+    # scheduled sync (which remains the periodic safety net). _spawn keeps a
+    # strong reference — bare create_task handles can be GC'd mid-run.
+    from controller.services.reconciler import reconcile_tenant, _spawn
+
+    async def _reconcile_after_save(tenant_id: str):
+        try:
+            t = await Tenant.get_or_none(id=tenant_id)
+            if t:
+                await reconcile_tenant(t, YAML_BASE)
+        except Exception:
+            logger.exception(f"post-save reconcile failed for tenant {tenant_id}")
+
+    _spawn(_reconcile_after_save(tenant.id))
+
     return {"message": f"{config_type} configuration updated", "warnings": warnings}
 
 
@@ -473,6 +507,20 @@ async def validate_yaml_configs(principal: Principal = Depends(get_current_princ
     valid, errors, warnings = validator.validate_all()
 
     return {"valid": valid, "errors": errors, "warnings": warnings}
+
+
+@app.post("/api/v1/sync")
+async def sync_now(principal: Principal = Depends(get_current_principal)):
+    """Reconcile this tenant's declared YAML state against its devices now.
+
+    Runs the same reconciliation the sync service performs on its schedule and
+    returns a summary of what was queued (also triggered automatically after
+    config saves).
+    """
+    from controller.services.reconciler import reconcile_tenant
+
+    summary = await reconcile_tenant(principal.tenant, YAML_BASE)
+    return {"message": "Sync complete", **summary}
 
 
 # Device Management
@@ -702,7 +750,19 @@ async def list_tasks(
         .all()
     )
 
-    return {"total": total, "tasks": [task.to_dict() for task in tasks]}
+    return {"total": total, "tasks": [_task_with_device(task) for task in tasks]}
+
+
+def _task_with_device(task: Task) -> Dict[str, Any]:
+    """Task dict enriched with device identity (device is prefetched)."""
+    d = task.to_dict()
+    if task.device:
+        d["device"] = {
+            "serial_number": task.device.serial_number,
+            "hostname": task.device.hostname,
+            "device_model": task.device.device_model,
+        }
+    return d
 
 
 @app.get("/api/v1/tasks/{task_id}")
@@ -714,12 +774,19 @@ async def get_task_details(task_id: str, principal: Principal = Depends(get_curr
     if not task:
         raise HTTPException(status_code=404, detail="Task not found")
 
-    return task.to_dict()
+    return _task_with_device(task)
 
 
 @app.post("/api/v1/tasks/{task_id}/cancel")
 async def cancel_task(task_id: str, principal: Principal = Depends(get_current_principal)):
-    """Cancel a running task"""
+    """Cancel a pending or running task.
+
+    Cancellation is DB-backed: tasks may live in another process (sync service)
+    or be awaiting a device response, so there is often no in-memory handle to
+    cancel — the status flip is what stops the webhook from completing it later.
+    A command already queued on the device cannot be recalled; cancelling stops
+    the controller from tracking it further.
+    """
     tenant = principal.tenant
     task = await Task.get_or_none(id=task_id, tenant=tenant)
 
@@ -727,16 +794,18 @@ async def cancel_task(task_id: str, principal: Principal = Depends(get_current_p
         raise HTTPException(status_code=404, detail="Task not found")
 
     if task.status not in ["pending", "running"]:
-        raise HTTPException(status_code=400, detail="Task cannot be cancelled")
+        raise HTTPException(
+            status_code=400, detail=f"Task is already {task.status} and cannot be cancelled"
+        )
 
-    cancelled = await task_manager.cancel_task(str(task.id))
+    # Best-effort: stop the in-process handler if this process owns it.
+    await task_manager.cancel_task(str(task.id))
 
-    if cancelled:
-        task.status = "cancelled"
-        task.completed_at = datetime.now(timezone.utc)
-        await task.save()
+    task.status = "cancelled"
+    task.completed_at = datetime.now(timezone.utc)
+    await task.save(update_fields=["status", "completed_at"])
 
-    return {"message": "Task cancelled" if cancelled else "Task not running"}
+    return {"message": "Task cancelled"}
 
 
 # Reports and Statistics
@@ -1029,6 +1098,15 @@ register_tortoise(
     generate_schemas=True,
     add_exception_handlers=True,
 )
+
+
+# Late-added columns (registered AFTER register_tortoise so the connection exists
+# when this startup handler runs — FastAPI runs startup hooks in add order).
+@app.on_event("startup")
+async def _apply_aux_ddl():
+    from controller.models.database import ensure_aux_columns
+    await ensure_aux_columns()
+
 
 if __name__ == "__main__":
     import uvicorn

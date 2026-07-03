@@ -133,6 +133,36 @@ export const api = {
     return request<Record<string, unknown>>(`/api/v1/config/${type}`, token);
   },
 
+  // Raw YAML document (text) — for the YAML viewer. Server-side redaction of
+  // credentials still applies to config.yaml.
+  async getConfigRaw(token: string, type: "groups" | "apps" | "profiles" | "config") {
+    const res = await fetch(proxyPath(`/api/v1/config/${type}?raw=true`), {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    if (!res.ok) {
+      let detail = res.statusText;
+      try {
+        const body = await res.json();
+        detail = body.detail || JSON.stringify(body);
+      } catch {}
+      throw new ApiError(res.status, detail);
+    }
+    return res.text();
+  },
+
+  // Reconcile declared state against devices now (also runs after each config save).
+  syncNow(token: string) {
+    return request<{
+      message: string;
+      profiles_queued: number;
+      removals_queued: number;
+      apps_queued: number;
+      tasks_timed_out: number;
+      devices: number;
+      errors: number;
+    }>("/api/v1/sync", token, { method: "POST" });
+  },
+
   updateConfig(
     token: string,
     type: "groups" | "apps" | "profiles",
@@ -192,6 +222,10 @@ export const api = {
     );
   },
 
+  getTask(token: string, id: string) {
+    return request<Task>(`/api/v1/tasks/${id}`, token);
+  },
+
   cancelTask(token: string, id: string) {
     return request<{ message: string }>(`/api/v1/tasks/${id}/cancel`, token, {
       method: "POST",
@@ -244,6 +278,7 @@ export interface Task {
   type: string;
   status: string;
   device_id: string | null;
+  user?: string | null;
   description: string;
   progress: number;
   error: string | null;
@@ -251,6 +286,12 @@ export interface Task {
   started_at: string | null;
   completed_at: string | null;
   details: Record<string, unknown>;
+  // Present on /api/v1/tasks responses (device is prefetched server-side).
+  device?: {
+    serial_number: string;
+    hostname: string | null;
+    device_model: string;
+  } | null;
 }
 
 export interface EnrollmentDetails {

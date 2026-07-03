@@ -15,7 +15,7 @@ import {
   Divider,
   useMantineColorScheme,
 } from "@mantine/core";
-import { useDisclosure } from "@mantine/hooks";
+import { useDisclosure, useLocalStorage } from "@mantine/hooks";
 import {
   IconLayoutDashboard,
   IconDeviceLaptop,
@@ -23,6 +23,7 @@ import {
   IconStack2,
   IconApps,
   IconFileCertificate,
+  IconFileCode,
   IconListCheck,
   IconSettings,
   IconLogout,
@@ -30,6 +31,7 @@ import {
   IconSun,
 } from "@tabler/icons-react";
 import { useAuth } from "../../../lib/auth-context";
+import { SHOW_YAML_STORAGE_KEY } from "../../../lib/preferences";
 
 const NAV_ITEMS = [
   { label: "Dashboard",  icon: IconLayoutDashboard,    href: "/dashboard" },
@@ -42,12 +44,21 @@ const NAV_ITEMS = [
   { label: "Settings",   icon: IconSettings,           href: "/settings" },
 ];
 
+// Shown only when enabled in Settings → Interface.
+const YAML_NAV_ITEM = { label: "YAML", icon: IconFileCode, href: "/yaml" };
+
 export default function DashboardLayout({ children }: { children: React.ReactNode }) {
   const { isAuthenticated, hydrated, email, logout } = useAuth();
   const router = useRouter();
   const pathname = usePathname();
   const [opened, { toggle }] = useDisclosure();
   const { colorScheme, toggleColorScheme } = useMantineColorScheme();
+  const [showYaml] = useLocalStorage({ key: SHOW_YAML_STORAGE_KEY, defaultValue: false });
+
+  // Insert the optional YAML view between Tasks and Settings.
+  const navItems = showYaml
+    ? [...NAV_ITEMS.slice(0, -1), YAML_NAV_ITEM, NAV_ITEMS[NAV_ITEMS.length - 1]]
+    : NAV_ITEMS;
 
   useEffect(() => {
     // Wait until persisted auth is restored before deciding to redirect,
@@ -78,7 +89,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
         <Divider color="dark.6" />
 
         <AppShell.Section grow component={ScrollArea} p="xs" mt="xs">
-          {NAV_ITEMS.map((item) => {
+          {navItems.map((item) => {
             const active = pathname === item.href || pathname.startsWith(item.href + "/");
             return (
               <NavLink
