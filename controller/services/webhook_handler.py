@@ -161,12 +161,18 @@ class WebhookHandler:
         if not task:
             logger.info(f"webhook: no task for command {command_uuid}")
             return
-        # Never resurrect a task the user cancelled (or that already finished).
-        if task.status not in ("pending", "running"):
+        # Never resurrect a task the user cancelled (or that already finished) —
+        # EXCEPT one failed by the timeout sweep: devices can sit offline (or
+        # answer NotNow) for days and then respond, and that late answer is
+        # still the truth about the command.
+        timed_out = task.status == "failed" and (task.error or "").startswith("Timed out")
+        if task.status not in ("pending", "running") and not timed_out:
             logger.info(
                 f"webhook: task {task.id} already {task.status}; ignoring {status} response"
             )
             return
+        if timed_out:
+            task.error = None  # superseded by the real device response
         details = task.details or {}
         remove = bool(details.get("remove") or details.get("action") == "remove")
         if details.get("app_info"):
