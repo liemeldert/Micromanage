@@ -54,7 +54,7 @@ export default function DevicesPage() {
       const res = await api.listDevices(token, {
         skip: (page - 1) * PAGE_SIZE,
         limit: PAGE_SIZE,
-        ...(debounced ? { model: debounced } : {}),
+        ...(debounced ? { search: debounced } : {}),
         ...(groupFilter ? { group: groupFilter } : {}),
       });
       setDevices(res.devices);
@@ -130,11 +130,11 @@ export default function DevicesPage() {
 
       <Group gap="sm">
         <TextInput
-          placeholder="Filter by model…"
+          placeholder="Search serial, hostname, model, UDID…"
           leftSection={<IconSearch size={14} />}
           value={search}
           onChange={(e) => { setSearch(e.currentTarget.value); setPage(1); }}
-          w={240}
+          w={320}
         />
         <Select
           placeholder="Group"

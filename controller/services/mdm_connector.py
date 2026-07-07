@@ -143,10 +143,80 @@ class MDMConnector:
         logger.info(f"Queued app removal for {device_udid}: {result}")
         return result
 
+    # Attributes requested from DeviceInformation. Devices simply omit keys they
+    # don't support, so this list can mix iOS/macOS/tvOS freely. Responses are
+    # persisted verbatim into Device.attributes for data-driven display.
+    DEVICE_INFO_QUERIES = [
+        # Identity / hardware
+        'UDID', 'SerialNumber', 'DeviceName', 'Model', 'ModelName', 'ProductName',
+        'DeviceCapacity', 'AvailableDeviceCapacity', 'ProvisioningUDID', 'HasBattery',
+        'BatteryLevel', 'IsAppleSilicon', 'SupportsLOMDevice',
+        # OS / software
+        'OSVersion', 'SupplementalBuildVersion', 'BuildVersion', 'SoftwareUpdateDeviceID',
+        'OSUpdateSettings', 'LocalHostName', 'HostName', 'ActiveManagedUsers',
+        'SystemIntegrityProtectionEnabled', 'MaximumResidentUsers',
+        # Management / security
+        'IsSupervised', 'IsActivationLockEnabled', 'IsDeviceLocatorServiceEnabled',
+        'IsMDMLostModeEnabled', 'IsCloudBackupEnabled', 'LastCloudBackupDate',
+        'IsDoNotDisturbInEffect', 'AppAnalyticsEnabled', 'DiagnosticSubmissionEnabled',
+        'IsMultiUser', 'PINRequiredForEraseDevice', 'PINRequiredForDeviceLock',
+        # Network
+        'WiFiMAC', 'BluetoothMAC', 'EthernetMAC', 'PersonalHotspotEnabled',
+        'DataRoamingEnabled', 'IsNetworkTethered', 'TimeZone',
+        # Cellular (iOS)
+        'IMEI', 'MEID', 'ICCID', 'PhoneNumber', 'CellularTechnology',
+        'ModemFirmwareVersion', 'CurrentCarrierNetwork', 'SIMCarrierNetwork',
+        'SubscriberCarrierNetwork', 'CarrierSettingsVersion', 'EASDeviceIdentifier',
+    ]
+
     async def get_device_info(self, device_udid: str) -> Dict[str, Any]:
         """Get device information using DeviceInformation command"""
-        command_plist, command_uuid = self._create_command_plist('DeviceInformation')
+        command_dict = {'Queries': self.DEVICE_INFO_QUERIES}
+        command_plist, command_uuid = self._create_command_plist('DeviceInformation', command_dict)
         return await self.enqueue_command(device_udid, command_plist, command_uuid=command_uuid)
+
+    async def get_security_info(self, device_udid: str) -> Dict[str, Any]:
+        """Get security posture (FileVault/passcode/firewall/...) via SecurityInfo"""
+        command_plist, command_uuid = self._create_command_plist('SecurityInfo')
+        return await self.enqueue_command(device_udid, command_plist, command_uuid=command_uuid)
+
+    async def device_lock(self, device_udid: str, pin: Optional[str] = None,
+                          message: Optional[str] = None,
+                          phone_number: Optional[str] = None) -> Dict[str, Any]:
+        """Lock the device immediately (DeviceLock).
+
+        macOS requires a 6-digit PIN which is then needed to unlock the machine;
+        iOS ignores PIN and just locks to the lock screen.
+        """
+        command_dict: Dict[str, Any] = {}
+        if pin:
+            command_dict['PIN'] = pin
+        if message:
+            command_dict['Message'] = message
+        if phone_number:
+            command_dict['PhoneNumber'] = phone_number
+
+        command_plist, command_uuid = self._create_command_plist('DeviceLock', command_dict)
+        result = await self.enqueue_command(device_udid, command_plist, command_uuid=command_uuid)
+
+        logger.info(f"Queued device lock for {device_udid}: {result}")
+        return result
+
+    async def erase_device(self, device_udid: str, pin: Optional[str] = None) -> Dict[str, Any]:
+        """Erase the device (EraseDevice). Irreversible.
+
+        Intel Macs require a 6-digit PIN (needed afterwards to unlock);
+        Apple Silicon and iOS obliterate without one.
+        """
+        command_dict: Dict[str, Any] = {}
+        if pin:
+            command_dict['PIN'] = pin
+
+        command_plist, command_uuid = self._create_command_plist('EraseDevice', command_dict)
+        result = await self.enqueue_command(device_udid, command_plist, command_uuid=command_uuid)
+
+        logger.warning(f"Queued device ERASE for {device_udid}: {result}")
+        return result
 
     async def get_installed_apps(self, device_udid: str) -> Dict[str, Any]:
         """Get list of installed applications"""

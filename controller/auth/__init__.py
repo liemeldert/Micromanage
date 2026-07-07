@@ -22,6 +22,6 @@ ROLES = (ROLE_ADMIN, ROLE_MEMBER)
 
 # Device commands that are disruptive/destructive and therefore admin-only.
 # Keep this in sync with the dispatch table in send_device_command.
-DESTRUCTIVE_COMMANDS = frozenset({"restart", "shutdown", "clear_passcode"})
+DESTRUCTIVE_COMMANDS = frozenset({"restart", "shutdown", "clear_passcode", "lock", "erase"})
 
 __all__ = ["ROLE_ADMIN", "ROLE_MEMBER", "ROLES", "DESTRUCTIVE_COMMANDS"]

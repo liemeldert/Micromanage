@@ -8,6 +8,7 @@ DATABASE_URL = os.getenv("DATABASE_URL", "postgres://postgres:password@localhost
 # fields must be ensured explicitly. Statements must be idempotent.
 _AUX_DDL = [
     'ALTER TABLE "profile_deployments" ADD COLUMN IF NOT EXISTS "payload_hash" VARCHAR(64)',
+    'ALTER TABLE "devices" ADD COLUMN IF NOT EXISTS "attributes" JSONB NOT NULL DEFAULT \'{}\'::jsonb',
 ]
 
 

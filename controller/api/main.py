@@ -219,6 +219,40 @@ async def whoami(principal: Principal = Depends(get_current_principal)):
     }
 
 
+class DiscoverRequest(BaseModel):
+    email: str
+
+
+@app.post("/api/v1/auth/discover")
+async def discover_login(request: DiscoverRequest, http_request: Request):
+    """Email-first sign-in: which tenants can this email sign in to, and how.
+
+    Deliberate tradeoff: this necessarily reveals whether an email has access
+    (that's the point of an email-first flow). It is throttled with the same
+    limiter as login so it can't be used for bulk enumeration, and it returns
+    only what the sign-in flow needs — never role or user details.
+    """
+    email = request.email.strip().lower()
+    if not email or not login_limiter.check(f"discover:{email}"):
+        raise HTTPException(status_code=429, detail="Too many attempts; try again later")
+
+    users = await User.filter(email__iexact=email, is_active=True).prefetch_related("tenant")
+    tenants = []
+    for u in users:
+        t = u.tenant
+        if not t.is_active:
+            continue
+        cfg = t.auth_config or {}
+        entry = {"tenant_id": t.id, "name": t.name, "provider": t.auth_provider}
+        # External IdP tenants may configure where the browser should go to
+        # obtain a provider token (e.g. a Clerk-hosted sign-in page).
+        if t.auth_provider != "local" and cfg.get("login_url"):
+            entry["login_url"] = cfg["login_url"]
+        tenants.append(entry)
+
+    return {"tenants": tenants}
+
+
 # User management (admin only)
 @app.get("/api/v1/users")
 async def list_users(admin: Principal = Depends(require_admin)):
@@ -530,6 +564,7 @@ async def list_devices(
         limit: int = Query(100, ge=1, le=500),
         group: Optional[str] = None,
         model: Optional[str] = None,
+        search: Optional[str] = None,
         principal: Principal = Depends(get_current_principal),
 ):
     """List all devices with optional filtering"""
@@ -541,6 +576,15 @@ async def list_devices(
         query = query.filter(groups__contains=[group])
     if model:
         query = query.filter(device_model__icontains=model)
+    if search:
+        # One box that finds a device by any of its identifying fields.
+        from tortoise.expressions import Q
+        query = query.filter(
+            Q(serial_number__icontains=search)
+            | Q(hostname__icontains=search)
+            | Q(device_model__icontains=search)
+            | Q(udid__icontains=search)
+        )
 
     total = await query.count()
     devices = await query.offset(skip).limit(limit).all()
@@ -589,7 +633,14 @@ async def get_device_details(device_id: str, principal: Principal = Depends(get_
             "groups": device.groups,
             "enrollment_date": device.enrollment_date,
             "last_seen": device.last_seen,
+            # Everything the device has reported about itself (DeviceInformation
+            # QueryResponses + SecurityInfo) — rendered data-driven by the UI.
+            "attributes": device.attributes or {},
         },
+        # Inventory as reported BY THE DEVICE (ProfileList / InstalledApplicationList),
+        # distinct from the management-intent deployments below.
+        "device_profiles": device.installed_profiles or [],
+        "device_apps": device.installed_apps if isinstance(device.installed_apps, list) else [],
         "installed_apps": [
             {
                 "app_id": app.app_id,
@@ -686,26 +737,51 @@ async def send_device_command(
             return {"task_id": str(task.id), "message": "App removal started"}
 
         # Direct, immediately-issued commands: record an audit Task, then send.
+        params = command.parameters or {}
+        pin = params.get("pin")
+        if command.command_type in ("lock", "erase"):
+            # macOS requires a 6-digit unlock PIN for DeviceLock/EraseDevice.
+            is_mac = "mac" in (device.device_model or "").lower()
+            if pin is not None and not re.fullmatch(r"\d{6}", str(pin)):
+                raise HTTPException(status_code=400, detail="PIN must be exactly 6 digits")
+            if is_mac and not pin:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Macs require a 6-digit PIN for this command (needed to unlock afterwards)",
+                )
+
         direct_dispatch = {
-            "refresh_info": mdm_connector.get_device_info,
-            "restart": mdm_connector.restart_device,
-            "shutdown": mdm_connector.shutdown_device,
-            "clear_passcode": mdm_connector.clear_passcode,
+            # Inventory / posture refreshes (any role)
+            "refresh_info": lambda: mdm_connector.get_device_info(device.udid),
+            "security_info": lambda: mdm_connector.get_security_info(device.udid),
+            "profile_list": lambda: mdm_connector.get_profile_list(device.udid),
+            "app_list": lambda: mdm_connector.get_installed_apps(device.udid),
+            # Power / security actions (admin-only via DESTRUCTIVE_COMMANDS)
+            "restart": lambda: mdm_connector.restart_device(device.udid),
+            "shutdown": lambda: mdm_connector.shutdown_device(device.udid),
+            "clear_passcode": lambda: mdm_connector.clear_passcode(device.udid),
+            "lock": lambda: mdm_connector.device_lock(
+                device.udid, pin=pin, message=params.get("message"),
+                phone_number=params.get("phone_number"),
+            ),
+            "erase": lambda: mdm_connector.erase_device(device.udid, pin=pin),
         }
         handler = direct_dispatch.get(command.command_type)
         if handler is None:
             raise HTTPException(status_code=400, detail="Invalid command type")
 
+        # Audit trail: record who ran what — but never persist PINs/secrets.
+        audit_details = {k: v for k, v in params.items() if k not in ("pin",)}
         task = await task_manager.create_task(
             tenant=tenant,
             task_type=command.command_type,
             description=f"{command.command_type} on {device.serial_number}",
             device=device,
             user=principal.email,
-            details={},
+            details=audit_details,
         )
         try:
-            result = await handler(device.udid)
+            result = await handler()
             task.details["command_uuid"] = result.get("command_uuid")
             task.status = "running"
             await task.save()

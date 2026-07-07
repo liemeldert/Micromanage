@@ -210,31 +210,61 @@ class WebhookHandler:
             if trimmed:
                 task.details = {**(task.details or {}), "response": _json_safe(trimmed)}
                 await task.save(update_fields=["details"])
-            if task.type == "refresh_info":
-                await self._apply_device_info(task, response)
+            await self._persist_inventory(task, response)
             await task.update_progress(100, "completed")
         elif status in ("Error", "CommandFormatError"):
             task.error = self._error_message(response, f"{task.type} failed")
             await task.update_progress(task.progress, "failed")
         # NotNow: device is busy; NanoMDM redelivers on its next connect — keep waiting.
 
-    async def _apply_device_info(self, task: Task, response: Dict[str, Any]):
-        """Enrich the device record from a DeviceInformation QueryResponses."""
-        info = response.get("QueryResponses") or {}
-        if not info:
-            return
+    async def _persist_inventory(self, task: Task, response: Dict[str, Any]):
+        """Persist inventory/posture responses onto the Device row.
+
+        Device.attributes carries everything the device reports about itself so
+        the UI can display properties data-driven (no per-attribute columns).
+        """
         device = await Device.get_or_none(id=task.device_id)
         if not device:
             return
-        if info.get("SerialNumber"):
-            device.serial_number = info["SerialNumber"]
-        model = info.get("ProductName") or info.get("Model")
-        if model:
-            device.device_model = model
-        if info.get("OSVersion"):
-            device.os_version = info["OSVersion"]
-        if info.get("DeviceName"):
-            device.hostname = info["DeviceName"]
+
+        if task.type == "refresh_info":
+            info = response.get("QueryResponses") or {}
+            if not info:
+                return
+            # Full snapshot into attributes (merged, so SecurityInfo survives)...
+            device.attributes = {**(device.attributes or {}), **_json_safe(info)}
+            # ...plus the first-class identity columns used in lists/joins.
+            if info.get("SerialNumber"):
+                device.serial_number = info["SerialNumber"]
+            model = info.get("ProductName") or info.get("Model")
+            if model:
+                device.device_model = model
+            if info.get("OSVersion"):
+                device.os_version = info["OSVersion"]
+            if info.get("DeviceName"):
+                device.hostname = info["DeviceName"]
+
+        elif task.type == "security_info":
+            sec = response.get("SecurityInfo")
+            if not sec:
+                return
+            device.attributes = {**(device.attributes or {}), "SecurityInfo": _json_safe(sec)}
+
+        elif task.type == "profile_list":
+            profiles = response.get("ProfileList")
+            if profiles is None:
+                return
+            device.installed_profiles = _json_safe(profiles)
+
+        elif task.type == "app_list":
+            apps = response.get("InstalledApplicationList")
+            if apps is None:
+                return
+            device.installed_apps = _json_safe(apps)
+
+        else:
+            return
+
         await device.save()
 
     # ── Per-command response handlers ─────────────────────────────────────────

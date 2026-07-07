@@ -18,6 +18,20 @@ export class ApiError extends Error {
   }
 }
 
+// A 401 on any authenticated call means the session is dead (expired or
+// revoked token). Clear it and force a fresh sign-in instead of leaving the
+// user on a page that just error-toasts forever.
+function handleUnauthorized(path: string) {
+  if (typeof window === "undefined") return;
+  // login/discover legitimately 401 on bad input — those surface inline. But a
+  // 401 on /auth/me or any authed call means the session is dead → force login.
+  if (path.startsWith("/api/v1/auth/login") || path.startsWith("/api/v1/auth/discover")) return;
+  localStorage.removeItem("mm_auth");
+  if (!window.location.pathname.startsWith("/login")) {
+    window.location.href = "/login?expired=1";
+  }
+}
+
 async function request<T>(
   path: string,
   token: string | undefined,
@@ -30,6 +44,8 @@ async function request<T>(
   if (token) headers["Authorization"] = `Bearer ${token}`;
 
   const res = await fetch(proxyPath(path), { ...options, headers });
+
+  if (res.status === 401) handleUnauthorized(path);
 
   if (!res.ok) {
     let detail = res.statusText;
@@ -72,6 +88,15 @@ export const api = {
     );
   },
 
+  // Email-first sign-in: which tenants can this email use, and how (local
+  // password vs external IdP). Rate-limited server-side.
+  discoverLogin(email: string) {
+    return request<{ tenants: DiscoveredTenant[] }>("/api/v1/auth/discover", undefined, {
+      method: "POST",
+      body: JSON.stringify({ email }),
+    });
+  },
+
   // Stats
   getStats(token: string) {
     return request<{
@@ -98,7 +123,7 @@ export const api = {
   // Devices
   listDevices(
     token: string,
-    params: { skip?: number; limit?: number; group?: string; model?: string } = {},
+    params: { skip?: number; limit?: number; group?: string; model?: string; search?: string } = {},
   ) {
     const qs = new URLSearchParams(
       Object.entries(params)
@@ -139,6 +164,7 @@ export const api = {
     const res = await fetch(proxyPath(`/api/v1/config/${type}?raw=true`), {
       headers: { Authorization: `Bearer ${token}` },
     });
+    if (res.status === 401) handleUnauthorized("/api/v1/config");
     if (!res.ok) {
       let detail = res.statusText;
       try {
@@ -254,6 +280,13 @@ export const api = {
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
+export interface DiscoveredTenant {
+  tenant_id: string;
+  name: string;
+  provider: string; // "local" | "clerk" | "oidc"
+  login_url?: string;
+}
+
 export interface Device {
   id: string;
   udid: string;
@@ -264,10 +297,17 @@ export interface Device {
   groups: string[];
   enrollment_date: string;
   last_seen: string;
+  // Full device-reported state (DeviceInformation QueryResponses, SecurityInfo)
+  // — present on the detail endpoint, rendered data-driven.
+  attributes?: Record<string, unknown>;
 }
 
 export interface DeviceDetail {
   device: Device;
+  // Inventory as reported by the device itself
+  device_profiles: Record<string, unknown>[];
+  device_apps: Record<string, unknown>[];
+  // Management-intent deployments (what we pushed)
   installed_apps: { app_id: string; version: string; status: string; install_date: string | null }[];
   installed_profiles: { profile_id: string; status: string; install_date: string | null }[];
   recent_tasks: Task[];

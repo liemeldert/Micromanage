@@ -62,7 +62,11 @@ class Device(Model):
     groups = fields.JSONField(default=list)  # Computed group memberships
     installed_apps = fields.JSONField(default=dict)
     installed_profiles = fields.JSONField(default=list)
-    
+    # Everything the device reports about itself (DeviceInformation
+    # QueryResponses, SecurityInfo, ...) — kept as-is so the UI can render
+    # properties data-driven instead of hardcoding a column per attribute.
+    attributes = fields.JSONField(default=dict)
+
     class Meta:
         table = "devices"
 
