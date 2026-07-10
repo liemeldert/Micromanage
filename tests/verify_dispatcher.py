@@ -122,6 +122,15 @@ DISPATCHER_DOC = {
                 "command": "set_recovery_lock", "params": {"new_password": "supersecret"}}}],
             "auto_resolve": False,
         },
+        {  # REGRESSION target: grace_minutes > 0, NO auto_resolve. A pending
+           # alert that self-heals within grace must still resolve (not stay
+           # pending forever), so its first_detected_at anchor can't be reused
+           # by a later violation.
+            "id": "flaky-tag", "name": "Flaky tag grace", "severity": "yellow",
+            "check": {"type": "tagged", "tags": ["flaky"]}, "grace_minutes": 30,
+            "actions": [],
+            "auto_resolve": False,
+        },
     ],
 }
 
@@ -283,6 +292,59 @@ async def main():
     )
     check("url redacted", red["webhooks"][0]["url"] == "***redacted***")
     check("secret redacted", red["webhooks"][0]["secret"] == "***redacted***")
+
+    # ── 11) REGRESSION: grace anchor resets across a compliant interlude ──────
+    # Rule "flaky-tag" has grace_minutes=30 and auto_resolve=False (default).
+    # Before the fix, a 'pending' alert that self-healed within grace was left
+    # pending (only an OPEN alert respected auto_resolve, and this rule never
+    # opens on this timeline) -- so a later violation reused the same row and
+    # its now-stale first_detected_at, corrupting the grace anchor. The fix
+    # resolves a still-pending alert on compliance unconditionally.
+    print("11) REGRESSION: a pending alert resolves on a compliant interlude, "
+          "so a later violation gets a fresh grace anchor")
+    dev2 = await Device.create(
+        tenant=tenant, udid="UDID-2", serial_number="MACY", device_model="MacBookPro18,3",
+        os_version="14.5", enrollment_state="enrolled", groups=[], tags=[],
+    )
+
+    async def flaky_alert():
+        return await Alert.get_or_none(device_id=dev2.id, rule_id="flaky-tag")
+
+    # Violate: tag applied -> a pending alert anchors the grace period.
+    dev2.tags = ["flaky"]
+    await dev2.save(update_fields=["tags"])
+    await dispatcher.evaluate_device(dev2)
+    first = await flaky_alert()
+    check("violation creates a pending alert", first is not None and first.status == "pending")
+    first_id = first.id
+
+    # Become compliant well within the 30-minute grace window (no time travel):
+    # the alert never opened, so only the fix's unconditional-resolve-on-pending
+    # path can clear it.
+    dev2.tags = []
+    await dev2.save(update_fields=["tags"])
+    await dispatcher.evaluate_device(dev2)
+    resolved = await flaky_alert()
+    check("pending alert resolved on compliant interlude (not left pending)",
+          resolved is not None and resolved.status == "resolved")
+
+    # Violate again immediately: must NOT reuse the resolved row or its old
+    # first_detected_at anchor.
+    t_violation2 = datetime.now(timezone.utc)
+    dev2.tags = ["flaky"]
+    await dev2.save(update_fields=["tags"])
+    await dispatcher.evaluate_device(dev2)
+    second = await Alert.filter(
+        device_id=dev2.id, rule_id="flaky-tag"
+    ).exclude(status="resolved").first()
+    check("a NEW pending alert exists for the second violation", second is not None)
+    check("the new alert is a distinct row from the first", second is not None and second.id != first_id)
+    second_anchor = second.first_detected_at if second else None
+    if second_anchor is not None and second_anchor.tzinfo is None:
+        second_anchor = second_anchor.replace(tzinfo=timezone.utc)
+    check("the new alert's first_detected_at is fresh (>= the second violation, "
+          "not inherited from the first)",
+          second_anchor is not None and second_anchor >= t_violation2 - timedelta(seconds=5))
 
     await asyncio.sleep(0.2)
     await Tortoise.close_connections()

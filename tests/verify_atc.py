@@ -122,6 +122,63 @@ BASE_FLOWS = {
                 {"id": "done", "type": "end"},
             ],
         },
+        {
+            # Regression: two sequential wait_for(profile_installed) barriers.
+            # W2 must not be satisfied by a stale ref left over from W1.
+            "id": "double-wait-flow",
+            "name": "Double wait",
+            "enabled": True,
+            "priority": 1,
+            "trigger": {"on": "enroll", "match": {}},
+            "start": "inst1",
+            "nodes": [
+                {"id": "inst1", "type": "install_profiles",
+                 "params": {"profile_ids": ["P1"]}, "next": "wait1"},
+                {"id": "wait1", "type": "wait_for",
+                 "params": {"signal": "profile_installed", "timeout_minutes": 30},
+                 "next": "inst2"},
+                {"id": "inst2", "type": "install_profiles",
+                 "params": {"profile_ids": ["P2"]}, "next": "wait2"},
+                {"id": "wait2", "type": "wait_for",
+                 "params": {"signal": "profile_installed", "timeout_minutes": 30},
+                 "next": "done2"},
+                {"id": "done2", "type": "end"},
+            ],
+        },
+        {
+            # Regression: re-enroll must cancel ALL active runs for the device,
+            # not just a prior run of the same flow id. Scoped to a specific
+            # serial prefix (via an additional AND'd condition) so it can never
+            # win against another test's device elsewhere in this suite.
+            "id": "re-enroll-a",
+            "name": "Re-enroll A (tag absent)",
+            "enabled": True,
+            "priority": 200,
+            "trigger": {"on": "enroll", "match": {"conditions": [
+                {"type": "serial_number", "operator": "contains", "value": "SWITCH"},
+                {"type": "tag", "operator": "in", "value": ["switch-flow"], "negate": True}]}},
+            "start": "await-a",
+            "nodes": [
+                {"id": "await-a", "type": "wait_for",
+                 "params": {"signal": "device_info", "timeout_minutes": 60}, "next": "end-a"},
+                {"id": "end-a", "type": "end"},
+            ],
+        },
+        {
+            "id": "re-enroll-b",
+            "name": "Re-enroll B (tag present)",
+            "enabled": True,
+            "priority": 150,
+            "trigger": {"on": "enroll", "match": {"conditions": [
+                {"type": "serial_number", "operator": "contains", "value": "SWITCH"},
+                {"type": "tag", "operator": "in", "value": ["switch-flow"]}]}},
+            "start": "await-b",
+            "nodes": [
+                {"id": "await-b", "type": "wait_for",
+                 "params": {"signal": "device_info", "timeout_minutes": 60}, "next": "end-b"},
+                {"id": "end-b", "type": "end"},
+            ],
+        },
     ]
 }
 
@@ -138,6 +195,8 @@ def _write_configs(base: Path):
     (tdir / "profiles.yaml").write_text(yaml.safe_dump({"profiles": [
         {"id": "eu-wifi", "name": "EU WiFi", "payload": {"PayloadType": "com.apple.wifi"}},
         {"id": "us-wifi", "name": "US WiFi", "payload": {"PayloadType": "com.apple.wifi"}},
+        {"id": "P1", "name": "Profile 1", "payload": {"PayloadType": "com.apple.test1"}},
+        {"id": "P2", "name": "Profile 2", "payload": {"PayloadType": "com.apple.test2"}},
     ]}))
     (tdir / "flows.yaml").write_text(yaml.safe_dump(BASE_FLOWS))
 
@@ -259,6 +318,88 @@ async def main():
     await run6.refresh_from_db()
     check("standalone wait_for(app_installed) skipped -> completed",
           run6.status == "completed")
+
+    # ── 8) REGRESSION: two sequential wait_for(profile_installed) barriers ────
+    # Before the fix, W2's expected refs still carried P1's ref from W1 (never
+    # cleared on resume), so W2 would resolve immediately on P1's signal instead
+    # of genuinely waiting for P2. _consume_expected must reset the bucket when
+    # the run leaves W1.
+    print("8) REGRESSION: a second wait_for(profile_installed) is not satisfied "
+          "by a stale ref from the first")
+    dev7 = await new_device("MAC-DW", "host-7")
+    run7 = await atc.start_flow_by_id(dev7, "double-wait-flow")
+    await run7.refresh_from_db()
+    check("parked at wait1", run7.status == "waiting" and run7.current_node == "wait1")
+    check("wait1 expects P1", "P1" in (run7.context or {}).get("expected", {}).get("profile_installed", []))
+
+    # Simulate P1 installed (deployment row, matching how the reconciler would
+    # record it) and deliver the matching signal. install_profiles spawns a
+    # background task that get_or_creates its own (pending) deployment row, so
+    # use update_or_create (same idiom as ProfileManager.deploy_profile) rather
+    # than a blind create that would race it.
+    from controller.models.tenant import ProfileDeployment as _PD
+
+    async def _mark_installed(device, profile_id):
+        await _PD.update_or_create(
+            tenant=tenant, device=device, profile_id=profile_id,
+            defaults={"status": "installed"},
+        )
+
+    await _mark_installed(dev7, "P1")
+    await atc.advance_on_signal(str(dev7.id), "profile_installed", ref="P1")
+    await run7.refresh_from_db()
+    check("advanced past wait1 to wait2 (not completed)",
+          run7.status == "waiting" and run7.current_node == "wait2")
+    check("wait2 expects P2, not P1 (stale ref cleared)",
+          "P2" in (run7.context or {}).get("expected", {}).get("profile_installed", [])
+          and "P1" not in (run7.context or {}).get("expected", {}).get("profile_installed", []))
+
+    # A redelivered P1 signal must NOT resume wait2 (that's the bug: the old ref
+    # satisfying the new barrier).
+    await atc.advance_on_signal(str(dev7.id), "profile_installed", ref="P1")
+    await run7.refresh_from_db()
+    check("redelivered P1 ref does NOT resume wait2",
+          run7.status == "waiting" and run7.current_node == "wait2")
+
+    # Now genuinely satisfy wait2 with P2 and confirm completion.
+    await _mark_installed(dev7, "P2")
+    await atc.advance_on_signal(str(dev7.id), "profile_installed", ref="P2")
+    await run7.refresh_from_db()
+    check("matching P2 ref resumes wait2 to completion", run7.status == "completed")
+
+    # ── 9) REGRESSION: re-enroll supersedes ALL active runs, not just the same
+    #      flow id ─────────────────────────────────────────────────────────────
+    # Set up two enroll flows: A (higher priority) wins while a 'switch-flow' tag
+    # is absent and parks at a wait_for. Then flip device state so A's trigger no
+    # longer matches and B's does, and re-enroll. The prior A run must be
+    # cancelled (not left dangling in 'waiting') and only B's run active.
+    print("9) REGRESSION: re-enroll cancels a prior run even when a DIFFERENT "
+          "flow wins the second time")
+    dev8 = await new_device("MAC-SWITCH", "host-8")
+    dev8.tags = []
+    await dev8.save(update_fields=["tags"])
+    run_first = await atc.start_flows_for_enroll(dev8)
+    await run_first.refresh_from_db()
+    check("first enroll picked flow A (tag absent)", run_first.flow_id == "re-enroll-a")
+    check("flow A run parked waiting", run_first.status == "waiting")
+
+    # Flip device state: flow A's trigger (negated tag) no longer matches, flow
+    # B's (tag present) now does.
+    await dev8.refresh_from_db()
+    dev8.tags = ["switch-flow"]
+    await dev8.save(update_fields=["tags"])
+    run_second = await atc.start_flows_for_enroll(dev8)
+    await run_first.refresh_from_db()
+    await run_second.refresh_from_db()
+    check("second enroll picked the NEW winning flow B", run_second.flow_id == "re-enroll-b")
+    check("distinct flow ids across the two runs", run_first.flow_id != run_second.flow_id)
+    check("prior flow-A run cancelled (superseded across flow ids)",
+          run_first.status == "cancelled")
+    active_count = await FlowRun.filter(
+        device_id=dev8.id, status__in=["running", "waiting"]
+    ).count()
+    check("at most one active run remains for the device", active_count <= 1)
+    check("the one active run is flow B's", run_second.status in ("waiting", "running", "completed"))
 
     # Let any spawned install/reconcile background tasks settle, then close.
     await asyncio.sleep(0.2)
