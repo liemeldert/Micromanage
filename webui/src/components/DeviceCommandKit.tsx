@@ -26,6 +26,7 @@ import {
   PasswordInput,
   PinInput,
   Stack,
+  Switch,
   Text,
   Textarea,
   TextInput,
@@ -50,15 +51,22 @@ import { api, type CatalogCommand, type Device } from "../../lib/api";
 import { useAuth } from "../../lib/auth-context";
 
 // ── Custom flows for commands we know well ────────────────────────────────────
-const KNOWN_FLOWS: Record<string, { body: string; danger?: boolean; serialConfirm?: boolean }> = {
+const KNOWN_FLOWS: Record<
+  string,
+  { body: string; danger?: boolean; serialConfirm?: boolean; returnToService?: boolean }
+> = {
   restart:          { body: "The device will reboot now." },
   shutdown:         { body: "The device will power off and can only be turned back on physically." },
   clear_passcode:   { body: "Removes the device passcode. On iOS the user can then set a new one." },
   lock:             { body: "Locks the device immediately." },
   enable_lost_mode: { body: "Locks the device into Managed Lost Mode and shows your message on the lock screen. The user can't use the device until you disable Lost Mode." },
   disable_lost_mode:{ body: "Takes the device out of Managed Lost Mode and unlocks it." },
-  erase:            { body: "Permanently erases ALL content and settings. This cannot be undone.", danger: true, serialConfirm: true },
+  erase:            { body: "Permanently erases ALL content and settings. This cannot be undone.", danger: true, serialConfirm: true, returnToService: true },
 };
+
+// Erase params handled by the tailored Return-to-Service section, so the
+// generic param loop skips them.
+const RTS_PARAMS = new Set(["return_to_service", "wifi_ssid", "wifi_password", "wifi_hidden"]);
 
 const CATEGORY_ICONS: Record<string, React.FC<{ size?: number }>> = {
   Queries: IconRefresh,
@@ -132,14 +140,23 @@ function CommandModal({
   const flow = KNOWN_FLOWS[entry.type];
   const mac = isMac(device);
 
+  // Return to Service eligibility: supervised iOS/iPadOS 17+ (not Mac).
+  const attrs = (device.attributes ?? {}) as Record<string, unknown>;
+  const supervised = attrs.IsSupervised === true;
+  const osMajor = parseInt((device.os_version || "").split(".")[0], 10) || 0;
+  const rtsEligible = !!flow?.returnToService && supervised && !mac && osMajor >= 17;
+  const rtsOn = values.return_to_service === "true";
+
   const requiredMissing = entry.params.some((p) => {
+    if (RTS_PARAMS.has(p.name)) return false; // validated separately below
     const need = p.required === true || (p.required === "mac" && mac);
     return need && !(values[p.name] ?? "").trim();
   });
   const pinParam = entry.params.find((p) => p.type === "pin");
   const pinInvalid = !!pinParam && !!values[pinParam.name] && !/^\d{6}$/.test(values[pinParam.name]);
   const serialBlocked = !!flow?.serialConfirm && serialText.trim() !== device.serial_number;
-  const canSubmit = !requiredMissing && !pinInvalid && !serialBlocked;
+  const rtsMissingWifi = rtsOn && !(values.wifi_ssid ?? "").trim();
+  const canSubmit = !requiredMissing && !pinInvalid && !serialBlocked && !rtsMissingWifi;
 
   const close = () => {
     setValues({});
@@ -195,7 +212,7 @@ function CommandModal({
           </Alert>
         )}
 
-        {entry.params.map((p) => {
+        {entry.params.filter((p) => !RTS_PARAMS.has(p.name)).map((p) => {
           const need = p.required === true || (p.required === "mac" && mac);
           if (p.type === "pin") {
             // Macs require the PIN; skip the field entirely on non-Macs unless required.
@@ -233,6 +250,58 @@ function CommandModal({
             />
           );
         })}
+
+        {flow?.returnToService && rtsEligible && (
+          <Box style={{ borderTop: "1px solid var(--mantine-color-default-border)", paddingTop: 12 }}>
+            <Switch
+              checked={rtsOn}
+              onChange={(e) => {
+                // Read before the updater -- React recycles the synthetic event.
+                const on = e.currentTarget.checked;
+                setValues((s) => ({ ...s, return_to_service: on ? "true" : "" }));
+              }}
+              label="Re-enroll automatically after wipe (Return to Service)"
+              description="Instead of returning to a blank out-of-box state, the device wipes, rejoins the Wi-Fi below, and comes back enrolled — no manual re-setup."
+            />
+            {rtsOn && (
+              <Stack gap="xs" mt="sm" pl="md" style={{ borderLeft: "2px solid var(--mantine-color-blue-3)" }}>
+                <TextInput
+                  label="Wi-Fi network (SSID)"
+                  description="The wiped device joins this network during Setup Assistant to reach the server."
+                  required
+                  value={values.wifi_ssid ?? ""}
+                  onChange={(e) => {
+                    const v = e.currentTarget.value;
+                    setValues((s) => ({ ...s, wifi_ssid: v }));
+                  }}
+                />
+                <PasswordInput
+                  label="Wi-Fi password"
+                  description="Leave blank for an open network."
+                  autoComplete="new-password"
+                  value={values.wifi_password ?? ""}
+                  onChange={(e) => {
+                    const v = e.currentTarget.value;
+                    setValues((s) => ({ ...s, wifi_password: v }));
+                  }}
+                />
+                <Switch
+                  checked={values.wifi_hidden === "true"}
+                  onChange={(e) => {
+                    const on = e.currentTarget.checked;
+                    setValues((s) => ({ ...s, wifi_hidden: on ? "true" : "" }));
+                  }}
+                  label="Hidden network"
+                />
+              </Stack>
+            )}
+          </Box>
+        )}
+        {flow?.returnToService && !rtsEligible && supervised && !mac && osMajor > 0 && osMajor < 17 && (
+          <Text fz="xs" c="dimmed">
+            Automatic re-enroll after wipe (Return to Service) needs iOS/iPadOS 17 or later.
+          </Text>
+        )}
 
         {flow?.serialConfirm && (
           <TextInput

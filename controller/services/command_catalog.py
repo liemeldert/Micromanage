@@ -252,6 +252,17 @@ COMMAND_CATALOG: List[Dict[str, Any]] = [
         "params": [
             {"name": "pin", "label": "6-digit PIN", "type": "pin", "required": "mac",
              "secret": True, "help": "Needed to unlock an Intel Mac after the wipe."},
+            # Return to Service (supervised iOS/iPadOS 17+): the device re-enrolls
+            # automatically after the wipe. Rendered by a tailored section in the
+            # erase modal (not the generic param form) -- see DeviceCommandKit.
+            {"name": "return_to_service", "label": "Re-enroll after wipe (Return to Service)",
+             "type": "string", "required": False,
+             "help": "Supervised iOS/iPadOS 17+ only. The device wipes and rejoins management automatically."},
+            {"name": "wifi_ssid", "label": "Wi-Fi network (SSID)", "type": "string", "required": False,
+             "help": "Network the wiped device joins to reach the server."},
+            {"name": "wifi_password", "label": "Wi-Fi password", "type": "string", "required": False,
+             "secret": True},
+            {"name": "wifi_hidden", "label": "Hidden network", "type": "string", "required": False},
         ],
     },
 

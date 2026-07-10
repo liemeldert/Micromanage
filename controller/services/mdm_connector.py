@@ -211,20 +211,46 @@ class MDMConnector:
         logger.info(f"Queued rename for {device_udid} -> {name!r}: {result}")
         return result
 
-    async def erase_device(self, device_udid: str, pin: Optional[str] = None) -> Dict[str, Any]:
+    async def erase_device(
+        self,
+        device_udid: str,
+        pin: Optional[str] = None,
+        return_to_service: Optional[Dict[str, bytes]] = None,
+    ) -> Dict[str, Any]:
         """Erase the device (EraseDevice). Irreversible.
 
         Intel Macs require a 6-digit PIN (needed afterwards to unlock);
         Apple Silicon and iOS obliterate without one.
+
+        ``return_to_service`` (supervised iOS/iPadOS 17+) makes the device
+        automatically re-enroll after the wipe instead of returning to a plain
+        out-of-box state. Pass a dict with:
+          * ``wifi_profile``  -- a Wi-Fi .mobileconfig (bytes) the wiped device
+            joins to reach the server (required for non-ADE devices);
+          * ``enrollment_profile`` -- the enrollment .mobileconfig (bytes) to
+            re-apply (required for non-ADE; ADE devices can omit it).
+        plistlib serializes the bytes as <data>.
         """
         command_dict: Dict[str, Any] = {}
         if pin:
             command_dict['PIN'] = pin
+        if return_to_service:
+            rts: Dict[str, Any] = {'Enabled': True}
+            wifi = return_to_service.get('wifi_profile')
+            enroll = return_to_service.get('enrollment_profile')
+            if wifi:
+                rts['MDMServiceConfigWiFiProfileData'] = wifi
+            if enroll:
+                rts['MDMServiceConfigProfileData'] = enroll
+            command_dict['ReturnToService'] = rts
 
         command_plist, command_uuid = self._create_command_plist('EraseDevice', command_dict)
         result = await self.enqueue_command(device_udid, command_plist, command_uuid=command_uuid)
 
-        logger.warning(f"Queued device ERASE for {device_udid}: {result}")
+        logger.warning(
+            f"Queued device ERASE for {device_udid}"
+            f"{' (Return to Service)' if return_to_service else ''}: {result}"
+        )
         return result
 
     async def get_installed_apps(self, device_udid: str) -> Dict[str, Any]:

@@ -141,3 +141,56 @@ def build_enrollment_profile(tenant) -> Dict[str, Any]:
 
 def build_enrollment_mobileconfig(tenant) -> bytes:
     return plistlib.dumps(build_enrollment_profile(tenant))
+
+
+def build_wifi_profile(
+    ssid: str,
+    password: str = None,
+    hidden: bool = False,
+    encryption: str = None,
+    org: str = None,
+) -> Dict[str, Any]:
+    """A minimal Wi-Fi configuration profile.
+
+    Used by Return to Service so a freshly-wiped device can reach the MDM
+    server during Setup Assistant. ``encryption`` defaults to WPA (Apple's
+    "WPA" covers WPA/WPA2/WPA3 Personal) when a password is given, else None
+    (open network).
+    """
+    payload_uuid = str(uuid.uuid4()).upper()
+    wifi: Dict[str, Any] = {
+        "PayloadType": "com.apple.wifi.managed",
+        "PayloadVersion": 1,
+        "PayloadIdentifier": f"com.micromanage.rts.wifi.{payload_uuid}",
+        "PayloadUUID": payload_uuid,
+        "PayloadDisplayName": f"Wi-Fi ({ssid})",
+        "SSID_STR": ssid,
+        "HIDDEN_NETWORK": bool(hidden),
+        "AutoJoin": True,
+        "EncryptionType": encryption or ("WPA" if password else "None"),
+    }
+    if password:
+        wifi["Password"] = password
+    return {
+        "PayloadType": "Configuration",
+        "PayloadVersion": 1,
+        "PayloadDisplayName": "Return to Service Wi-Fi",
+        "PayloadIdentifier": f"com.micromanage.rts.wifi.{payload_uuid}.profile",
+        "PayloadUUID": str(uuid.uuid4()).upper(),
+        "PayloadOrganization": org or "",
+        "PayloadScope": "System",
+        "PayloadContent": [wifi],
+    }
+
+
+def build_wifi_mobileconfig(
+    ssid: str,
+    password: str = None,
+    hidden: bool = False,
+    encryption: str = None,
+    org: str = None,
+) -> bytes:
+    return plistlib.dumps(
+        build_wifi_profile(ssid, password=password, hidden=hidden,
+                           encryption=encryption, org=org)
+    )

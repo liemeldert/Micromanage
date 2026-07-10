@@ -96,6 +96,22 @@ def _atomic_write_yaml(path: Path, data: Dict[str, Any]) -> None:
     os.replace(tmp, path)
 
 
+def _truthy(value: Any) -> bool:
+    """Interpret a command parameter (usually a string) as a boolean."""
+    if isinstance(value, bool):
+        return value
+    return str(value).strip().lower() in ("true", "1", "yes", "on")
+
+
+def _os_at_least(os_version: Optional[str], major: int) -> bool:
+    """True if the device OS major version is >= ``major`` (False if unparseable)."""
+    from packaging import version
+    try:
+        return version.parse(str(os_version or "")).major >= major
+    except Exception:
+        return False
+
+
 # Base models
 class LoginRequest(BaseModel):
     tenant_id: str
@@ -1155,6 +1171,50 @@ async def send_device_command(
         if command.command_type == "enable_lost_mode" and not params.get("message"):
             raise HTTPException(status_code=400, detail="Lost Mode requires a lock screen message")
 
+        # Return to Service: erase + automatic re-enroll (supervised iOS/iPadOS 17+).
+        rts_payload = None
+        if command.command_type == "erase" and _truthy(params.get("return_to_service")):
+            attrs = device.attributes or {}
+            is_mac = "mac" in (device.device_model or "").lower()
+            if is_mac:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Return to Service is an iOS/iPadOS feature; it isn't supported on Macs.",
+                )
+            if attrs.get("IsSupervised") is not True:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Return to Service requires a supervised device.",
+                )
+            if not _os_at_least(device.os_version, 17):
+                raise HTTPException(
+                    status_code=400,
+                    detail="Return to Service requires iOS/iPadOS 17 or later "
+                           f"(device reports {device.os_version or 'unknown'}).",
+                )
+            wifi_ssid = (params.get("wifi_ssid") or "").strip()
+            if not wifi_ssid:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Return to Service needs a Wi-Fi network so the wiped device can reach the server.",
+                )
+            enroll_info = enrollment_svc.enrollment_details(tenant)
+            if not enroll_info.get("configured"):
+                raise HTTPException(
+                    status_code=400,
+                    detail="Enrollment isn't fully configured, so the re-enrollment profile "
+                           f"can't be built (missing: {', '.join(enroll_info.get('missing') or [])}).",
+                )
+            rts_payload = {
+                "enrollment_profile": enrollment_svc.build_enrollment_mobileconfig(tenant),
+                "wifi_profile": enrollment_svc.build_wifi_mobileconfig(
+                    wifi_ssid,
+                    password=params.get("wifi_password") or None,
+                    hidden=_truthy(params.get("wifi_hidden")),
+                    org=tenant.name,
+                ),
+            }
+
         # Commands with bespoke payload handling; everything else in the catalog
         # is generic -- RequestType + plist-mapped parameters, passed through.
         special_dispatch = {
@@ -1169,7 +1229,9 @@ async def send_device_command(
                 device.udid, pin=pin, message=params.get("message"),
                 phone_number=params.get("phone_number"),
             ),
-            "erase": lambda: mdm_connector.erase_device(device.udid, pin=pin),
+            "erase": lambda: mdm_connector.erase_device(
+                device.udid, pin=pin, return_to_service=rts_payload,
+            ),
             "enable_lost_mode": lambda: mdm_connector.enable_lost_mode(
                 device.udid, message=str(params.get("message") or ""),
                 phone_number=params.get("phone_number"), footnote=params.get("footnote"),
