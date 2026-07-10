@@ -157,6 +157,18 @@ export const api = {
     return request<DeviceDetail>(`/api/v1/devices/${id}`, token);
   },
 
+  // Forget a device (admin only). 409 if it is still enrolled -- unenroll first.
+  deleteDevice(token: string, id: string) {
+    return request<{ message: string }>(`/api/v1/devices/${id}`, token, {
+      method: "DELETE",
+    });
+  },
+
+  // Read-only "why does / doesn't this device receive X" troubleshooting.
+  explainDeviceScope(token: string, id: string) {
+    return request<ScopeExplain>(`/api/v1/devices/${id}/scope-explain`, token);
+  },
+
   // Set the managed name and push it to the device (if enrolled + supervised).
   renameDevice(token: string, id: string, name: string) {
     return request<{ device: Device; pushed: boolean; task_id: string | null }>(
@@ -399,9 +411,36 @@ export const api = {
     });
   },
 
+  // Re-run a failed or cancelled task through its original handler as a fresh
+  // task (server rejects in-flight/completed tasks and non-re-runnable types).
+  retryTask(token: string, id: string) {
+    return request<{ task_id: string; message: string }>(
+      `/api/v1/tasks/${id}/retry`,
+      token,
+      { method: "POST" },
+    );
+  },
+
   // Tenant
   getTenant(token: string) {
     return request<TenantInfo>("/api/v1/tenant", token);
+  },
+
+  // Update tenant settings (admin only). Any omitted field is left unchanged.
+  updateTenant(
+    token: string,
+    body: {
+      name?: string;
+      allowed_users?: string[];
+      s3_config?: Record<string, unknown>;
+      dep_enabled?: boolean;
+      is_active?: boolean;
+    },
+  ) {
+    return request<{ message: string }>("/api/v1/tenant", token, {
+      method: "PUT",
+      body: JSON.stringify(body),
+    });
   },
 
   // Users (admin only -- server enforces via require_admin; a non-admin call
@@ -513,6 +552,15 @@ export interface Device {
   // Full device-reported state (DeviceInformation QueryResponses, SecurityInfo)
   // -- present on the detail endpoint, rendered data-driven.
   attributes?: Record<string, unknown>;
+  // Most recent failed task for this device (detail endpoint only), so a failed
+  // deployment surfaces its reason without opening the Activity tab.
+  last_task_error?: {
+    task_id: string;
+    task_type: string;
+    error: string | null;
+    created_at: string | null;
+    completed_at: string | null;
+  } | null;
 }
 
 export interface DeviceDetail {
@@ -524,6 +572,21 @@ export interface DeviceDetail {
   installed_apps: { app_id: string; version: string; status: string; install_date: string | null }[];
   installed_profiles: { profile_id: string; status: string; install_date: string | null }[];
   recent_tasks: Task[];
+}
+
+// One profile/app/group in a device's scope-explain response: whether the
+// device receives it and a human-readable reason for the decision.
+export interface ScopeExplainEntry {
+  id: string;
+  name: string;
+  matched: boolean;
+  reason: string;
+}
+
+export interface ScopeExplain {
+  profiles: ScopeExplainEntry[];
+  apps: ScopeExplainEntry[];
+  groups: ScopeExplainEntry[];
 }
 
 export interface Task {
