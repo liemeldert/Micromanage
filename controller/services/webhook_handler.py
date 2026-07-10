@@ -90,6 +90,7 @@ class WebhookHandler:
         self, udid: str, url_params: Dict[str, Any], info: Dict[str, Any]
     ) -> Optional[Device]:
         device = await Device.get_or_none(udid=udid)
+        created = False
 
         # New UDID. The durable identity of a physical device is its SERIAL, not
         # its udid (a wipe + re-enroll yields a new udid). So reuse an existing
@@ -128,6 +129,7 @@ class WebhookHandler:
                     os_version=info.get("OSVersion") or "",
                     hostname=info.get("DeviceName"),
                 )
+                created = True
                 logger.info(
                     f"webhook: enrolled device udid={udid} serial={serial!r} tenant={tenant.id}"
                 )
@@ -149,29 +151,33 @@ class WebhookHandler:
             device.os_version = info["OSVersion"]
         if info.get("DeviceName"):
             device.hostname = info["DeviceName"]
+        # Match groups on every check-in so membership tracks the device's
+        # current facts (model/os/hostname just refreshed above). Also feeds the
+        # group-scoped naming template below. Best-effort: never gate the save.
+        groups_config = []
+        try:
+            from controller.services.group_manager import GroupManager
+            from controller.services.tenant_config import load_groups
+
+            groups_config = load_groups(device.tenant_id)
+            device.groups = GroupManager(device.tenant_id).evaluate_device_groups(
+                device, groups_config
+            )
+        except Exception:
+            logger.exception(f"webhook: group match failed for udid={udid}")
+
         # Auto-derive the managed name on (re-)enroll -- unless a name is already
-        # set (manual or prior). The governing template is group-scoped first
-        # (first matching group in groups.yaml order that defines one), falling
-        # back to the tenant template; apply_on_enroll on the selected scope
-        # gates it. Records the label; the physical device is renamed only via
-        # an explicit push.
-        #
-        # Best-effort and fully isolated: naming must NEVER gate the device.save()
-        # below (which records the enrollment). Group evaluation is timeout-guarded
-        # and every failure is swallowed, so a bad groups.yaml can't drop enrolls.
+        # set. Group-scoped template first (first matching group in groups.yaml
+        # order that defines one), else the tenant template; apply_on_enroll on
+        # the selected scope gates it. The physical device is renamed only via an
+        # explicit push.
         if not device.name:
             try:
-                from controller.services.group_manager import GroupManager
                 from controller.services.naming import resolve_name, select_naming_config
-                from controller.services.tenant_config import load_groups
 
                 t = await Tenant.get_or_none(id=device.tenant_id)
                 tenant_cfg = (t.device_naming or {}) if t else {}
-                groups_config = load_groups(device.tenant_id)
-                group_names = GroupManager(device.tenant_id).evaluate_device_groups(
-                    device, groups_config
-                )
-                cfg, _source = select_naming_config(tenant_cfg, groups_config, group_names)
+                cfg, _source = select_naming_config(tenant_cfg, groups_config, device.groups)
                 if cfg and cfg.get("apply_on_enroll"):
                     derived = resolve_name(cfg.get("template"), device)
                     if derived:
@@ -181,8 +187,18 @@ class WebhookHandler:
                     f"webhook: naming derivation failed for udid={udid}; enrolling without an auto-name"
                 )
         await device.save()  # last_seen auto-updates
-        if was_inactive:
-            logger.info(f"webhook: device udid={udid} re-enrolled (history retained)")
+
+        # Fresh (re)enroll: query full device state now (while it's connected) so
+        # attributes/security posture populate immediately instead of waiting for
+        # the next poll tick. Best-effort; never blocks the enrollment.
+        if created or was_inactive:
+            if was_inactive:
+                logger.info(f"webhook: device udid={udid} re-enrolled (history retained)")
+            try:
+                from controller.services.poller import on_device_enrolled
+                await on_device_enrolled(device)
+            except Exception:
+                logger.exception(f"webhook: post-enroll hook failed for udid={udid}")
         return device
 
     async def _handle_checkout(self, udid: str):
@@ -316,6 +332,25 @@ class WebhookHandler:
                 device.os_version = info["OSVersion"]
             if info.get("DeviceName"):
                 device.hostname = info["DeviceName"]
+            # Fresh facts may change group membership -- recompute now.
+            try:
+                from controller.services.group_manager import GroupManager
+                from controller.services.tenant_config import load_groups
+                device.groups = GroupManager(str(device.tenant_id)).evaluate_device_groups(
+                    device, load_groups(device.tenant_id)
+                )
+            except Exception:
+                logger.exception("group recompute after device info failed for %s", device.udid)
+
+        elif task.type in ("enable_lost_mode", "disable_lost_mode"):
+            # The device acknowledged the Lost Mode change but won't re-report
+            # IsMDMLostModeEnabled until it's next queried. Reflect the new state
+            # optimistically so the lock/unlock UI flips immediately; the next
+            # info poll confirms it.
+            device.attributes = {
+                **(device.attributes or {}),
+                "IsMDMLostModeEnabled": task.type == "enable_lost_mode",
+            }
 
         elif task.type == "security_info":
             sec = response.get("SecurityInfo")

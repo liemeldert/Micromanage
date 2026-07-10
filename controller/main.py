@@ -31,11 +31,23 @@ class MDMController:
         # Optional first-run admin bootstrap (explicit + password-based).
         await self._bootstrap_admin()
 
-        # Schedule periodic sync
+        # Schedule periodic sync (reconcile declared config -> device tasks).
         self.scheduler.add_job(
             self.sync_all_tenants,
             'interval',
-            minutes=int(os.getenv('SYNC_INTERVAL_MINUTES', '5'))
+            minutes=int(os.getenv('SYNC_INTERVAL_MINUTES', '5')),
+            max_instances=1,
+            coalesce=True,
+        )
+        # Schedule adaptive device polling (query observed state + refresh groups).
+        # Runs on its own faster tick; each device is actually queried only when
+        # its adaptive interval has elapsed (see services.poller).
+        self.scheduler.add_job(
+            self.poll_devices,
+            'interval',
+            minutes=int(os.getenv('DEVICE_POLL_TICK_MINUTES', '3')),
+            max_instances=1,
+            coalesce=True,
         )
         self.scheduler.start()
 
@@ -43,6 +55,11 @@ class MDMController:
         await self.sync_all_tenants()
 
         logger.info("MDM Controller started")
+
+    async def poll_devices(self):
+        """Adaptive info-poll + group-refresh across all tenants."""
+        from controller.services.poller import poll_all_tenants
+        await poll_all_tenants(self.yaml_base_path)
 
     async def _bootstrap_admin(self):
         """Create a first admin user from env vars, if configured.

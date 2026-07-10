@@ -74,6 +74,11 @@ class Device(Model):
     enrollment_date = fields.DatetimeField(auto_now_add=True)
     unenrolled_at = fields.DatetimeField(null=True)
     last_seen = fields.DatetimeField(auto_now=True)
+    # Adaptive info-poll schedule (services.poller): when we last queried the
+    # device, and the current cadence in minutes (grows as a device stays silent,
+    # resets to the base when it answers).
+    last_polled_at = fields.DatetimeField(null=True)
+    poll_interval_minutes = fields.IntField(default=30)
     groups = fields.JSONField(default=list)  # Computed group memberships
     installed_apps = fields.JSONField(default=dict)
     installed_profiles = fields.JSONField(default=list)

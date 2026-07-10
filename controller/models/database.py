@@ -18,6 +18,9 @@ _AUX_DDL = [
     # Managed device name + per-tenant dynamic naming template.
     'ALTER TABLE "devices" ADD COLUMN IF NOT EXISTS "name" VARCHAR(255) NULL',
     'ALTER TABLE "tenants" ADD COLUMN IF NOT EXISTS "device_naming" JSONB NOT NULL DEFAULT \'{}\'::jsonb',
+    # Adaptive info-poll schedule (services.poller).
+    'ALTER TABLE "devices" ADD COLUMN IF NOT EXISTS "last_polled_at" TIMESTAMPTZ NULL',
+    'ALTER TABLE "devices" ADD COLUMN IF NOT EXISTS "poll_interval_minutes" INTEGER NOT NULL DEFAULT 30',
 ]
 
 

@@ -58,7 +58,9 @@ class AppManager:
         """Determine which apps should be installed on a device"""
         device_groups = self.group_manager.evaluate_device_groups(device, groups_config)
         device.groups = device_groups
-        await device.save()
+        # Persist only groups -- a full save would clobber concurrently-written
+        # fields (e.g. the poller's last_polled_at) with this object's stale copy.
+        await device.save(update_fields=["groups"])
 
         apps_to_install = []
         now = datetime.now(timezone.utc)

@@ -5,7 +5,7 @@
 // check/cross security posture, key facts) with deeper data-driven sections
 // behind it. Commands come from the server's catalog (see DeviceCommandKit).
 
-import { useEffect, useState, use } from "react";
+import { useEffect, useRef, useState, use } from "react";
 import { useRouter } from "next/navigation";
 import {
   ActionIcon,
@@ -207,12 +207,27 @@ export default function DeviceDetailPage({ params }: { params: Promise<{ id: str
     api.getCommandCatalog(token).then((r) => setCatalog(r.commands)).catch(() => {});
   }, [token]);
 
-  // Command results land asynchronously via the webhook -- refresh quietly.
+  // Command results land asynchronously via the webhook, so we poll the device
+  // for fresh data. Baseline is quiet (15s); after dispatching a command we
+  // burst-poll every ~3s for ~45s so the result (a query response, a lock-state
+  // flip) shows up promptly instead of on the next slow tick.
+  const fastUntilRef = useRef(0);
+  const handleDispatched = () => {
+    fastUntilRef.current = Date.now() + 45_000;
+    load(true);
+  };
   useEffect(() => {
-    const iv = setInterval(() => {
-      if (document.visibilityState === "visible") load(true);
-    }, 15_000);
-    return () => clearInterval(iv);
+    let cancelled = false;
+    let timer: ReturnType<typeof setTimeout>;
+    const tick = async () => {
+      if (cancelled) return;
+      if (document.visibilityState === "visible") await load(true);
+      if (cancelled) return;
+      const fast = Date.now() < fastUntilRef.current;
+      timer = setTimeout(tick, fast ? 3_000 : 15_000);
+    };
+    timer = setTimeout(tick, 15_000);
+    return () => { cancelled = true; clearTimeout(timer); };
   }, [token, id]); // eslint-disable-line react-hooks/exhaustive-deps
 
   if (loading) return <Box py={80} style={{ textAlign: "center" }}><Loader /></Box>;
@@ -352,7 +367,7 @@ export default function DeviceDetailPage({ params }: { params: Promise<{ id: str
             label="Refresh device"
             size="sm"
             variant="default"
-            onDispatched={() => load(true)}
+            onDispatched={handleDispatched}
           />
         )}
       </Group>
@@ -415,7 +430,7 @@ export default function DeviceDetailPage({ params }: { params: Promise<{ id: str
               <QuickActionsCard
                 device={device}
                 catalog={catalog}
-                onDispatched={() => load(true)}
+                onDispatched={handleDispatched}
                 onShowAll={() => setSection("commands")}
               />
             )}
@@ -481,7 +496,7 @@ export default function DeviceDetailPage({ params }: { params: Promise<{ id: str
               <Card withBorder radius="md" p="md">
                 <Group justify="space-between" mb="xs">
                   <Text fz="sm" fw={600}>Security</Text>
-                  <RefreshButton device={device} catalog={catalog} commandType="security_info" disabled={!enrolled} onDispatched={() => load(true)} />
+                  <RefreshButton device={device} catalog={catalog} commandType="security_info" disabled={!enrolled} onDispatched={handleDispatched} />
                 </Group>
                 <SimpleGrid cols={{ base: 1, md: 2 }} spacing="xl" verticalSpacing={0}>
                   <CheckRow label="Passcode set" value={bool(sec.PasscodePresent)} />
@@ -518,7 +533,7 @@ export default function DeviceDetailPage({ params }: { params: Promise<{ id: str
                           commandType="device_location"
                           label={location ? "Update" : "Request location"}
                           disabled={!lostMode}
-                          onDispatched={() => load(true)}
+                          onDispatched={handleDispatched}
                         />
                       </Box>
                     </Tooltip>
@@ -575,7 +590,7 @@ export default function DeviceDetailPage({ params }: { params: Promise<{ id: str
               <Card withBorder radius="md" p="md">
                 <Group justify="space-between" mb="md">
                   <Text fz="sm" fw={600}>On device ({deviceProfiles.length})</Text>
-                  <RefreshButton device={device} catalog={catalog} commandType="profile_list" disabled={!enrolled} onDispatched={() => load(true)} />
+                  <RefreshButton device={device} catalog={catalog} commandType="profile_list" disabled={!enrolled} onDispatched={handleDispatched} />
                 </Group>
                 {deviceProfiles.length === 0 ? (
                   <Text fz="sm" c="dimmed">Not queried yet -- click <b>Refresh</b> to ask the device.</Text>
@@ -628,7 +643,7 @@ export default function DeviceDetailPage({ params }: { params: Promise<{ id: str
               <Card withBorder radius="md" p="md">
                 <Group justify="space-between" mb="md">
                   <Text fz="sm" fw={600}>On device ({deviceApps.length})</Text>
-                  <RefreshButton device={device} catalog={catalog} commandType="app_list" disabled={!enrolled} onDispatched={() => load(true)} />
+                  <RefreshButton device={device} catalog={catalog} commandType="app_list" disabled={!enrolled} onDispatched={handleDispatched} />
                 </Group>
                 {deviceApps.length === 0 ? (
                   <Text fz="sm" c="dimmed">Not queried yet -- click <b>Refresh</b> to ask the device.</Text>
@@ -704,7 +719,7 @@ export default function DeviceDetailPage({ params }: { params: Promise<{ id: str
 
           {section === "commands" && (
             enrolled ? (
-              <CommandsPanel device={device} catalog={catalog} onDispatched={() => load(true)} />
+              <CommandsPanel device={device} catalog={catalog} onDispatched={handleDispatched} />
             ) : (
               <Card withBorder radius="md" p="md">
                 <Text fz="sm" c="dimmed">
