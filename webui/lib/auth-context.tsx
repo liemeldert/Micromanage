@@ -44,7 +44,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       }
     } catch {}
     setHydrated(true);
-    // Older sessions may predate the stored role — backfill it (also serves as
+    // Older sessions may predate the stored role -- backfill it (also serves as
     // a cheap token validity probe: a dead token 401s and forces re-login).
     if (restored?.token && !restored.role) {
       api.me(restored.token).then((me) => {

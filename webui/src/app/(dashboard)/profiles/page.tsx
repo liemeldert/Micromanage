@@ -74,7 +74,7 @@ export default function ProfilesPage() {
       sessionStorage.setItem(IMPORT_KEY, JSON.stringify(profile));
       notifications.show({
         color: "teal",
-        message: `Imported ${imp.payloads.length} payload${imp.payloads.length === 1 ? "" : "s"} — review and save.`,
+        message: `Imported ${imp.payloads.length} payload${imp.payloads.length === 1 ? "" : "s"} -- review and save.`,
       });
       router.push("/profiles/new");
     } catch (e: unknown) {
@@ -125,8 +125,8 @@ export default function ProfilesPage() {
         <Stack gap={0}>
           <Title order={2}>Profiles</Title>
           <Text fz="sm" c="dimmed">
-            Configuration profiles (Wi-Fi, restrictions, accounts…) and Automated Enrollment (DEP)
-            profiles.
+            Device configuration profiles define settings and restrictions for managed devices. You can create configuration profiles or import existing .mobileconfig files created in other tools.
+            Enrollment profiles are used to enroll devices into management and are generated automatically.
           </Text>
         </Stack>
         <Group gap="xs">

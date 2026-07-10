@@ -29,7 +29,7 @@ const POLL_MS = 10_000;
 const STATUSES = ["pending", "running", "completed", "failed", "cancelled"];
 
 function fmt(iso: string | null) {
-  if (!iso) return "—";
+  if (!iso) return "--";
   return new Date(iso).toLocaleString();
 }
 
@@ -69,7 +69,7 @@ export default function TasksPage() {
 
   useEffect(() => { load(); }, [load]);
 
-  // Task statuses change as devices respond — poll quietly so the page
+  // Task statuses change as devices respond -- poll quietly so the page
   // doesn't sit on stale "running" rows.
   useEffect(() => {
     const id = setInterval(() => {
@@ -140,7 +140,7 @@ export default function TasksPage() {
           <Text fz="xs">{t.device.serial_number}</Text>
         ) : (
           <Text fz="xs" c="dimmed" style={{ fontFamily: "monospace" }}>
-            {t.device_id ? t.device_id.slice(0, 8) + "…" : "—"}
+            {t.device_id ? t.device_id.slice(0, 8) + "…" : "--"}
           </Text>
         )}
       </Table.Td>
@@ -153,7 +153,7 @@ export default function TasksPage() {
             </Text>
           </Tooltip>
         ) : (
-          <Text fz="xs" c="dimmed">—</Text>
+          <Text fz="xs" c="dimmed">--</Text>
         )}
       </Table.Td>
       <Table.Td onClick={(e) => e.stopPropagation()}>

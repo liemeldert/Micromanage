@@ -1,6 +1,6 @@
 "use client";
 
-// Task detail drawer — shared by the Tasks page and the device detail page.
+// Task detail drawer shared by the Tasks page and the device detail page.
 // Shows the full lifecycle of a task (status, progress, timestamps, device,
 // initiator, error) plus its details JSON (command_uuid, payload info, device
 // response), which was previously fetched but never rendered anywhere.
@@ -30,7 +30,7 @@ export const TASK_STATUS_COLORS: Record<string, string> = {
 };
 
 function fmt(iso: string | null | undefined) {
-  if (!iso) return "—";
+  if (!iso) return "--";
   return new Date(iso).toLocaleString();
 }
 

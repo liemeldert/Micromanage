@@ -3,8 +3,7 @@
 // The tenant's declarative IaC config, as the controller sees it on disk.
 // groups/apps/profiles are editable here (parsed client-side, validated
 // server-side against the full cross-file ruleset before committing, and a
-// save triggers reconciliation). config.yaml stays read-only — it is
-// server-managed and served with credentials redacted.
+// save triggers reconciliation).
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
@@ -30,15 +29,16 @@ import {
   IconDownload,
   IconEdit,
   IconFileCertificate,
+  IconHistory,
   IconInfoCircle,
   IconRefresh,
-  IconSettings,
   IconStack2,
   IconUpload,
   IconX,
 } from "@tabler/icons-react";
 import { api, ApiError } from "../../../../lib/api";
 import { useAuth } from "../../../../lib/auth-context";
+import { ConfigHistoryDrawer } from "../../../components/config/ConfigHistoryDrawer";
 
 type ConfigType = "profiles" | "groups" | "apps" | "config";
 type EditableType = Exclude<ConfigType, "config">;
@@ -47,7 +47,7 @@ const TABS: { value: ConfigType; label: string; icon: React.FC<{ size?: number }
   { value: "profiles", label: "profiles.yaml", icon: IconFileCertificate },
   { value: "groups",   label: "groups.yaml",   icon: IconStack2 },
   { value: "apps",     label: "apps.yaml",     icon: IconApps },
-  { value: "config",   label: "config.yaml",   icon: IconSettings },
+  // { value: "config",   label: "config.yaml",   icon: IconSettings }, // I see no need at the moment for this to be user-accessible at the moment.
 ];
 
 const EDITABLE: ConfigType[] = ["profiles", "groups", "apps"];
@@ -61,6 +61,7 @@ export default function YamlPage() {
   const [draft, setDraft]     = useState("");
   const [saving, setSaving]   = useState(false);
   const [parseError, setParseError] = useState<string | null>(null);
+  const [historyOpen, setHistoryOpen] = useState(false);
   const resetRef = useRef<() => void>(null);
 
   const load = useCallback(async (type: ConfigType, force = false) => {
@@ -166,7 +167,7 @@ export default function YamlPage() {
     validateDraft(text);
     notifications.show({
       color: "blue",
-      message: `Loaded ${file.name} into the editor — review and save to apply.`,
+      message: `Loaded ${file.name} into the editor -- review and save to apply.`,
     });
   };
 
@@ -180,6 +181,13 @@ export default function YamlPage() {
         <Group gap="xs">
           {editable && !editing && (
             <>
+              <Button
+                variant="light"
+                leftSection={<IconHistory size={14} />}
+                onClick={() => setHistoryOpen(true)}
+              >
+                History
+              </Button>
               <FileButton onChange={handleImport} accept=".yaml,.yml" resetRef={resetRef}>
                 {(props) => (
                   <Button {...props} variant="light" leftSection={<IconUpload size={14} />}>
@@ -222,9 +230,11 @@ export default function YamlPage() {
       <Alert icon={<IconInfoCircle size={14} />} color="blue" variant="light">
         This is the declarative state the controller reconciles devices against.
         Saving here validates the document server-side and immediately queues the
-        resulting device tasks. config.yaml is server-managed and read-only.
-      </Alert>
+        resulting device tasks.
 
+        Double-check your edits before saving, as edits are applied immediately and may disrupt active devices if invalid.
+      </Alert>
+      
       <Tabs
         value={active}
         onChange={(v) => {
@@ -274,7 +284,7 @@ export default function YamlPage() {
       ) : doc === null ? (
         <Stack align="center" py="xl" gap="sm">
           <Text c="dimmed">
-            No {active}.yaml yet — it is created the first time you save.
+            No {active}.yaml yet -- it is created the first time you save.
           </Text>
           {editable && (
             <Button variant="light" leftSection={<IconEdit size={14} />} onClick={startEditing}>
@@ -289,6 +299,16 @@ export default function YamlPage() {
           radius="md"
           withBorder
           style={{ maxHeight: "70vh", overflow: "auto" }}
+        />
+      )}
+
+      {editable && (
+        <ConfigHistoryDrawer
+          opened={historyOpen}
+          onClose={() => setHistoryOpen(false)}
+          type={active as EditableType}
+          currentDoc={doc ?? ""}
+          onRestored={() => load(active, true)}
         />
       )}
     </Stack>

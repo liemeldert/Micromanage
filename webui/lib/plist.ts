@@ -1,12 +1,12 @@
 // Minimal XML property-list (.plist / .mobileconfig) reader & writer.
 // Supports the subset Apple configuration profiles use: dict, array, string,
 // integer, real, true/false, date, data. Signed (PKCS7) profiles are not XML
-// and will throw — callers surface a friendly message.
+// and will throw -- callers surface a friendly message.
 
 export function parsePlist(xml: string): unknown {
   const doc = new DOMParser().parseFromString(xml, "application/xml");
   if (doc.querySelector("parsererror")) {
-    throw new Error("Not valid XML — the file may be a signed or binary profile.");
+    throw new Error("Not valid XML -- the file may be a signed or binary profile.");
   }
   const root = doc.querySelector("plist")?.firstElementChild;
   if (!root) throw new Error("Empty or malformed plist.");

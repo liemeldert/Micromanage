@@ -46,7 +46,7 @@ function LoginFlow() {
 
   const emailValid = /\S+@\S+\.\S+/.test(email);
 
-  // After a tenant is chosen (or discovered), route to the right step.
+  // After a tenant is chosen / discovered, route to the right step.
   const proceedWith = (t: DiscoveredTenant | null) => {
     setSelected(t);
     if (t && t.provider !== "local") setStep("external");
@@ -62,12 +62,12 @@ function LoginFlow() {
       if (res.tenants.length === 1) proceedWith(res.tenants[0]);
       else if (res.tenants.length > 1) setStep("tenant");
       // Unknown email: continue to the password step with a manual tenant
-      // field — the final sign-in gives the same generic error either way.
+      // field -- the final sign-in gives the same generic error either way.
       else proceedWith(null);
     } catch (e) {
       const msg =
         e instanceof ApiError && e.status === 429
-          ? "Too many attempts — wait a minute and try again"
+          ? "Too many attempts! Slow down! Please wait a minute and try again."
           : (e as Error).message;
       notifications.show({ color: "red", message: msg });
     } finally {
@@ -109,7 +109,7 @@ function LoginFlow() {
 
         {expired && step === "email" && (
           <Alert color="yellow" icon={<IconClockExclamation size={16} />} variant="light">
-            Your session expired — please sign in again.
+            Your session has expired. Please sign in again.
           </Alert>
         )}
 
@@ -223,8 +223,8 @@ function LoginFlow() {
               </Button>
             ) : (
               <Text fz="sm" c="dimmed">
-                Sign in through your organization&apos;s identity provider, then return
-                here — or contact your administrator if you don&apos;t have access.
+                Sign in through your organization&apos;s identity provider, then return.
+                Contact your administrator if you don&apos;t have access.
               </Text>
             )}
             <Anchor fz="xs" onClick={back} c="dimmed">
@@ -242,29 +242,42 @@ export default function LoginPage() {
     <Box
       style={{
         minHeight: "100vh",
-        background: "var(--mantine-color-dark-8, #1a1b1e)",
+        background: "var(--mantine-color-gray-2)",
         display: "flex",
         flexDirection: "column",
-        alignItems: "center",
-        justifyContent: "center",
       }}
     >
-      <Center>
-        <Stack align="center" gap="xl">
-          <Stack align="center" gap="xs">
-            <Title order={1} c="white" fw={700} fz={32}>
-              MicromanageIAC
+      <Box p="lg">
+        <Stack gap={4}>
+          <Title order={1} c="white" fw={700} fz={32} style={{
+                background: "linear-gradient(to left, #7928CA, #FF0080)",
+                WebkitBackgroundClip: "text",
+                WebkitTextFillColor: "transparent",
+                backgroundClip: "text",
+              }}>
+              Micromanage
             </Title>
-            <Text c="dimmed" fz="sm">
-              YAML-driven Apple MDM compliance controller
-            </Text>
-          </Stack>
+          <Text c="black" fz="sm">
+            Open device management platform.
+          </Text>
+        </Stack>
+      </Box>
+      <Box
+        style={{
+          flex: 1,
+          display: "flex",
+          flexDirection: "column",
+          alignItems: "center",
+          justifyContent: "center",
+        }}
+      >
+        <Stack align="center" gap="md" style={{ width: 400 }}>
           {/* useSearchParams requires a Suspense boundary during prerender */}
           <Suspense fallback={null}>
             <LoginFlow />
           </Suspense>
         </Stack>
-      </Center>
+      </Box>
     </Box>
   );
 }

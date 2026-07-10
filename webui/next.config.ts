@@ -1,7 +1,7 @@
 import type { NextConfig } from "next";
 
 // Baseline security headers. The CSP is intentionally moderate (Mantine emits
-// inline styles; Next dev needs eval) — tighten with per-request nonces before
+// inline styles; Next dev needs eval) -- tighten with per-request nonces before
 // a hardened production deploy.
 const ContentSecurityPolicy = [
   "default-src 'self'",

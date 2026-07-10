@@ -10,7 +10,6 @@ import {
   Group,
   Loader,
   Modal,
-  MultiSelect,
   SegmentedControl,
   Stack,
   Stepper,
@@ -19,7 +18,7 @@ import {
 } from "@mantine/core";
 import { notifications } from "@mantine/notifications";
 import { IconCheck, IconFileZip, IconUpload } from "@tabler/icons-react";
-import { api } from "../../../lib/api";
+import { api, type Device } from "../../../lib/api";
 import {
   BUNDLE_ID_RE,
   SHA256_RE,
@@ -27,13 +26,22 @@ import {
   sha256Hex,
   type App,
   type AppVersion,
+  type Group as GroupDef,
+  type Rollout,
+  type Scope,
 } from "../../../lib/config";
+import { RolloutEditor } from "./RolloutEditor";
+import { ScopeEditor } from "./ScopeEditor";
 
 export interface AppWizardProps {
   opened: boolean;
   onClose: () => void;
   token: string;
-  groupNames: string[];
+  // Group names are still accepted for backward-compat with callers, but the
+  // wizard scopes via allGroups/devices (ScopeEditor); it isn't read directly.
+  groupNames?: string[];
+  allGroups: GroupDef[];
+  devices: Device[];
   s3Configured: boolean;
   takenIds: string[];
   existingApp?: App; // present => "add version" mode (identity locked)
@@ -47,7 +55,8 @@ export function AppWizard({
   opened,
   onClose,
   token,
-  groupNames,
+  allGroups,
+  devices,
   s3Configured,
   takenIds,
   existingApp,
@@ -72,9 +81,9 @@ export function AppWizard({
   const [hashing, setHashing] = useState(false);
   const [uploading, setUploading] = useState(false);
 
-  // target
-  const [groups, setGroups] = useState<string[]>([]);
-  const [minOs, setMinOs] = useState("");
+  // target (unified scope + optional gradual rollout)
+  const [scope, setScope] = useState<Scope>({ groups: [], conditions: [] });
+  const [rollout, setRollout] = useState<Rollout | undefined>(undefined);
 
   function reset() {
     setActive(0);
@@ -86,8 +95,8 @@ export function AppWizard({
     setFile(null);
     setS3Key("");
     setSha256("");
-    setGroups([]);
-    setMinOs("");
+    setScope({ groups: [], conditions: [] });
+    setRollout(undefined);
   }
 
   function close() {
@@ -101,7 +110,11 @@ export function AppWizard({
   const identityValid =
     SLUG_RE.test(id) && !takenIds.includes(id) && name.trim().length > 0 && BUNDLE_ID_RE.test(bundleId);
   const packageValid = version.trim().length > 0 && s3Key.trim().length > 0 && SHA256_RE.test(sha256);
-  const targetValid = groups.length > 0;
+  // A version must target at least one group, condition, or included device.
+  const targetValid =
+    (scope.groups?.length ?? 0) > 0 ||
+    (scope.conditions?.length ?? 0) > 0 ||
+    (scope.include_devices?.length ?? 0) > 0;
 
   const versionClash = useMemo(
     () => addVersion && existingApp!.versions.some((v) => v.version === version.trim()),
@@ -153,16 +166,15 @@ export function AppWizard({
   async function finish() {
     setSubmitting(true);
     try {
-      const conditions =
-        minOs.trim().length > 0
-          ? [{ type: "os_version" as const, operator: "gte", value: minOs.trim() }]
-          : undefined;
       const v: AppVersion = {
         version: version.trim(),
         s3_key: s3Key.trim(),
         sha256: sha256.trim().toLowerCase(),
-        groups,
-        ...(conditions ? { conditions } : {}),
+        groups: scope.groups ?? [],
+        ...(scope.conditions?.length ? { conditions: scope.conditions } : {}),
+        ...(scope.include_devices?.length ? { include_devices: scope.include_devices } : {}),
+        ...(scope.exclude_devices?.length ? { exclude_devices: scope.exclude_devices } : {}),
+        ...(rollout ? { rollout } : {}),
       };
       const ok = addVersion
         ? await onFinish({ kind: "version", appId: existingApp!.id, version: v })
@@ -202,7 +214,7 @@ export function AppWizard({
               id && !SLUG_RE.test(id)
                 ? "Invalid characters"
                 : takenIds.includes(id)
-                  ? "An app with this ID already exists"
+                  ? "An app with this ID already exists!"
                   : null
             }
             withAsterisk
@@ -216,11 +228,11 @@ export function AppWizard({
           />
           <TextInput
             label="Bundle ID"
-            description="Reverse-domain notation."
+            description="Reverse-domain notation is expected."
             placeholder="com.example.companyapp"
             value={bundleId}
             onChange={(e) => setBundleId(e.currentTarget.value)}
-            error={bundleId && !BUNDLE_ID_RE.test(bundleId) ? "Invalid bundle identifier" : null}
+            error={bundleId && !BUNDLE_ID_RE.test(bundleId) ? "Invalid bundle identifier!" : null}
             withAsterisk
           />
         </Stack>
@@ -233,7 +245,7 @@ export function AppWizard({
             placeholder="1.0.0"
             value={version}
             onChange={(e) => setVersion(e.currentTarget.value)}
-            error={versionClash ? "This version already exists for this app" : null}
+            error={versionClash ? "This version already exists for this app!" : null}
             withAsterisk
           />
           <SegmentedControl
@@ -249,8 +261,8 @@ export function AppWizard({
             <Stack gap="sm">
               {!s3Configured && (
                 <Alert color="orange" variant="light">
-                  S3 isn&apos;t configured for this tenant, so upload is unavailable. Configure it in
-                  Settings, or switch to &quot;Already in storage&quot;.
+                  S3 isn&apos;t configured for this tenant, so upload is unavailable.
+                  Please contact your administrator for more information.
                 </Alert>
               )}
               <FileInput
@@ -325,24 +337,15 @@ export function AppWizard({
 
       {current === "target" && (
         <Stack gap="md">
-          <MultiSelect
-            label="Install on groups"
-            description="Devices in any of these groups receive this version."
-            placeholder={groupNames.length ? "Select groups" : "No groups defined yet"}
-            data={groupNames}
-            value={groups}
-            onChange={setGroups}
-            searchable
-            withAsterisk
-            nothingFoundMessage="Create groups first on the Groups page"
+          <ScopeEditor
+            scope={scope}
+            onChange={setScope}
+            devices={devices}
+            allGroups={allGroups}
+            groupsLabel="Install on groups"
+            groupsDescription="Devices in any of these groups receive this version."
           />
-          <TextInput
-            label="Minimum OS version"
-            description="Optional. Only devices at or above this version are eligible."
-            placeholder="e.g. 17.0"
-            value={minOs}
-            onChange={(e) => setMinOs(e.currentTarget.value)}
-          />
+          <RolloutEditor rollout={rollout} onChange={setRollout} />
         </Stack>
       )}
 
@@ -356,12 +359,25 @@ export function AppWizard({
           </Text>
           <Group gap="xs">
             <Badge variant="light">v{version}</Badge>
-            {minOs && <Badge variant="light" color="grape">OS ≥ {minOs}</Badge>}
-            {groups.map((g) => (
+            {rollout && (
+              <Badge variant="light" color="orange">
+                rollout {rollout.percent}%/{rollout.interval_hours === 24 ? "day" : rollout.interval_hours === 168 ? "week" : `${rollout.interval_hours}h`}
+              </Badge>
+            )}
+            {(scope.groups ?? []).map((g) => (
               <Badge key={g} variant="dot" color="blue">
                 {g}
               </Badge>
             ))}
+            {(scope.conditions?.length ?? 0) > 0 && (
+              <Badge variant="light" color="grape">+{scope.conditions!.length} condition(s)</Badge>
+            )}
+            {(scope.include_devices?.length ?? 0) > 0 && (
+              <Badge variant="light" color="teal">+{scope.include_devices!.length} incl</Badge>
+            )}
+            {(scope.exclude_devices?.length ?? 0) > 0 && (
+              <Badge variant="light" color="red">−{scope.exclude_devices!.length} excl</Badge>
+            )}
           </Group>
           <Text fz="xs" c="dimmed">
             Key: <Code>{s3Key}</Code>

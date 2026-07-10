@@ -25,7 +25,7 @@ import {
   IconPlus,
   IconTrash,
 } from "@tabler/icons-react";
-import { api } from "../../../../lib/api";
+import { api, type Device } from "../../../../lib/api";
 import { useAuth } from "../../../../lib/auth-context";
 import {
   BUNDLE_ID_RE,
@@ -33,6 +33,7 @@ import {
   type App,
   type AppsConfig,
   type AppVersion,
+  type Group as GroupDef,
 } from "../../../../lib/config";
 import { AppWizard } from "../../../components/config/AppWizard";
 
@@ -41,6 +42,8 @@ export default function AppsPage() {
   const { data, loading, saving, save } = useConfigResource<AppsConfig>("apps", { apps: [] });
 
   const [groupNames, setGroupNames] = useState<string[]>([]);
+  const [allGroups, setAllGroups] = useState<GroupDef[]>([]);
+  const [devices, setDevices] = useState<Device[]>([]);
   const [s3Configured, setS3Configured] = useState(false);
 
   const [wizardOpen, setWizardOpen] = useState(false);
@@ -54,7 +57,15 @@ export default function AppsPage() {
     if (!token) return;
     api
       .getConfig(token, "groups")
-      .then((g) => setGroupNames(((g as { groups?: { name: string }[] }).groups ?? []).map((x) => x.name)))
+      .then((g) => {
+        const gs = (g as { groups?: GroupDef[] }).groups ?? [];
+        setAllGroups(gs);
+        setGroupNames(gs.map((x) => x.name));
+      })
+      .catch(() => {});
+    api
+      .listDevices(token, { state: "enrolled", limit: 500 })
+      .then((r) => setDevices(r.devices))
       .catch(() => {});
     api
       .getTenant(token)
@@ -235,7 +246,7 @@ export default function AppsPage() {
                             ))
                           ) : (
                             <Text fz="xs" c="dimmed">
-                              —
+                              --
                             </Text>
                           )}
                         </Table.Td>
@@ -269,6 +280,8 @@ export default function AppsPage() {
         onClose={() => setWizardOpen(false)}
         token={token ?? ""}
         groupNames={groupNames}
+        allGroups={allGroups}
+        devices={devices}
         s3Configured={s3Configured}
         takenIds={apps.map((a) => a.id)}
         existingApp={wizardApp}

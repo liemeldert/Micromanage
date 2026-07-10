@@ -1,4 +1,4 @@
-// API client — all requests go through the Next.js proxy at /api/proxy/*,
+// API client -- all requests go through the Next.js proxy at /api/proxy/*,
 // which forwards them to the controller on the internal Docker network.
 // The browser never contacts the controller directly.
 
@@ -23,7 +23,7 @@ export class ApiError extends Error {
 // user on a page that just error-toasts forever.
 function handleUnauthorized(path: string) {
   if (typeof window === "undefined") return;
-  // login/discover legitimately 401 on bad input — those surface inline. But a
+  // login/discover legitimately 401 on bad input -- those surface inline. But a
   // 401 on /auth/me or any authed call means the session is dead → force login.
   if (path.startsWith("/api/v1/auth/login") || path.startsWith("/api/v1/auth/discover")) return;
   localStorage.removeItem("mm_auth");
@@ -123,7 +123,7 @@ export const api = {
   // Devices
   listDevices(
     token: string,
-    params: { skip?: number; limit?: number; group?: string; model?: string; search?: string } = {},
+    params: { skip?: number; limit?: number; group?: string; model?: string; search?: string; state?: string } = {},
   ) {
     const qs = new URLSearchParams(
       Object.entries(params)
@@ -132,12 +132,32 @@ export const api = {
     ).toString();
     return request<{
       total: number;
+      counts: { all: number; enrolled: number; unenrolled: number; pending: number };
       devices: Device[];
     }>(`/api/v1/devices${qs ? `?${qs}` : ""}`, token);
   },
 
+  createPlaceholderDevice(
+    token: string,
+    body: { serial_number: string; device_model?: string; management_type?: string; groups?: string[] },
+  ) {
+    return request<Device>("/api/v1/devices", token, {
+      method: "POST",
+      body: JSON.stringify(body),
+    });
+  },
+
   getDevice(token: string, id: string) {
     return request<DeviceDetail>(`/api/v1/devices/${id}`, token);
+  },
+
+  // Set the managed name and push it to the device (if enrolled + supervised).
+  renameDevice(token: string, id: string, name: string) {
+    return request<{ device: Device; pushed: boolean; task_id: string | null }>(
+      `/api/v1/devices/${id}/name`,
+      token,
+      { method: "PATCH", body: JSON.stringify({ name }) },
+    );
   },
 
   sendCommand(
@@ -158,7 +178,7 @@ export const api = {
     return request<Record<string, unknown>>(`/api/v1/config/${type}`, token);
   },
 
-  // Raw YAML document (text) — for the YAML viewer. Server-side redaction of
+  // Raw YAML document (text) -- for the YAML viewer. Server-side redaction of
   // credentials still applies to config.yaml.
   async getConfigRaw(token: string, type: "groups" | "apps" | "profiles" | "config") {
     const res = await fetch(proxyPath(`/api/v1/config/${type}?raw=true`), {
@@ -209,6 +229,31 @@ export const api = {
     );
   },
 
+  // Config version history: every save snapshots the previous document.
+  listConfigHistory(token: string, type: "groups" | "apps" | "profiles") {
+    return request<{ versions: ConfigVersion[] }>(
+      `/api/v1/config/${type}/history`,
+      token,
+    );
+  },
+
+  getConfigVersion(token: string, type: "groups" | "apps" | "profiles", id: string) {
+    return request<ConfigVersion & { content: string }>(
+      `/api/v1/config/${type}/history/${encodeURIComponent(id)}`,
+      token,
+    );
+  },
+
+  // Restore runs the same validate → snapshot → write → reconcile path as a
+  // save, so a restore is itself undoable.
+  restoreConfigVersion(token: string, type: "groups" | "apps" | "profiles", id: string) {
+    return request<{ message: string; warnings: string[] }>(
+      `/api/v1/config/${type}/history/${encodeURIComponent(id)}/restore`,
+      token,
+      { method: "POST" },
+    );
+  },
+
   // App package upload (multipart). Returns the S3 key the controller stored it under.
   async uploadApp(token: string, file: File, appId: string, version: string) {
     const fd = new FormData();
@@ -252,6 +297,12 @@ export const api = {
     return request<Task>(`/api/v1/tasks/${id}`, token);
   },
 
+  // Server-published device command catalog (role-aware). The UI builds its
+  // command menus from this, so new server commands appear automatically.
+  getCommandCatalog(token: string) {
+    return request<{ commands: CatalogCommand[] }>("/api/v1/commands/catalog", token);
+  },
+
   cancelTask(token: string, id: string) {
     return request<{ message: string }>(`/api/v1/tasks/${id}/cancel`, token, {
       method: "POST",
@@ -287,18 +338,55 @@ export interface DiscoveredTenant {
   login_url?: string;
 }
 
+export interface CommandParam {
+  name: string;
+  label: string;
+  type: "string" | "text" | "pin";
+  required: boolean | "mac"; // "mac" = required when the target device is a Mac
+  secret?: boolean;
+  help?: string;
+}
+
+export interface CatalogCommand {
+  type: string;
+  label: string;
+  description: string;
+  category: string;
+  common: boolean;
+  contextual: boolean; // tab-backed refresh -- offered on its tab, not the menu
+  params: CommandParam[];
+  destructive: boolean;
+  allowed: boolean;
+}
+
+export interface ConfigVersion {
+  id: string;
+  saved_at: string | null;
+  user: string | null;
+  size?: number;
+}
+
+export type EnrollmentState = "enrolled" | "unenrolled" | "pending";
+
 export interface Device {
   id: string;
-  udid: string;
+  udid: string | null;
+  name: string | null;          // managed name (manual/templated); null = none
+  display_name: string;         // name || hostname || serial
   serial_number: string;
   device_model: string;
   os_version: string;
   hostname: string | null;
   groups: string[];
+  enrollment_state: EnrollmentState;
+  management_type: string; // "apple_mdm"
   enrollment_date: string;
+  unenrolled_at: string | null;
   last_seen: string;
+  // Name the tenant's naming template would produce (detail endpoint only).
+  suggested_name?: string | null;
   // Full device-reported state (DeviceInformation QueryResponses, SecurityInfo)
-  // — present on the detail endpoint, rendered data-driven.
+  // -- present on the detail endpoint, rendered data-driven.
   attributes?: Record<string, unknown>;
 }
 

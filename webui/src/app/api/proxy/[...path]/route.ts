@@ -13,8 +13,8 @@ async function proxy(req: NextRequest, segments: string[]) {
   const auth = req.headers.get("authorization");
   if (auth) headers["Authorization"] = auth;
 
-  // Use arrayBuffer (not text) so binary bodies — e.g. multipart app-package
-  // uploads — pass through to the controller without corruption.
+  // Use arrayBuffer (not text) so binary bodies so. multipart app-package
+  // uploads and pass through to the controller without corruption.
   const body =
     req.method !== "GET" && req.method !== "HEAD"
       ? await req.arrayBuffer()
@@ -33,8 +33,7 @@ async function proxy(req: NextRequest, segments: string[]) {
     return NextResponse.json(
       {
         detail:
-          `Controller unreachable at ${CONTROLLER}. ` +
-          `Run: docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d controller. ` +
+          `Controller unreachable at ${CONTROLLER}. Contact your administrator for help.` +
           `(${cause})`,
       },
       { status: 502 },
@@ -61,6 +60,9 @@ export async function POST(req: NextRequest, ctx: RouteContext) {
   return proxy(req, (await ctx.params).path);
 }
 export async function PUT(req: NextRequest, ctx: RouteContext) {
+  return proxy(req, (await ctx.params).path);
+}
+export async function PATCH(req: NextRequest, ctx: RouteContext) {
   return proxy(req, (await ctx.params).path);
 }
 export async function DELETE(req: NextRequest, ctx: RouteContext) {

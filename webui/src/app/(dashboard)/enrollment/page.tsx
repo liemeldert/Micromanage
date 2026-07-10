@@ -40,7 +40,7 @@ function DetailRow({ label, value }: { label: string; value: string | null }) {
       </Text>
       <Group gap={4} wrap="nowrap" style={{ minWidth: 0 }}>
         <Code style={{ whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", maxWidth: 320 }}>
-          {value ?? "—"}
+          {value ?? "--"}
         </Code>
         {value && (
           <CopyButton value={value}>
@@ -90,8 +90,7 @@ export default function EnrollmentPage() {
         <Stack gap={0}>
           <Title order={2}>Enrollment</Title>
           <Text fz="sm" c="dimmed">
-            The over-the-air profile a device installs to enrol into management — generated
-            automatically from your server configuration.
+            This profile can be used to manually enroll a device into management. It is specific to your organization and should be kept private. The QR code below is a convenient way to enroll a device without needing to copy the URL.
           </Text>
         </Stack>
         <Button variant="light" leftSection={<IconRefresh size={14} />} onClick={load}>
@@ -99,12 +98,19 @@ export default function EnrollmentPage() {
         </Button>
       </Group>
 
+       <Alert variant="light" color="gray" icon={<IconAlertTriangle size={16} />}>
+            <Text fz="xs">
+              The enrollment URL embeds a secret token and the profile contains a SCEP challenge.
+              Keep these private and do not share them publicly. Anyone with access can enroll devices into your organization.
+            </Text>
+      </Alert>
+
       {loading ? (
         <Box py={80} ta="center">
           <Loader />
         </Box>
       ) : !details ? (
-        <Text c="dimmed">Could not load enrollment details.</Text>
+        <Text c="dimmed">Could not load enrollment details!</Text>
       ) : (
         <>
           {!details.configured && (
@@ -172,7 +178,7 @@ export default function EnrollmentPage() {
               <Stack align="center" gap="sm">
                 <Group gap={6}>
                   <IconQrcode size={18} />
-                  <Text fw={600}>Scan to enrol</Text>
+                  <Text fw={600}>Scan to enroll</Text>
                 </Group>
                 {details.enroll_url ? (
                   <>
@@ -192,13 +198,6 @@ export default function EnrollmentPage() {
               </Stack>
             </Card>
           </Group>
-
-          <Alert variant="light" color="gray" icon={<IconAlertTriangle size={16} />}>
-            <Text fz="xs">
-              The enrollment URL embeds a secret token and the profile contains a SCEP challenge —
-              treat it as sensitive and share it only with devices you intend to enrol.
-            </Text>
-          </Alert>
         </>
       )}
     </Stack>

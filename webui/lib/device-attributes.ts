@@ -4,7 +4,7 @@
 // (DeviceInformation QueryResponses + a nested SecurityInfo). Rather than a
 // hardcoded column per property, we keep a light registry that gives KNOWN keys
 // a friendly label, a category (→ tab) and a value formatter. Anything the
-// device reports that we don't recognize still shows up automatically — it just
+// device reports that we don't recognize still shows up automatically -- it just
 // lands in the "Other" tab with its raw key. So new MDM keys surface with zero
 // code changes, while the ones we care about get first-class presentation.
 
@@ -110,7 +110,7 @@ function humanizeKey(key: string): string {
 }
 
 export function formatAttrValue(value: unknown, format?: AttrFormat): string {
-  if (value === null || value === undefined || value === "") return "—";
+  if (value === null || value === undefined || value === "") return "--";
   if (Array.isArray(value) || (typeof value === "object")) {
     return JSON.stringify(value);
   }

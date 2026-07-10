@@ -14,7 +14,6 @@ import {
   JsonInput,
   Loader,
   Modal,
-  MultiSelect,
   NavLink,
   ScrollArea,
   SegmentedControl,
@@ -38,15 +37,16 @@ import {
 import { api, type Device } from "../../../lib/api";
 import { useAuth } from "../../../lib/auth-context";
 import {
-  deviceMatchesGroup,
-  devicePlatform,
   profilePayloads,
   SLUG_RE,
   useConfigResource,
+  type Condition,
   type Group as GroupDef,
   type Profile,
   type ProfileKind,
   type ProfilesConfig,
+  type Rollout,
+  type Scope,
 } from "../../../lib/config";
 import {
   ALL_PLATFORMS,
@@ -57,6 +57,8 @@ import {
   type Platform,
 } from "../../../lib/profile-manifests";
 import { PayloadForm } from "./PayloadForm";
+import { RolloutEditor } from "./RolloutEditor";
+import { ScopeEditor } from "./ScopeEditor";
 
 export const IMPORT_KEY = "mm_profile_import";
 
@@ -67,6 +69,10 @@ interface DraftState {
   kind: ProfileKind;
   platforms: Platform[];
   groups: string[];
+  conditions: Condition[];
+  include_devices: string[];
+  exclude_devices: string[];
+  rollout?: Rollout;
   payloads: Record<string, unknown>[];
   enrollment: Record<string, unknown>;
 }
@@ -83,6 +89,10 @@ function fromProfile(p: Profile): DraftState {
     kind,
     platforms: platforms && platforms.length ? platforms : ["iOS", "macOS"],
     groups: p.groups ?? [],
+    conditions: p.conditions ?? [],
+    include_devices: p.include_devices ?? [],
+    exclude_devices: p.exclude_devices ?? [],
+    rollout: p.rollout,
     payloads: kind === "configuration" ? profilePayloads(p) : [],
     enrollment: kind === "enrollment" ? (p.payload ?? {}) : {},
   };
@@ -129,29 +139,36 @@ export function ProfileEditor({ profileId }: { profileId?: string }) {
       .then((g) => setGroups((g as { groups?: GroupDef[] }).groups ?? []))
       .catch(() => {});
     api
-      .listDevices(token, { limit: 500 })
+      .listDevices(token, { state: "enrolled", limit: 500 })
       .then((r) => setDevices(r.devices))
       .catch(() => {});
   }, [token]);
 
-  // Device groups eligible for the selected platforms: a group is eligible if it
-  // has no determinable members, or any of its members run a selected platform.
-  const eligibleGroupNames = useMemo(() => {
-    const sel = draft?.platforms ?? [];
-    const names = groups
-      .filter((g) => {
-        const members = devices.filter((d) => deviceMatchesGroup(d, g.conditions));
-        if (members.length === 0) return true;
-        const plats = new Set(members.map((d) => devicePlatform(d.device_model)));
-        return sel.some((p) => plats.has(p));
-      })
-      .map((g) => g.name);
-    // Keep already-selected groups visible even if they became ineligible.
-    return Array.from(new Set([...names, ...(draft?.groups ?? [])]));
-  }, [groups, devices, draft?.platforms, draft?.groups]);
+  // Live scope from the draft, and the on-disk scope (for the change diff).
+  const draftScope: Scope = useMemo(
+    () => ({
+      groups: draft?.groups ?? [],
+      conditions: draft?.conditions ?? [],
+      include_devices: draft?.include_devices ?? [],
+      exclude_devices: draft?.exclude_devices ?? [],
+    }),
+    [draft?.groups, draft?.conditions, draft?.include_devices, draft?.exclude_devices],
+  );
+
+  const savedScope: Scope | undefined = useMemo(() => {
+    if (!profileId) return undefined;
+    const p = data?.profiles?.find((x) => x.id === profileId);
+    if (!p) return undefined;
+    return {
+      groups: p.groups ?? [],
+      conditions: p.conditions ?? [],
+      include_devices: p.include_devices ?? [],
+      exclude_devices: p.exclude_devices ?? [],
+    };
+  }, [data?.profiles, profileId]);
 
   // Initialise the draft once the config load settles (even if it came back
-  // empty or errored — treat a missing config as an empty profile list).
+  // empty or errored -- treat a missing config as an empty profile list).
   useEffect(() => {
     if (initialized || loading) return;
     const profiles = data?.profiles ?? [];
@@ -191,6 +208,9 @@ export function ProfileEditor({ profileId }: { profileId?: string }) {
         kind: "configuration",
         platforms: ["iOS", "macOS"],
         groups: [],
+        conditions: [],
+        include_devices: [],
+        exclude_devices: [],
         payloads: [],
         enrollment: {},
       });
@@ -277,7 +297,17 @@ export function ProfileEditor({ profileId }: { profileId?: string }) {
       ...(draft.description.trim() ? { description: draft.description.trim() } : {}),
       groups: draft.groups,
     };
-    const withPlatforms = { ...common, platforms: draft.platforms };
+    // Scope + rollout only apply to managed configuration profiles.
+    const scoping =
+      draft.kind === "configuration"
+        ? {
+            ...(draft.conditions.length ? { conditions: draft.conditions } : {}),
+            ...(draft.include_devices.length ? { include_devices: draft.include_devices } : {}),
+            ...(draft.exclude_devices.length ? { exclude_devices: draft.exclude_devices } : {}),
+            ...(draft.rollout ? { rollout: draft.rollout } : {}),
+          }
+        : {};
+    const withPlatforms = { ...common, ...scoping, platforms: draft.platforms };
     const profile: Profile =
       draft.kind === "enrollment"
         ? { ...withPlatforms, type: "enrollment", dep_profile: true, payload: draft.enrollment }
@@ -426,18 +456,43 @@ export function ProfileEditor({ profileId }: { profileId?: string }) {
                     Filters the payload types and keys to those the selected platforms support.
                   </Text>
                 </Box>
-                <MultiSelect
-                  label="Target groups"
-                  description="Only groups containing devices on the selected platforms are shown."
-                  placeholder={eligibleGroupNames.length ? "Select groups" : "No eligible groups"}
-                  data={eligibleGroupNames}
-                  value={draft.groups}
-                  onChange={(g) => update({ groups: g })}
-                  searchable
-                  nothingFoundMessage="No groups match the selected platforms"
-                />
               </Stack>
             </Card>
+
+            {draft.kind === "configuration" && (
+              <Card withBorder radius="md" padding="md">
+                <Text fw={600} fz="sm" mb="sm">
+                  Scope
+                </Text>
+                <ScopeEditor
+                  scope={draftScope}
+                  onChange={(s) =>
+                    update({
+                      groups: s.groups ?? [],
+                      conditions: s.conditions ?? [],
+                      include_devices: s.include_devices ?? [],
+                      exclude_devices: s.exclude_devices ?? [],
+                    })
+                  }
+                  devices={devices}
+                  allGroups={groups}
+                  previous={savedScope}
+                  groupsDescription="Devices in any of these groups receive this profile."
+                />
+              </Card>
+            )}
+
+            {draft.kind === "configuration" && (
+              <Card withBorder radius="md" padding="md">
+                <Text fw={600} fz="sm" mb="sm">
+                  Gradual rollout
+                </Text>
+                <RolloutEditor
+                  rollout={draft.rollout}
+                  onChange={(rollout) => update({ rollout })}
+                />
+              </Card>
+            )}
 
             {draft.kind === "configuration" && (
               <Card withBorder radius="md" padding="md">
@@ -460,7 +515,7 @@ export function ProfileEditor({ profileId }: { profileId?: string }) {
 
                 {draft.payloads.length === 0 ? (
                   <Text fz="xs" c="dimmed">
-                    No payloads yet. Add one — a profile can bundle several (e.g. multiple Wi-Fi
+                    No payloads yet. Add one -- a profile can bundle several (e.g. multiple Wi-Fi
                     networks plus restrictions).
                   </Text>
                 ) : (
@@ -651,7 +706,7 @@ export function ProfileEditor({ profileId }: { profileId?: string }) {
                       </Text>
                       <NavLink
                         label="Custom (raw JSON)"
-                        description="Any payload type — edit the raw JSON."
+                        description="Any payload type -- edit the raw JSON."
                         onClick={() => addPayload("com.apple.custom")}
                       />
                     </Box>

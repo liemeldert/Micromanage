@@ -80,8 +80,17 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
         <AppShell.Section p="md">
           <Group gap="xs">
             <Burger opened={opened} onClick={toggle} hiddenFrom="sm" size="sm" color="white" />
-            <Text fw={700} fz="lg" c="white">
-              MicromanageIAC
+            <Text
+              fw={700}
+              fz="lg"
+              style={{
+                background: "linear-gradient(to left, #7928CA, #FF0080)",
+                WebkitBackgroundClip: "text",
+                WebkitTextFillColor: "transparent",
+                backgroundClip: "text",
+              }}
+            >
+              Micromanage
             </Text>
           </Group>
         </AppShell.Section>

@@ -67,10 +67,6 @@ export default function SettingsPage() {
             {health === "loading" ? "checking…" : health === "ok" ? "healthy" : "unreachable"}
           </Badge>
         </Group>
-        <Text fz="xs" c="dimmed">
-          The controller syncs YAML compliance state every{" "}
-          <Code fz="xs">SYNC_INTERVAL_MINUTES</Code> minutes and enqueues MDM commands.
-        </Text>
       </Card>
 
       {/* Interface preferences (stored in this browser) */}
@@ -82,8 +78,8 @@ export default function SettingsPage() {
           <Text fz="sm" fw={600}>Interface</Text>
         </Group>
         <Switch
-          label="Show YAML configuration tab"
-          description="Adds a read-only YAML view to the sidebar showing the tenant's declarative config (groups, apps, profiles) as the controller sees it."
+          label="Show YAML configuration tab (advanced)"
+          description="Shows the editor for tenant's YAML-based declarative config. Changes here can be destructive, so only enable if you know what you're doing."
           checked={showYaml}
           onChange={(e) => setShowYaml(e.currentTarget.checked)}
         />
@@ -120,91 +116,6 @@ export default function SettingsPage() {
             </Stack>
           </Group>
         </Stack>
-      </Card>
-
-      <Divider label="APNs Push Certificate" labelPosition="left" />
-
-      {/* APNs setup guide */}
-      <Card withBorder radius="md" p="md">
-        <Group mb="sm">
-          <ThemeIcon variant="light" color="blue" size="sm">
-            <IconShieldLock size={14} />
-          </ThemeIcon>
-          <Text fz="sm" fw={600}>Apple Push Notification Certificate</Text>
-        </Group>
-
-        <Alert icon={<IconInfoCircle size={14} />} color="blue" variant="light" mb="md">
-          APNs is required for NanoMDM to send push notifications to devices. Without it, MDM
-          commands will not be delivered until devices next check in.
-        </Alert>
-
-        <Text fz="sm" mb="xs" fw={500}>Setup steps:</Text>
-        <List size="sm" spacing="xs" type="ordered">
-          <List.Item>
-            Run <Code fz="xs">./setup.sh apns</Code> on the server — it generates a CSR and
-            walks you through the Apple portal steps.
-          </List.Item>
-          <List.Item>
-            Submit the CSR to{" "}
-            <Text component="a" href="https://mdmcert.download" target="_blank" fz="sm" c="blue">
-              mdmcert.download
-            </Text>{" "}
-            or the Apple Push Certificates Portal.
-          </List.Item>
-          <List.Item>
-            Download the resulting <Code fz="xs">.pem</Code> certificate and save it as{" "}
-            <Code fz="xs">certs/apns/MDM_Certificate.pem</Code>.
-          </List.Item>
-          <List.Item>
-            Run <Code fz="xs">./setup.sh push-cert</Code> to upload it to NanoMDM.
-          </List.Item>
-        </List>
-
-        <Box
-          mt="md"
-          p="sm"
-          style={{
-            background: "var(--mantine-color-dark-8, #1a1b1e)",
-            borderRadius: 6,
-            fontFamily: "monospace",
-          }}
-        >
-          <Text fz="xs" c="green.4">$ ./setup.sh apns</Text>
-          <Text fz="xs" c="gray.5">  → generates certs/apns/push.csr</Text>
-          <Text fz="xs" c="gray.5">  → guides you through Apple portal</Text>
-          <Text fz="xs" c="green.4" mt={4}>$ ./setup.sh push-cert</Text>
-          <Text fz="xs" c="gray.5">  → uploads certificate to NanoMDM</Text>
-        </Box>
-      </Card>
-
-      <Divider label="Object Storage (S3)" labelPosition="left" />
-
-      {/* S3 info */}
-      <Card withBorder radius="md" p="md">
-        <Group mb="sm">
-          <ThemeIcon variant="light" color="grape" size="sm">
-            <IconCloud size={14} />
-          </ThemeIcon>
-          <Text fz="sm" fw={600}>App Package Storage</Text>
-        </Group>
-        <Text fz="sm" c="dimmed" mb="xs">
-          App packages (<Code fz="xs">.ipa</Code> / <Code fz="xs">.pkg</Code>) must be hosted in
-          S3-compatible object storage. Configure the following variables in your{" "}
-          <Code fz="xs">.env</Code>:
-        </Text>
-        <List size="sm" spacing={4}>
-          {[
-            "AWS_ACCESS_KEY_ID",
-            "AWS_SECRET_ACCESS_KEY",
-            "AWS_DEFAULT_REGION",
-            "AWS_S3_BUCKET",
-            "AWS_S3_ENDPOINT_URL  (optional — for MinIO / R2)",
-          ].map((v) => (
-            <List.Item key={v}>
-              <Code fz="xs">{v}</Code>
-            </List.Item>
-          ))}
-        </List>
       </Card>
     </Stack>
   );

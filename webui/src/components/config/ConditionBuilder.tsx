@@ -2,8 +2,10 @@
 
 import {
   ActionIcon,
+  Autocomplete,
   Button,
   Group,
+  MultiSelect,
   Select,
   Stack,
   TagsInput,
@@ -15,29 +17,44 @@ import {
   CONDITION_TYPES,
   conditionTypeMeta,
   OPERATOR_LABELS,
+  PLATFORM_OPTIONS,
   type Condition,
   type ConditionType,
 } from "../../../lib/config";
 
 function defaultValueForKind(kind: string): string | string[] {
-  return kind === "list" ? [] : "";
+  return kind === "list" || kind === "group" || kind === "platform" ? [] : "";
 }
 
-function newCondition(type: ConditionType = "device_model"): Condition {
+function newCondition(type: ConditionType = "platform"): Condition {
   const meta = conditionTypeMeta(type);
   const operator = meta.operators[0];
   return { type, operator, value: defaultValueForKind(meta.valueKindFor(operator)) };
+}
+
+// Suggestions per condition type, so the value field autocompletes from what
+// the currently-loaded devices actually report (the same helpful-preview idea
+// as the name-template editor). `groupNames` feeds the group-membership type.
+export interface ConditionSuggestions {
+  device_model?: string[];
+  hostname?: string[];
+  serial_number?: string[];
+  os_version?: string[];
 }
 
 export function ConditionBuilder({
   conditions,
   onChange,
   allowedTypes,
-  emptyHint = "No conditions yet — this group will match no devices until you add one.",
+  groupNames = [],
+  suggestions = {},
+  emptyHint = "No conditions yet! This group will not match to any devices until you add one.",
 }: {
   conditions: Condition[];
   onChange: (next: Condition[]) => void;
   allowedTypes?: ConditionType[];
+  groupNames?: string[];
+  suggestions?: ConditionSuggestions;
   emptyHint?: string;
 }) {
   const types = allowedTypes
@@ -63,6 +80,19 @@ export function ConditionBuilder({
     update(idx, { operator, value });
   };
 
+  const suggestFor = (type: ConditionType): string[] => {
+    switch (type) {
+      case "device_model": return suggestions.device_model ?? [];
+      case "hostname": return suggestions.hostname ?? [];
+      case "serial_number": return suggestions.serial_number ?? [];
+      case "os_version": return suggestions.os_version ?? [];
+      default: return [];
+    }
+  };
+
+  const asList = (v: string | string[]): string[] =>
+    Array.isArray(v) ? v : v ? [String(v)] : [];
+
   return (
     <Stack gap="xs">
       {conditions.length === 0 && (
@@ -74,6 +104,9 @@ export function ConditionBuilder({
       {conditions.map((c, idx) => {
         const meta = conditionTypeMeta(c.type);
         const kind = meta.valueKindFor(c.operator);
+        // The operator is fixed ("in") and implied by the label for group /
+        // platform, so its dropdown is hidden -- polarity + value are enough.
+        const showOperator = c.type !== "group" && c.type !== "platform";
         return (
           <Group key={idx} gap="xs" align="flex-start" wrap="nowrap">
             <Select
@@ -85,38 +118,79 @@ export function ConditionBuilder({
               comboboxProps={{ withinPortal: true }}
             />
             <Select
-              data={meta.operators.map((op) => ({
-                value: op,
-                label: OPERATOR_LABELS[op] ?? op,
-              }))}
-              value={c.operator}
-              onChange={(v) => v && setOperator(idx, v)}
-              w={140}
+              data={[
+                { value: "is", label: "is" },
+                { value: "is-not", label: "is not" },
+              ]}
+              value={c.negate ? "is-not" : "is"}
+              onChange={(v) => update(idx, { negate: v === "is-not" })}
+              w={92}
               allowDeselect={false}
               comboboxProps={{ withinPortal: true }}
             />
-            {kind === "list" ? (
+            {showOperator && (
+              <Select
+                data={meta.operators.map((op) => ({
+                  value: op,
+                  label: OPERATOR_LABELS[op] ?? op,
+                }))}
+                value={c.operator}
+                onChange={(v) => v && setOperator(idx, v)}
+                w={140}
+                allowDeselect={false}
+                comboboxProps={{ withinPortal: true }}
+              />
+            )}
+            {kind === "platform" ? (
+              <MultiSelect
+                style={{ flex: 1 }}
+                placeholder="Select platform(s)"
+                data={PLATFORM_OPTIONS}
+                value={asList(c.value)}
+                onChange={(v) => update(idx, { value: v })}
+                clearable
+                comboboxProps={{ withinPortal: true }}
+              />
+            ) : kind === "group" ? (
               <TagsInput
                 style={{ flex: 1 }}
-                placeholder="Add values, press Enter"
-                value={Array.isArray(c.value) ? c.value : []}
+                placeholder={groupNames.length ? "Select group(s)" : "No other groups"}
+                data={groupNames}
+                value={asList(c.value)}
                 onChange={(v) => update(idx, { value: v })}
+                clearable
+                comboboxProps={{ withinPortal: true }}
               />
-            ) : (
+            ) : kind === "list" ? (
+              <TagsInput
+                style={{ flex: 1 }}
+                placeholder="Add value(s), press Enter"
+                data={suggestFor(c.type)}
+                value={asList(c.value)}
+                onChange={(v) => update(idx, { value: v })}
+                comboboxProps={{ withinPortal: true }}
+              />
+            ) : kind === "date" ? (
               <TextInput
                 style={{ flex: 1 }}
-                type={kind === "date" ? "date" : "text"}
+                type="date"
+                value={Array.isArray(c.value) ? "" : c.value}
+                onChange={(e) => update(idx, { value: e.currentTarget.value })}
+              />
+            ) : (
+              <Autocomplete
+                style={{ flex: 1 }}
+                data={c.operator === "regex" ? [] : suggestFor(c.type)}
                 placeholder={
                   kind === "version"
                     ? "e.g. 17.0"
-                    : kind === "date"
-                      ? ""
-                      : c.operator === "regex"
-                        ? "regular expression, e.g. ^MacBook"
-                        : "value"
+                    : c.operator === "regex"
+                      ? "regular expression, e.g. ^MacBook"
+                      : "value"
                 }
                 value={Array.isArray(c.value) ? "" : c.value}
-                onChange={(e) => update(idx, { value: e.currentTarget.value })}
+                onChange={(v) => update(idx, { value: v })}
+                comboboxProps={{ withinPortal: true }}
               />
             )}
             <ActionIcon
