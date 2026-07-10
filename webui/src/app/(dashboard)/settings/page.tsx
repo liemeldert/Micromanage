@@ -28,7 +28,6 @@ import {
   IconCode,
   IconDeviceFloppy,
   IconInfoCircle,
-  IconShieldLock,
 } from "@tabler/icons-react";
 import { api, type TenantInfo } from "../../../../lib/api";
 import { useAuth } from "../../../../lib/auth-context";
@@ -125,47 +124,38 @@ export default function SettingsPage() {
     s3Draft.region !== (typeof existingCfg.region === "string" ? existingCfg.region : "") ||
     s3Draft.prefix !== (typeof existingCfg.prefix === "string" ? existingCfg.prefix : "");
   const s3SecretsTyped = s3Draft.access_key_id.trim() !== "" || s3Draft.secret_access_key.trim() !== "";
-  // The controller's tenant PUT replaces s3_config wholesale -- it has no
-  // per-field merge/preserve step (unlike dispatcher.yaml's webhook secrets,
-  // which the server does restore by name). So if credentials already exist
-  // and the admin edits a non-secret S3 field without retyping BOTH secrets,
-  // there is no safe way to save without either dropping or corrupting the
-  // stored credentials -- block that combination instead.
-  const s3SecretsIncomplete =
-    (hasExistingSecret("access_key_id") || hasExistingSecret("secret_access_key")) &&
-    s3SecretsTyped &&
-    (s3Draft.access_key_id.trim() === "" || s3Draft.secret_access_key.trim() === "");
-  const s3BlockedByMissingSecrets =
-    (hasExistingSecret("access_key_id") || hasExistingSecret("secret_access_key")) &&
-    nonSecretS3Changed &&
-    !s3SecretsTyped;
+  // Access key ID and secret access key are a pair: typing exactly one fresh
+  // would pin a new key against a mismatched (restored or absent) partner.
+  // Require both or neither -- neither means "keep the stored pair", echoed as
+  // the redaction sentinel and restored server-side (see handleSaveTenant).
+  const s3SecretsPartial =
+    (s3Draft.access_key_id.trim() !== "") !== (s3Draft.secret_access_key.trim() !== "");
 
   async function handleSaveTenant() {
     if (!token || !tenant) return;
-    if (s3BlockedByMissingSecrets || s3SecretsIncomplete) return; // guarded off in the UI too
+    if (s3SecretsPartial) return; // guarded off in the UI too
     setSavingTenant(true);
     try {
       const body: Parameters<typeof api.updateTenant>[1] = {};
       if (nameDraft.trim() !== (tenant.name ?? "")) body.name = nameDraft.trim();
       if (depDraft !== !!tenant.dep_enabled) body.dep_enabled = depDraft;
 
-      // s3_config is a whole-object replace server-side (not a per-field
-      // patch), so the PUT must carry every field we intend to keep. Secret
-      // fields are included ONLY when the admin just typed a fresh value in
-      // this save -- the redacted placeholder from GET is NEVER written back,
-      // since that would permanently overwrite the real credential with the
-      // literal string "***redacted***". The two guards above
-      // (s3BlockedByMissingSecrets, s3SecretsIncomplete) already ensure the
-      // only way to reach here with existing secrets + a non-secret S3 edit
-      // is when the admin retyped BOTH secrets fresh -- so there is never a
-      // need (or safe way) to carry an old secret value forward here.
+      // s3_config is a whole-object replace server-side, so the PUT must carry
+      // every field we intend to keep. For each secret: send a freshly typed
+      // value as-is; otherwise, if a credential is already on file, echo the
+      // redaction sentinel -- the server swaps it back to the stored value
+      // (_restore_tenant_s3_secrets), so editing a non-secret field preserves
+      // the credentials without ever revealing or re-entering them. A blank
+      // with nothing on file is simply omitted, never written as a secret.
       if (nonSecretS3Changed || s3SecretsTyped) {
         const nextS3: Record<string, unknown> = {};
         if (s3Draft.bucket.trim()) nextS3.bucket = s3Draft.bucket.trim();
         if (s3Draft.region.trim()) nextS3.region = s3Draft.region.trim();
         if (s3Draft.prefix.trim()) nextS3.prefix = s3Draft.prefix.trim();
         if (s3Draft.access_key_id.trim()) nextS3.access_key_id = s3Draft.access_key_id.trim();
+        else if (hasExistingSecret("access_key_id")) nextS3.access_key_id = S3_REDACTED_PLACEHOLDER;
         if (s3Draft.secret_access_key.trim()) nextS3.secret_access_key = s3Draft.secret_access_key.trim();
+        else if (hasExistingSecret("secret_access_key")) nextS3.secret_access_key = S3_REDACTED_PLACEHOLDER;
         body.s3_config = nextS3;
       }
 
@@ -361,19 +351,10 @@ export default function SettingsPage() {
               </Grid.Col>
             </Grid>
 
-            {s3SecretsIncomplete && (
+            {s3SecretsPartial && (
               <Alert color="orange" variant="light" icon={<IconInfoCircle size={16} />}>
                 Enter both the access key ID and secret access key together, or leave both blank to
                 keep the existing pair unchanged.
-              </Alert>
-            )}
-            {s3BlockedByMissingSecrets && (
-              <Alert color="orange" variant="light" icon={<IconShieldLock size={16} />}>
-                This tenant already has S3 credentials on file, and they can&apos;t be read back to
-                preserve them automatically when other S3 fields change. To change the bucket,
-                region, or prefix, re-enter both the access key ID and secret access key too (get
-                them from wherever they&apos;re stored -- e.g. your password manager or cloud
-                console).
               </Alert>
             )}
 
@@ -382,7 +363,7 @@ export default function SettingsPage() {
                 leftSection={<IconDeviceFloppy size={14} />}
                 onClick={handleSaveTenant}
                 loading={savingTenant}
-                disabled={!tenantDirty || s3BlockedByMissingSecrets || s3SecretsIncomplete}
+                disabled={!tenantDirty || s3SecretsPartial}
               >
                 Save tenant settings
               </Button>
