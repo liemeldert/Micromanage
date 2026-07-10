@@ -49,6 +49,15 @@ class MDMController:
             max_instances=1,
             coalesce=True,
         )
+        # Dispatcher compliance sweep: covers time-based checks (not_seen_for),
+        # grace-period expiry (pending -> open) and remediation cooldown/retries.
+        self.scheduler.add_job(
+            self.dispatcher_tick,
+            'interval',
+            minutes=int(os.getenv('DISPATCHER_TICK_MINUTES', '10')),
+            max_instances=1,
+            coalesce=True,
+        )
         self.scheduler.start()
 
         # Initial sync
@@ -60,6 +69,11 @@ class MDMController:
         """Adaptive info-poll + group-refresh across all tenants."""
         from controller.services.poller import poll_all_tenants
         await poll_all_tenants(self.yaml_base_path)
+
+    async def dispatcher_tick(self):
+        """Dispatcher compliance evaluation across all tenants."""
+        from controller.services.dispatcher import sweep_all_tenants
+        await sweep_all_tenants()
 
     async def _bootstrap_admin(self):
         """Create a first admin user from env vars, if configured.

@@ -343,6 +343,75 @@ class Flow(BaseModel):
         return v
 
 
+# ── Dispatcher (dispatcher.yaml) ─────────────────────────────────────────────
+
+VALID_SEVERITIES = ('black', 'red', 'yellow', 'green')
+
+
+class DispatcherWebhook(BaseModel):
+    """A named delivery target. ``url`` (and ``secret`` if present) are secrets:
+    redacted from all API responses (see controller/api/main.py)."""
+    name: str
+    url: str
+    secret: Optional[str] = None
+
+    @validator('name')
+    def validate_name(cls, v):
+        if not re.match(r'^[a-zA-Z0-9-_]+$', v or ''):
+            raise ValueError(
+                "Webhook name must contain only alphanumeric characters, hyphens, "
+                "and underscores"
+            )
+        return v
+
+    @validator('url')
+    def validate_url(cls, v):
+        if not str(v or '').strip():
+            raise ValueError("Webhook url cannot be empty")
+        return v
+
+
+class DispatcherAction(BaseModel):
+    """One rule action. ``params`` are validated per action-type imperatively.
+    ``dry_run`` records what a remediation WOULD do without doing it."""
+    type: str
+    params: Optional[Dict[str, Any]] = {}
+    dry_run: Optional[bool] = False
+
+
+class DispatcherRule(BaseModel):
+    id: str
+    name: str
+    enabled: Optional[bool] = True
+    severity: str
+    scope: Optional[Dict[str, Any]] = {}
+    check: Dict[str, Any]
+    # Anti-flap: only fire once non-compliant continuously for this many minutes.
+    grace_minutes: Optional[int] = 0
+    actions: Optional[List[DispatcherAction]] = []
+    auto_resolve: Optional[bool] = False
+
+    @validator('id')
+    def validate_id(cls, v):
+        if not re.match(r'^[a-z0-9-_]+$', v or ''):
+            raise ValueError(
+                "Rule id must be a slug (lowercase letters, digits, hyphens, underscores)"
+            )
+        return v
+
+    @validator('severity')
+    def validate_severity(cls, v):
+        if v not in VALID_SEVERITIES:
+            raise ValueError(f"severity must be one of {VALID_SEVERITIES}")
+        return v
+
+    @validator('grace_minutes')
+    def validate_grace(cls, v):
+        if v is not None and v < 0:
+            raise ValueError("grace_minutes cannot be negative")
+        return v
+
+
 class YAMLValidator:
     def __init__(self, tenant_path: Path):
         self.tenant_path = tenant_path
@@ -386,6 +455,7 @@ class YAMLValidator:
         # Optional new-subsystem documents (no required-file stub). Each returns
         # early if its file is absent. They cross-validate against the docs above.
         self._validate_flows(groups, apps, profiles, known_tags)
+        self._validate_dispatcher(groups, apps, profiles, known_tags)
 
         return len(self.errors) == 0, self.errors, self.warnings
 
@@ -998,3 +1068,165 @@ class YAMLValidator:
         for nid in nodes_by_id:
             if nid not in reachable:
                 self.warnings.append(f"{owner} node '{nid}' is unreachable from start")
+
+    # ── Dispatcher rules (dispatcher.yaml) ────────────────────────────────────
+    def _validate_dispatcher(self, groups: Optional[List[Group]],
+                            apps: Optional[List[App]],
+                            profiles: Optional[List[Profile]],
+                            known_tags: Optional[set]) -> Optional[set]:
+        """Validate the optional dispatcher.yaml (compliance rules + webhooks).
+
+        Returns the set of rule ids, or None when there is no document. Checks:
+        unique webhook names / rule ids; a valid scope; a real check with valid
+        params; a valid severity; actions that reference real webhook targets /
+        profile / app / tag ids and (for send_command) a real command -- a
+        destructive command is allowed but flagged as approval-required (the
+        engine never auto-fires it)."""
+        path = self.tenant_path / 'dispatcher.yaml'
+        if not path.exists():
+            return None
+        data = self._load_yaml('dispatcher.yaml')
+        if not data:
+            return None
+
+        group_names = {g.name for g in groups} if groups else set()
+        profile_ids = {p.id for p in profiles} if profiles else set()
+        app_ids = {a.id for a in apps} if apps else set()
+
+        webhook_names: set = set()
+        for idx, wdata in enumerate(data.get('webhooks', []) or []):
+            try:
+                webhook = DispatcherWebhook(**wdata)
+            except Exception as e:
+                self.errors.append(f"Invalid dispatcher webhook at index {idx}: {e}")
+                continue
+            if webhook.name in webhook_names:
+                self.errors.append(f"Duplicate dispatcher webhook name: {webhook.name}")
+            webhook_names.add(webhook.name)
+
+        rule_ids: set = set()
+        for idx, rdata in enumerate(data.get('rules', []) or []):
+            try:
+                rule = DispatcherRule(**rdata)
+            except Exception as e:
+                self.errors.append(f"Invalid dispatcher rule at index {idx}: {e}")
+                continue
+            owner = f"rule '{rule.id}'"
+            if rule.id in rule_ids:
+                self.errors.append(f"Duplicate rule id: {rule.id}")
+            rule_ids.add(rule.id)
+
+            self._check_flow_scope(f"{owner} scope", rule.scope or {}, group_names, known_tags)
+            self._check_dispatcher_check(owner, rule.check or {}, profile_ids)
+            for action in rule.actions or []:
+                self._check_dispatcher_action(
+                    owner, action, webhook_names, profile_ids, app_ids, known_tags
+                )
+
+        return rule_ids
+
+    def _check_dispatcher_check(self, owner: str, check: Dict[str, Any],
+                               profile_ids: set) -> None:
+        from controller.services.compliance_catalog import VALID_CHECK_TYPES
+
+        ctype = check.get('type')
+        if ctype not in VALID_CHECK_TYPES:
+            self.errors.append(f"{owner} has an unknown check type: {ctype}")
+            return
+        if ctype == 'os_below' and not str(check.get('min') or '').strip():
+            self.errors.append(f"{owner} check os_below requires a 'min' version")
+        if ctype == 'not_seen_for':
+            try:
+                int(check.get('days'))
+            except (TypeError, ValueError):
+                self.errors.append(f"{owner} check not_seen_for requires an integer 'days'")
+        if ctype == 'missing_profile':
+            pid = check.get('profile_id')
+            if not pid:
+                self.errors.append(f"{owner} check missing_profile requires a 'profile_id'")
+            elif pid not in profile_ids:
+                self.errors.append(f"{owner} check references unknown profile: {pid}")
+        if ctype == 'tagged':
+            tags = check.get('tags')
+            if not isinstance(tags, list) or not tags:
+                self.errors.append(f"{owner} check tagged requires a non-empty 'tags' list")
+        if ctype == 'attribute':
+            if not str(check.get('key') or '').strip():
+                self.errors.append(f"{owner} check attribute requires a 'key' path")
+            if check.get('operator') not in (
+                'equals', 'not_equals', 'exists', 'gt', 'lt', 'regex'
+            ):
+                self.errors.append(
+                    f"{owner} check attribute has an invalid operator: {check.get('operator')}"
+                )
+
+    def _check_dispatcher_action(self, owner: str, action: "DispatcherAction",
+                                webhook_names: set, profile_ids: set, app_ids: set,
+                                known_tags: Optional[set]) -> None:
+        from controller.auth import DESTRUCTIVE_COMMANDS
+        from controller.services.command_catalog import VALID_COMMAND_TYPES, get_command
+
+        t = action.type
+        p = action.params or {}
+        valid = {"webhook", "assign_tag", "remove_tag", "install_profiles",
+                 "install_apps", "send_command"}
+        if t not in valid:
+            self.errors.append(f"{owner} has an unknown action type: {t}")
+            return
+
+        if t == "webhook":
+            target = p.get("target")
+            if not target or target not in webhook_names:
+                self.errors.append(
+                    f"{owner} webhook action targets unknown webhook: {target}"
+                )
+        elif t in ("assign_tag", "remove_tag"):
+            tags = p.get("tags")
+            tags = tags if isinstance(tags, list) else ([tags] if tags else [])
+            if not tags:
+                self.errors.append(f"{owner} {t} action requires a non-empty 'tags' list")
+            if known_tags:
+                for tg in (str(x) for x in tags if x):
+                    if tg not in known_tags:
+                        self.warnings.append(
+                            f"{owner} references tag '{tg}' which is not defined in tags.yaml"
+                        )
+        elif t == "install_profiles":
+            ids = p.get("profile_ids")
+            if not isinstance(ids, list) or not ids:
+                self.errors.append(f"{owner} install_profiles action requires 'profile_ids'")
+            for pid in (ids if isinstance(ids, list) else []):
+                if pid not in profile_ids:
+                    self.errors.append(f"{owner} references unknown profile: {pid}")
+        elif t == "install_apps":
+            ids = p.get("app_ids")
+            if not isinstance(ids, list) or not ids:
+                self.errors.append(f"{owner} install_apps action requires 'app_ids'")
+            for aid in (ids if isinstance(ids, list) else []):
+                if aid not in app_ids:
+                    self.errors.append(f"{owner} references unknown app: {aid}")
+        elif t == "send_command":
+            cmd = p.get("command")
+            cparams = p.get("params")
+            if cparams is not None and not isinstance(cparams, dict):
+                self.errors.append(f"{owner} send_command action 'params' must be a mapping")
+            if not cmd or cmd not in VALID_COMMAND_TYPES:
+                self.errors.append(f"{owner} send_command references unknown command: {cmd}")
+            elif cmd in DESTRUCTIVE_COMMANDS:
+                # Allowed, but the engine turns it into a pending-approval task an
+                # admin must confirm -- it never auto-fires. Surface that.
+                self.warnings.append(
+                    f"{owner} send_command '{cmd}' is destructive; it will require "
+                    "manual admin approval and never auto-remediates"
+                )
+            else:
+                entry = get_command(cmd) or {}
+                supplied = cparams if isinstance(cparams, dict) else {}
+                for pd in entry.get("params", []):
+                    if pd.get("required") is True:
+                        val = supplied.get(pd["name"])
+                        if val is None or (isinstance(val, str) and not val.strip()):
+                            self.errors.append(
+                                f"{owner} send_command is missing required parameter "
+                                f"'{pd.get('label', pd['name'])}'"
+                            )

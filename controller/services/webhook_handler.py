@@ -63,6 +63,17 @@ async def _atc_signal(device_id: Any, signal: str, ref: Optional[str] = None) ->
         logger.exception("ATC: signal %s (ref=%s) failed for device %s", signal, ref, device_id)
 
 
+async def _dispatcher_eval(device: Device) -> None:
+    """Best-effort: re-evaluate Dispatcher compliance rules against fresh device
+    state. Never breaks webhook processing."""
+    try:
+        from controller.services import dispatcher
+        await dispatcher.evaluate_device(device, reason="inventory")
+    except Exception:
+        logger.exception("Dispatcher: evaluate_device failed for %s",
+                         getattr(device, "serial_number", "?"))
+
+
 class WebhookHandler:
     """Handle MDM webhook callbacks from NanoMDM (MicroMDM-compatible schema).
 
@@ -410,6 +421,8 @@ class WebhookHandler:
         await device.save()
         # ATC: a device that reported inventory satisfies a wait_for(device_info).
         await _atc_signal(device.id, "device_info")
+        # Dispatcher: fresh posture/inventory may change compliance.
+        await _dispatcher_eval(device)
 
     # ── Per-command response handlers ─────────────────────────────────────────
     # Note on Apple MDM semantics: a device responds "Acknowledged" AFTER it has

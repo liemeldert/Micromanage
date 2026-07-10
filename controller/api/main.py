@@ -31,6 +31,7 @@ from controller.models.tenant import (
     AppDeployment,
     ProfileDeployment,
     FlowRun,
+    Alert,
 )
 from controller.services.app_manager import AppManager
 from controller.services.mdm_connector import MDMConnector
@@ -87,6 +88,56 @@ def _redact_s3_config(s3_config: Optional[Dict[str, Any]]) -> Dict[str, Any]:
         if key in cfg:
             cfg[key] = "***redacted***"
     return cfg
+
+
+_REDACTED = "***redacted***"
+# A Dispatcher webhook's url is itself a credential (e.g. a Slack incoming
+# webhook URL), so both url and secret are redacted from every API response.
+_SECRET_WEBHOOK_KEYS = ("url", "secret")
+
+
+def _redact_dispatcher_config(config: Dict[str, Any]) -> Dict[str, Any]:
+    """Return a copy of dispatcher.yaml with webhook url/secret redacted."""
+    cfg = dict(config or {})
+    hooks = cfg.get("webhooks")
+    if isinstance(hooks, list):
+        cfg["webhooks"] = [
+            {**h, **{k: _REDACTED for k in _SECRET_WEBHOOK_KEYS if k in h}}
+            if isinstance(h, dict) else h
+            for h in hooks
+        ]
+    return cfg
+
+
+def _restore_dispatcher_secrets(tenant_id: str, config_data: Dict[str, Any]) -> None:
+    """Before saving dispatcher.yaml, replace any redacted webhook url/secret the
+    UI echoed back with the value currently on disk (matched by webhook name), so
+    an edit that never revealed a secret can't overwrite it with the sentinel."""
+    hooks = config_data.get("webhooks")
+    if not isinstance(hooks, list):
+        return
+    existing_path = _tenant_dir(tenant_id) / "dispatcher.yaml"
+    stored: Dict[str, Dict[str, Any]] = {}
+    if existing_path.exists():
+        try:
+            doc = yaml.safe_load(existing_path.read_text()) or {}
+            for h in doc.get("webhooks", []) or []:
+                if isinstance(h, dict) and h.get("name"):
+                    stored[h["name"]] = h
+        except (OSError, yaml.YAMLError):
+            logger.exception("dispatcher: could not read existing webhooks for %s", tenant_id)
+    for h in hooks:
+        if not isinstance(h, dict):
+            continue
+        prior = stored.get(h.get("name"))
+        for key in _SECRET_WEBHOOK_KEYS:
+            if h.get(key) == _REDACTED:
+                if prior and key in prior:
+                    h[key] = prior[key]
+                else:
+                    # No stored value to restore (e.g. a new webhook): drop the
+                    # sentinel so validation can flag a genuinely-missing url.
+                    h.pop(key, None)
 
 
 def _atomic_write_yaml(path: Path, data: Dict[str, Any]) -> None:
@@ -414,13 +465,17 @@ async def update_tenant(update: TenantUpdate, admin: Principal = Depends(require
 # subsystems land (tags in Phase 0; flows / dispatcher follow in later phases).
 # "config" is READABLE but not editable via the API -- it embeds S3 secrets --
 # so reads allow it while writes/history do not.
-_EDITABLE_CONFIG_TYPES = ["groups", "apps", "profiles", "tags", "flows"]
+_EDITABLE_CONFIG_TYPES = ["groups", "apps", "profiles", "tags", "flows", "dispatcher"]
 _READABLE_CONFIG_TYPES = _EDITABLE_CONFIG_TYPES + ["config"]
+# Config docs whose authoring can act on devices (send commands, auto-remediate)
+# or reach arbitrary URLs (webhook SSRF), so writing them is admin-only even
+# though other config types are member-writable.
+_ADMIN_ONLY_CONFIG_TYPES = {"flows", "dispatcher"}
 # Optional config docs (advisory registries / new-subsystem documents) that have
 # no required-file stub. Copied into the validation sandbox when present so
 # cross-document checks (e.g. a tag referenced by a group, a profile referenced
 # by a flow) resolve on any save.
-_OPTIONAL_CONFIG_FILES = ["tags.yaml", "flows.yaml"]
+_OPTIONAL_CONFIG_FILES = ["tags.yaml", "flows.yaml", "dispatcher.yaml"]
 
 
 @app.get("/api/v1/config/{config_type}")
@@ -454,6 +509,10 @@ async def get_yaml_config(
         if "s3" in config["tenant"]:
             config["tenant"]["s3"] = _redact_s3_config(config["tenant"]["s3"])
             redacted = True
+    # dispatcher.yaml webhook url/secret are credentials -- redact from responses.
+    if config_type == "dispatcher":
+        config = _redact_dispatcher_config(config)
+        redacted = True
 
     if raw:
         # Serve the authored file verbatim (comments intact) unless redaction
@@ -544,6 +603,15 @@ async def update_yaml_config(
     """
     if config_type not in _EDITABLE_CONFIG_TYPES:
         raise HTTPException(status_code=400, detail="Invalid config type")
+    if config_type in _ADMIN_ONLY_CONFIG_TYPES and not principal.is_admin:
+        raise HTTPException(
+            status_code=403,
+            detail=f"Editing '{config_type}' requires the admin role",
+        )
+    # Preserve webhook secrets the UI echoed back redacted (never overwrite a
+    # secret with the sentinel) before validation + write.
+    if config_type == "dispatcher":
+        _restore_dispatcher_secrets(principal.tenant.id, config_data)
     return await _apply_config_update(principal, config_type, config_data)
 
 
@@ -742,6 +810,11 @@ async def restore_config_history_version(
     normal save (the current document is snapshotted first, so a restore is
     itself undoable).
     """
+    if config_type in _ADMIN_ONLY_CONFIG_TYPES and not principal.is_admin:
+        raise HTTPException(
+            status_code=403,
+            detail=f"Restoring '{config_type}' requires the admin role",
+        )
     entry = _load_history_entry(principal.tenant.id, config_type, version_id)
     try:
         config_data = yaml.safe_load(entry.get("content") or "") or {}
@@ -844,6 +917,17 @@ async def get_flow_step_catalog(principal: Principal = Depends(get_current_princ
     this, so adding a node type is a catalog + engine change with no bespoke
     frontend wiring (mirrors GET /api/v1/commands/catalog)."""
     from controller.services.flow_step_catalog import catalog
+
+    return catalog()
+
+
+@app.get("/api/v1/dispatcher/check-catalog")
+async def get_dispatcher_check_catalog(principal: Principal = Depends(get_current_principal)):
+    """The Dispatcher compliance-check palette (curated checks + generic attribute).
+
+    Drives the rule editor's check picker + param forms data-driven (mirrors the
+    command / flow-step catalogs)."""
+    from controller.services.compliance_catalog import catalog
 
     return catalog()
 
@@ -1274,6 +1358,130 @@ async def start_device_flow_run(
             detail=f"Flow '{body.flow_id}' not found or has no valid start node",
         )
     return run.to_dict()
+
+
+# ── Dispatcher alerts ────────────────────────────────────────────────────────
+
+async def _enrich_alerts(alerts: List[Alert]) -> List[Dict[str, Any]]:
+    """Alert dicts + a small device summary for the triage board, sorted by
+    severity (black -> green) then most-recently updated."""
+    from controller.services.dispatcher import SEVERITY_RANK
+    from controller.services.naming import display_name
+
+    device_ids = {a.device_id for a in alerts if a.device_id}
+    devices = {
+        str(d.id): d for d in await Device.filter(id__in=list(device_ids)).all()
+    } if device_ids else {}
+    out = []
+    for a in alerts:
+        item = a.to_dict()
+        dev = devices.get(str(a.device_id))
+        item["device"] = {
+            "serial_number": dev.serial_number if dev else None,
+            "display_name": display_name(dev) if dev else None,
+        } if dev else None
+        out.append(item)
+    out.sort(key=lambda i: (SEVERITY_RANK.get(i["severity"], 0), i["updated_at"] or ""),
+             reverse=True)
+    return out
+
+
+@app.get("/api/v1/alerts")
+async def list_alerts(
+        severity: Optional[str] = None,
+        status: Optional[str] = None,
+        device_id: Optional[str] = None,
+        principal: Principal = Depends(get_current_principal),
+):
+    """Compliance alerts (triage board), newest/most-severe first."""
+    query = Alert.filter(tenant=principal.tenant)
+    if severity:
+        query = query.filter(severity=severity)
+    if status:
+        query = query.filter(status=status)
+    if device_id:
+        query = query.filter(device_id=device_id)
+    alerts = await query.limit(1000).all()
+    items = await _enrich_alerts(alerts)
+    # Severity counts across active (non-resolved) alerts, for the board header.
+    active = [a for a in alerts if a.status != "resolved"]
+    counts = {s: 0 for s in ("black", "red", "yellow", "green")}
+    for a in active:
+        if a.severity in counts:
+            counts[a.severity] += 1
+    return {"alerts": items, "counts": counts, "active": len(active)}
+
+
+@app.get("/api/v1/alerts/{alert_id}")
+async def get_alert(alert_id: str, principal: Principal = Depends(get_current_principal)):
+    alert = await Alert.get_or_none(id=alert_id, tenant=principal.tenant)
+    if not alert:
+        raise HTTPException(status_code=404, detail="Alert not found")
+    return (await _enrich_alerts([alert]))[0]
+
+
+@app.post("/api/v1/alerts/{alert_id}/acknowledge")
+async def acknowledge_alert(alert_id: str, principal: Principal = Depends(get_current_principal)):
+    alert = await Alert.get_or_none(id=alert_id, tenant=principal.tenant)
+    if not alert:
+        raise HTTPException(status_code=404, detail="Alert not found")
+    if alert.status == "resolved":
+        raise HTTPException(status_code=409, detail="Alert is already resolved")
+    alert.status = "acknowledged"
+    alert.acknowledged_at = datetime.now(timezone.utc)
+    alert.acknowledged_by = principal.email
+    await alert.save()
+    return alert.to_dict()
+
+
+@app.post("/api/v1/alerts/{alert_id}/resolve")
+async def resolve_alert(alert_id: str, principal: Principal = Depends(get_current_principal)):
+    """Manually resolve an alert (reverses reversible actions like a noncompliant tag)."""
+    alert = await Alert.get_or_none(id=alert_id, tenant=principal.tenant)
+    if not alert:
+        raise HTTPException(status_code=404, detail="Alert not found")
+    if alert.status == "resolved":
+        return alert.to_dict()
+    from controller.services import dispatcher
+    device = await Device.get_or_none(id=alert.device_id)
+    if device is not None:
+        await dispatcher._resolve_alert(alert, device, f"resolved by {principal.email}")
+    else:
+        alert.status = "resolved"
+        alert.resolved_at = datetime.now(timezone.utc)
+        await alert.save()
+    return alert.to_dict()
+
+
+class RemediateRequest(BaseModel):
+    action_key: str
+
+
+@app.post("/api/v1/alerts/{alert_id}/remediate")
+async def approve_alert_remediation(
+        alert_id: str,
+        body: RemediateRequest,
+        admin: Principal = Depends(require_admin),
+):
+    """Admin-approve a queued destructive remediation for an alert. Runs through
+    the audited command path with the admin's authority; never auto-fired."""
+    alert = await Alert.get_or_none(id=alert_id, tenant=admin.tenant)
+    if not alert:
+        raise HTTPException(status_code=404, detail="Alert not found")
+    from controller.services import dispatcher
+    try:
+        result = await dispatcher.approve_remediation(alert, body.action_key, admin.email)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return {"message": "Remediation approved", **result, "alert": alert.to_dict()}
+
+
+@app.post("/api/v1/dispatcher/evaluate")
+async def dispatcher_evaluate_now(principal: Principal = Depends(get_current_principal)):
+    """Force a compliance sweep for this tenant now (mirrors POST /api/v1/sync)."""
+    from controller.services import dispatcher
+    evaluated = await dispatcher.sweep(principal.tenant)
+    return {"message": "Compliance sweep complete", "devices_evaluated": evaluated}
 
 
 @app.post("/api/v1/devices/{device_id}/command")

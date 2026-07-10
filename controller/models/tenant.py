@@ -265,3 +265,59 @@ class FlowRun(Model):
             "updated_at": self.updated_at.isoformat() if self.updated_at else None,
             "completed_at": self.completed_at.isoformat() if self.completed_at else None,
         }
+
+
+class Alert(Model):
+    """A Dispatcher compliance alert for a (device, rule) pair (services.dispatcher).
+
+    At most one non-``resolved`` row exists per (device, rule_id): re-evaluation
+    updates it rather than spamming duplicates. Lifecycle:
+
+      pending  -> a violation was first seen (grace-period anchor); no actions yet
+      open     -> non-compliant continuously for grace_minutes; actions fired
+      acknowledged -> an operator ack'd it (still non-compliant)
+      resolved -> the device became compliant (auto) or an operator resolved it;
+                  reversible actions (e.g. a noncompliant tag) are undone
+
+    Severity is an ED/911 triage label (black > red > yellow > green) the board
+    ranks by. Remediation attempts / cooldowns / what fired are recorded in
+    ``detail`` (never secrets)."""
+    id = fields.UUIDField(pk=True)
+    tenant = fields.ForeignKeyField("models.Tenant", related_name="alerts")
+    device = fields.ForeignKeyField("models.Device", related_name="alerts")
+    rule_id = fields.CharField(max_length=100)
+    severity = fields.CharField(max_length=10)  # black | red | yellow | green
+    # pending | open | acknowledged | resolved
+    status = fields.CharField(max_length=20, default="pending")
+    summary = fields.CharField(max_length=255)
+    # Snapshot of the failing state + remediation ledger (attempts, outcomes,
+    # reversible tags, pending approvals). JSON, never carries secrets.
+    detail = fields.JSONField(default=dict)
+    first_detected_at = fields.DatetimeField(auto_now_add=True)  # grace anchor
+    opened_at = fields.DatetimeField(null=True)
+    acknowledged_at = fields.DatetimeField(null=True)
+    acknowledged_by = fields.CharField(max_length=255, null=True)
+    resolved_at = fields.DatetimeField(null=True)
+    updated_at = fields.DatetimeField(auto_now=True)
+
+    class Meta:
+        table = "alerts"
+        ordering = ["-updated_at"]
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "id": str(self.id),
+            "tenant_id": str(self.tenant_id),
+            "device_id": str(self.device_id) if self.device_id else None,
+            "rule_id": self.rule_id,
+            "severity": self.severity,
+            "status": self.status,
+            "summary": self.summary,
+            "detail": self.detail or {},
+            "first_detected_at": self.first_detected_at.isoformat() if self.first_detected_at else None,
+            "opened_at": self.opened_at.isoformat() if self.opened_at else None,
+            "acknowledged_at": self.acknowledged_at.isoformat() if self.acknowledged_at else None,
+            "acknowledged_by": self.acknowledged_by,
+            "resolved_at": self.resolved_at.isoformat() if self.resolved_at else None,
+            "updated_at": self.updated_at.isoformat() if self.updated_at else None,
+        }
