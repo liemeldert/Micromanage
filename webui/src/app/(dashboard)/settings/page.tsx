@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   Alert,
   Badge,
@@ -78,12 +78,19 @@ export default function SettingsPage() {
   const [s3Draft, setS3Draft] = useState<S3FormState>(EMPTY_S3_FORM);
   const [tenantDirty, setTenantDirty] = useState(false);
   const [savingTenant, setSavingTenant] = useState(false);
+  // Mirror tenantDirty into a ref so the async loadTenant reads the LIVE value,
+  // not the one captured when its effect fired -- otherwise a slow initial GET
+  // can resolve after the admin starts editing and silently clobber their input.
+  const tenantDirtyRef = useRef(false);
+  useEffect(() => {
+    tenantDirtyRef.current = tenantDirty;
+  }, [tenantDirty]);
 
   const loadTenant = () => {
     if (!token) return Promise.resolve();
     return api.getTenant(token).then((t) => {
       setTenant(t);
-      if (!tenantDirty) {
+      if (!tenantDirtyRef.current) {
         setNameDraft(t.name ?? "");
         setDepDraft(!!t.dep_enabled);
         const cfg = (t.s3_config ?? {}) as Record<string, unknown>;
@@ -166,6 +173,9 @@ export default function SettingsPage() {
 
       await api.updateTenant(token, body);
       notifications.show({ color: "teal", message: "Tenant settings saved." });
+      // Reset the ref synchronously (not via the effect) so the immediate
+      // loadTenant below repopulates the form with the just-saved values.
+      tenantDirtyRef.current = false;
       setTenantDirty(false);
       await loadTenant();
     } catch (e: unknown) {

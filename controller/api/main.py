@@ -453,6 +453,22 @@ async def update_tenant(update: TenantUpdate, admin: Principal = Depends(require
     if update.allowed_users is not None:
         tenant.allowed_users = update.allowed_users
     if update.s3_config is not None:
+        # Access key ID and secret access key are a pair. Reject a request that
+        # sends a fresh value for exactly one of them (the other being the
+        # redaction sentinel or absent) -- restoring the partner from the stored
+        # value would silently persist a mismatched credential. This enforces
+        # the form's both-or-neither rule server-side so a direct API call
+        # (curl, a script, a stale build) can't corrupt the pair either.
+        incoming_s3 = update.s3_config
+
+        def _s3_fresh(key: str) -> bool:
+            return key in incoming_s3 and incoming_s3.get(key) != _REDACTED
+
+        if _s3_fresh("access_key_id") != _s3_fresh("secret_access_key"):
+            raise HTTPException(
+                status_code=400,
+                detail="S3 access key ID and secret access key must be set together",
+            )
         # Never let a redacted secret the UI echoed back overwrite the stored
         # credential; restore any ***redacted*** sentinel from the current value.
         tenant.s3_config = _restore_tenant_s3_secrets(tenant.s3_config, update.s3_config)
