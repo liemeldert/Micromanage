@@ -404,6 +404,39 @@ export const api = {
     return request<TenantInfo>("/api/v1/tenant", token);
   },
 
+  // Users (admin only -- server enforces via require_admin; a non-admin call
+  // 403s and the caller should surface that through notifications).
+  listUsers(token: string) {
+    return request<{ users: User[] }>("/api/v1/users", token);
+  },
+
+  createUser(
+    token: string,
+    body: { email: string; role: string; password?: string; external_id?: string },
+  ) {
+    return request<{ id: string; email: string; role: string }>("/api/v1/users", token, {
+      method: "POST",
+      body: JSON.stringify(body),
+    });
+  },
+
+  updateUser(
+    token: string,
+    id: string,
+    body: { role?: string; password?: string; is_active?: boolean },
+  ) {
+    return request<{ message: string }>(`/api/v1/users/${id}`, token, {
+      method: "PUT",
+      body: JSON.stringify(body),
+    });
+  },
+
+  deleteUser(token: string, id: string) {
+    return request<{ message: string }>(`/api/v1/users/${id}`, token, {
+      method: "DELETE",
+    });
+  },
+
   // Enrollment
   getEnrollment(token: string) {
     return request<EnrollmentDetails>("/api/v1/enrollment", token);
@@ -537,6 +570,17 @@ export interface TenantInfo {
   dep_enabled: boolean;
   created_at: string;
   is_active: boolean;
+}
+
+// Console user (tenant-scoped admin/member account). Mirrors the shape
+// returned by GET /api/v1/users (controller/api/main.py::list_users).
+export interface User {
+  id: string;
+  email: string;
+  role: string; // "admin" | "member"
+  is_active: boolean;
+  has_password: boolean; // false for external-IdP (Clerk/OIDC) accounts
+  external_id: string | null;
 }
 
 // ── ATC flow types ─────────────────────────────────────────────────────────

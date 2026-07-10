@@ -30,6 +30,7 @@ import { api, type TenantInfo } from "../../../../lib/api";
 import { useAuth } from "../../../../lib/auth-context";
 import { SHOW_YAML_STORAGE_KEY } from "../../../../lib/preferences";
 import { TagRegistryEditor } from "../../../components/config/TagRegistryEditor";
+import { UsersManager } from "../../../components/config/UsersManager";
 
 export default function SettingsPage() {
   const { token, tenantId, email } = useAuth();
@@ -111,16 +112,11 @@ export default function SettingsPage() {
               {tenant?.dep_enabled ? "Yes" : "No"}
             </Badge>
           </Group>
-          <Group align="flex-start" gap="xs">
-            <Text fz="sm" c="dimmed" w={120}>Allowed users</Text>
-            <Stack gap={4}>
-              {(tenant?.allowed_users ?? []).map((u) => (
-                <Code key={u} fz="xs">{u}</Code>
-              ))}
-            </Stack>
-          </Group>
         </Stack>
       </Card>
+
+      {/* Users (add / role / password reset / activate / delete) */}
+      <UsersManager />
     </Stack>
   );
 }
