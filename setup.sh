@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
-# MicromanageIAC — one-shot setup helper
+# Micromanage setup script
 # Usage:
-#   ./setup.sh               → interactive full setup (production)
-#   ./setup.sh dev           → laptop/dev setup (no root, HMR, no real devices needed)
+#   ./setup.sh               → interactive full setup (production-ish)
+#   ./setup.sh dev           → development setup (no root, HMR, no real devices needed)
 #   ./setup.sh env           → generate .env from .env.example
-#   ./setup.sh apns          → guided Apple Push Notification cert setup
+#   ./setup.sh apns          → guided Apple Push Notification cert setup for deployment from script
 #   ./setup.sh push-cert     → upload APNs cert to running NanoMDM
-#   ./setup.sh tenant <id>   → scaffold YAML configs for a new tenant
+#   ./setup.sh tenant <id>   → create YAML configs for a new tenant
 #   ./setup.sh up            → start all services (production compose)
 
 set -euo pipefail
@@ -34,7 +34,7 @@ check_deps() {
 # ── env ──────────────────────────────────────────────────────────────────────
 cmd_env() {
   if [[ -f .env ]]; then
-    warn ".env already exists — skipping (delete it first to regenerate)"
+    warn ".env already exists -- skipping (delete it first to regenerate)"
     return
   fi
   cp .env.example .env
@@ -65,7 +65,7 @@ cmd_certs() {
   mkdir -p certs
 
   if [[ -f certs/server.crt && -f certs/server.key ]]; then
-    warn "certs/server.crt already exists — skipping (delete to regenerate)"
+    warn "certs/server.crt already exists -- skipping (delete to regenerate)"
     return
   fi
 
@@ -119,7 +119,7 @@ cmd_apns() {
   echo
   echo -e "${YEL}Step 2: Get the vendor-signed CSR from MicroMDM's push cert portal${NC}"
   echo
-  echo "  Option A (mdmcert.download — easiest):"
+  echo "  Option A (mdmcert.download -- easiest):"
   echo "    1. Go to https://mdmcert.download"
   echo "    2. Enter your Apple Developer email"
   echo "    3. Upload: certs/apns/push.csr"
@@ -178,7 +178,7 @@ cmd_push_cert() {
   local cert_file="${1:-certs/apns/MDM_Certificate.pem}"
   local key_file="${2:-certs/apns/push.key}"
 
-  [[ -f "$cert_file" ]] || die "Certificate not found: $cert_file — run './setup.sh apns' first"
+  [[ -f "$cert_file" ]] || die "Certificate not found: $cert_file -- run './setup.sh apns' first"
   [[ -f "$key_file" ]]  || die "Key not found: $key_file"
 
   # Load NanoMDM API key from .env
@@ -319,7 +319,7 @@ cmd_up() {
 cmd_interactive() {
   echo
   echo -e "${BLU}╔═══════════════════════════════════════════════╗${NC}"
-  echo -e "${BLU}║       MicromanageIAC — First-time Setup       ║${NC}"
+  echo -e "${BLU}║       Micromanage First-time Setup       ║${NC}"
   echo -e "${BLU}╚═══════════════════════════════════════════════╝${NC}"
   echo
 
@@ -399,7 +399,7 @@ EOF
 profiles: []
 EOF
 
-  ok "Scaffolded yaml-configs/tenants/default/"
+  ok "Created example yaml-configs/tenants/default/"
   echo -e "  Login with: tenant ${GRN}default${NC} / email ${GRN}admin@localhost.dev${NC}"
   echo -e "  The controller will create the DB row on first sync."
 }
@@ -408,7 +408,7 @@ EOF
 cmd_dev() {
   echo
   echo -e "${BLU}╔═══════════════════════════════════════════════╗${NC}"
-  echo -e "${BLU}║     MicromanageIAC — Dev / Laptop Setup       ║${NC}"
+  echo -e "${BLU}║     MicromanageIAC Dev / Laptop Setup       ║${NC}"
   echo -e "${BLU}╚═══════════════════════════════════════════════╝${NC}"
   echo
   check_deps
@@ -427,15 +427,13 @@ cmd_dev() {
     sed -i "s/changeme_webhook_secret/${wh_sec}/"    .env
     ok ".env created"
   else
-    ok ".env already exists — skipping"
+    ok ".env already exists -- skipping"
   fi
   echo
-  # NanoMDM no longer needs its own TLS cert — it serves plain HTTP and validates
-  # device identity certs against step-ca's CA (wired in the compose).
 
   # 3. Ensure yaml-configs is user-writable (Docker may have created it as root)
   if [[ -d yaml-configs && ! -w yaml-configs ]]; then
-    warn "yaml-configs/ is not writable — fixing ownership with docker..."
+    warn "yaml-configs/ is not writable -- fixing ownership with docker..."
     docker compose -f docker-compose.yml -f docker-compose.dev.yml run --rm -u root controller \
       chown -R mdm:mdm /app/yaml-configs 2>/dev/null || true
     # Also try host-side fix if running as same UID
@@ -463,7 +461,7 @@ cmd_dev() {
   echo
 
   # 5. Webui dev instructions
-  echo -e "${YEL}Next step — start the web UI with HMR:${NC}"
+  echo -e "${YEL}Next step -- start the web UI with HMR:${NC}"
   echo
   echo "  cd webui && yarn dev"
   echo
@@ -481,10 +479,9 @@ cmd_dev() {
   echo "  Then set DEV_TUNNEL_URL in .env and restart the controller:"
   echo "  docker compose -f docker-compose.yml -f docker-compose.dev.yml restart controller"
   echo
-  warn "APNs push certificate is still required for real device push — run './setup.sh apns' when ready."
+  warn "APNs push certificate is still required for real device push -- run './setup.sh apns' when ready."
 }
 
-# ── dispatch ──────────────────────────────────────────────────────────────────
 case "${1:-}" in
   dev)        cmd_dev ;;
   env)        cmd_env ;;

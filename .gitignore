@@ -39,3 +39,4 @@ webui/.next/
 # ── Local CLI state ───────────────────────────────────────────────────────
 .mmmdm/
 .claude/
+yaml-configs/

@@ -1,15 +1,3 @@
-# ── MicromanageIAC — production / Portainer stack ─────────────────────────────
-# Fully compose-based: pulls prebuilt images from ghcr, uses named volumes only
-# (safe to paste into Portainer's stack editor — no host bind mounts). NanoMDM
-# serves HTTP behind your TLS-terminating proxy; the APNs push cert is uploaded
-# from environment (apns-init) or via the admin console.
-#
-# Set the variables from .env.prod.example in Portainer's "Environment variables"
-# section (or an attached .env). Nothing here depends on setup.sh.
-#
-# Image names default to this repo's ghcr path; override CONTROLLER_IMAGE /
-# WEBUI_IMAGE if your repository path differs.
-
 services:
   postgres:
     image: postgres:15-alpine
@@ -27,13 +15,13 @@ services:
     restart: unless-stopped
 
   # On first boot, initialises an RSA CA chain (SCEP needs an RSA intermediate to
-  # decrypt the enrollment pkcsPKIEnvelope — step ca init only makes ECDSA) and
-  # registers the SCEP provisioner devices enrol against.
+  # decrypt the enrollment pkcsPKIEnvelope as step ca init only makes ECDSA) and
+  # registers the SCEP provisioner devices enroll against.
   step-ca:
     image: smallstep/step-ca:latest
     environment:
       STEPCA_NAME: ${STEPCA_NAME:-MicromanageCA}
-      STEPCA_PASSWORD: ${STEPCA_PASSWORD:?set STEPCA_PASSWORD}   # encrypts the CA keys at rest
+      STEPCA_PASSWORD: ${STEPCA_PASSWORD:?set STEPCA_PASSWORD}
       MDM_HOSTNAME: ${MDM_HOSTNAME:?set MDM_HOSTNAME}
       SCEP_NAME: ${SCEP_NAME:-mdm_device_scep}
       SCEP_CHALLENGE: ${SCEP_CHALLENGE:?set SCEP_CHALLENGE}      # must match the controller's SCEP_CHALLENGE
@@ -71,13 +59,6 @@ services:
       start_period: 40s
     restart: unless-stopped
 
-  # NanoMDM has no built-in TLS — it serves plain HTTP on :9000 behind your
-  # TLS-terminating reverse proxy. It reads each device's identity cert from the
-  # signed `Mdm-Signature` header (the enrollment profile sets SignMessage=true)
-  # and validates the chain against step-ca, so no client-cert / mTLS is needed.
-  # One-shot: NanoMDM needs its OWN database (its table names — devices, users… —
-  # collide with the controller's) plus its pgsql schema (the backend doesn't
-  # self-create tables). Idempotent; the schema ref must match the nanomdm image tag.
   nanomdm-schema:
     image: postgres:15-alpine
     environment:
@@ -108,8 +89,8 @@ services:
       - step_ca_data:/stepca:ro   # read step-ca's CA certs to validate device identity certs
       - nanomdm_data:/var/lib/nanomdm
     ports:
-      - "${MDM_PORT:-443}:9000" # device-facing MDM endpoint (HTTP; front with your TLS proxy)
-      # Management API stays loopback-only — never expose to the network.
+      - "${MDM_PORT:-443}:9000" # device-facing MDM endpoint
+      # Management API
       - "127.0.0.1:9000:9000"
     depends_on:
       postgres:
@@ -128,10 +109,7 @@ services:
       -debug="${NANOMDM_DEBUG:-false}"
     restart: unless-stopped
 
-  # One-shot: upload the APNs push certificate to NanoMDM from base64 env vars.
-  # Obtain the cert from Apple (mdmcert.download or the Apple Push Cert Portal),
-  # then set PUSH_CERT_PEM_B64 / PUSH_KEY_PEM_B64 (base64 of the PEM files).
-  # Skips cleanly if not provided.
+  # Runs once to upload the APNs push certificate to NanoMDM from base64 env vars.
   apns-init:
     image: alpine:3.20
     depends_on:
@@ -165,10 +143,7 @@ services:
         fi
     restart: "no"
 
-  # The controller runs as uid 1000 (non-root). Docker creates the named config
-  # volume below owned by root:root, so uid 1000 can't write tenant YAML — every
-  # config save 500s. This one-shot, idempotent step (root) fixes the ownership
-  # before the controller starts. Reuses the controller image (no extra pull).
+  # The controller runs as uid 1000 (non-root). This runs once to fix ownership.
   yaml-init:
     image: ${CONTROLLER_IMAGE:-ghcr.io/liemeldert/micromanage_2-controller:stable}
     user: "0:0"
@@ -202,7 +177,7 @@ services:
       CONTROLLER_BOOTSTRAP_ADMIN_EMAIL: ${CONTROLLER_BOOTSTRAP_ADMIN_EMAIL:-}
       CONTROLLER_BOOTSTRAP_ADMIN_PASSWORD: ${CONTROLLER_BOOTSTRAP_ADMIN_PASSWORD:-}
       CONTROLLER_BOOTSTRAP_TENANT: ${CONTROLLER_BOOTSTRAP_TENANT:-default}
-      # S3 / object store (optional — for hosting app packages)
+      # S3 / object store (for apps packages)
       AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-}
       AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-}
       AWS_DEFAULT_REGION: ${AWS_DEFAULT_REGION:-us-east-1}

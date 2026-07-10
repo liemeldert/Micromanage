@@ -1,8 +1,0 @@
-tenant:
-  id: "default"
-  name: "Default (dev)"
-  allowed_users:
-    - "admin@localhost.dev"
-  dep:
-    enabled: false
-    default_profile: ""

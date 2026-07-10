@@ -1,6 +1,6 @@
 # Deploying MicromanageIAC (Portainer / Docker Compose)
 
-A fully compose-based deployment — no `setup.sh`. The stack pulls prebuilt images
+A fully compose-based deployment -- no `setup.sh`. The stack pulls prebuilt images
 from GHCR and uploads the APNs push cert from environment variables; TLS is
 terminated by your reverse proxy (§6). Use [`docker-compose.prod.yml`](docker-compose.prod.yml)
 and the variables from [`.env.prod.example`](.env.prod.example).
@@ -27,7 +27,7 @@ openssl rand -hex 32   # run once each for DB_PASSWORD, NANOMDM_API_KEY, JWT_SEC
 Apple requires a push certificate; this can't be fully automated. Get one via
 [mdmcert.download](https://mdmcert.download) or
 [identity.apple.com/pushcert](https://identity.apple.com/pushcert), then base64 the
-PEM files and set them as env vars — the `apns-init` service uploads them on deploy:
+PEM files and set them as env vars -- the `apns-init` service uploads them on deploy:
 
 ```sh
 base64 -w0 MDM_Certificate.pem   # -> PUSH_CERT_PEM_B64
@@ -41,8 +41,8 @@ You can leave the APNs vars blank to bring the stack up first and add push later
 
 **Stacks → Add stack**, then either:
 
-- **From this Git repo** — set the compose path to `docker-compose.prod.yml`, or
-- **Web editor** — paste the contents of `docker-compose.prod.yml` (it uses named
+- **From this Git repo** -- set the compose path to `docker-compose.prod.yml`, or
+- **Web editor** -- paste the contents of `docker-compose.prod.yml` (it uses named
   volumes only, so the editor works without the repo on disk).
 
 Under **Environment variables**, add the values from `.env.prod.example`. At minimum:
@@ -60,7 +60,7 @@ the bootstrap admin, and `apns-init` uploads the push cert (if provided).
   users under **Settings/Users** (or the CLI below) and clear the bootstrap vars and
   redeploy.
 - Go to **Enrollment** to view the auto-generated profile, download it, or scan the
-  QR to enrol a device. It will flag any missing config (`MDM_TOPIC`,
+  QR to enroll a device. It will flag any missing config (`MDM_TOPIC`,
   `SCEP_CHALLENGE`, …).
 
 Provision users without the bootstrap vars:
@@ -73,12 +73,12 @@ docker compose -f docker-compose.prod.yml exec controller \
 ## 6. Production topology (TLS + SCEP)
 
 Apple requires **HTTPS** for every device-facing endpoint. Every service here serves
-**plain HTTP** (NanoMDM included — it has no built-in TLS), so put a **TLS-terminating
+**plain HTTP** (NanoMDM included -- it has no built-in TLS), so put a **TLS-terminating
 reverse proxy** (Traefik/Caddy/nginx/NPM) in front and route your public hostname to:
 
 | Public path/host | Internal target |
 | --- | --- |
-| MDM endpoint (`/mdm`, `/checkin`) | `nanomdm:9000` (plain HTTP — proxy passes headers through) |
+| MDM endpoint (`/mdm`, `/checkin`) | `nanomdm:9000` (plain HTTP -- proxy passes headers through) |
 | App manifests + enrollment (`/api/...`) | `controller:8001` |
 | SCEP (`/scep/...`) | `step-ca:9000` |
 | Admin web UI | `webui:3000` |

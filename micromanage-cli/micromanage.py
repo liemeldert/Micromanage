@@ -40,7 +40,7 @@ class Config:
                 self.user_email = data.get('user_email')
     
     def save(self):
-        # The config holds a bearer token — keep it private to the current user.
+        # The config holds a bearer token -- keep it private to the current user.
         CONFIG_FILE.parent.mkdir(parents=True, exist_ok=True)
         try:
             os.chmod(CONFIG_FILE.parent, 0o700)
