@@ -21,6 +21,9 @@ _AUX_DDL = [
     # Adaptive info-poll schedule (services.poller).
     'ALTER TABLE "devices" ADD COLUMN IF NOT EXISTS "last_polled_at" TIMESTAMPTZ NULL',
     'ALTER TABLE "devices" ADD COLUMN IF NOT EXISTS "poll_interval_minutes" INTEGER NOT NULL DEFAULT 30',
+    # Imperative device tags (ATC/Dispatcher writers + manual); flat list[str],
+    # matched by the "tag" scope condition. See services.scoping / models.tenant.
+    'ALTER TABLE "devices" ADD COLUMN IF NOT EXISTS "tags" JSONB NOT NULL DEFAULT \'[]\'::jsonb',
 ]
 
 

@@ -68,6 +68,12 @@ async function request<T>(
   return text ? JSON.parse(text) : ({} as T);
 }
 
+// Config documents editable via the validated PUT (+ version history). "config"
+// is readable but not editable (it embeds secrets). Kept in sync with the
+// controller allow-list (controller/api/main.py).
+export type EditableConfigType = "groups" | "apps" | "profiles" | "tags";
+export type ReadableConfigType = EditableConfigType | "config";
+
 export const api = {
   // Auth
   login(tenantId: string, email: string, password: string) {
@@ -123,7 +129,7 @@ export const api = {
   // Devices
   listDevices(
     token: string,
-    params: { skip?: number; limit?: number; group?: string; model?: string; search?: string; state?: string } = {},
+    params: { skip?: number; limit?: number; group?: string; tag?: string; model?: string; search?: string; state?: string } = {},
   ) {
     const qs = new URLSearchParams(
       Object.entries(params)
@@ -173,14 +179,33 @@ export const api = {
     );
   },
 
+  // Add and/or remove imperative tags on a device. The controller recomputes
+  // group membership and queues a reconcile (tags -> groups -> scoping).
+  updateDeviceTags(
+    token: string,
+    id: string,
+    body: { add?: string[]; remove?: string[] },
+  ) {
+    return request<{
+      device: Device;
+      changed: boolean;
+      added: string[];
+      removed: string[];
+      groups_changed?: boolean;
+    }>(`/api/v1/devices/${id}/tags`, token, {
+      method: "POST",
+      body: JSON.stringify(body),
+    });
+  },
+
   // YAML configs
-  getConfig(token: string, type: "groups" | "apps" | "profiles" | "config") {
+  getConfig(token: string, type: ReadableConfigType) {
     return request<Record<string, unknown>>(`/api/v1/config/${type}`, token);
   },
 
   // Raw YAML document (text) -- for the YAML viewer. Server-side redaction of
   // credentials still applies to config.yaml.
-  async getConfigRaw(token: string, type: "groups" | "apps" | "profiles" | "config") {
+  async getConfigRaw(token: string, type: ReadableConfigType) {
     const res = await fetch(proxyPath(`/api/v1/config/${type}?raw=true`), {
       headers: { Authorization: `Bearer ${token}` },
     });
@@ -211,7 +236,7 @@ export const api = {
 
   updateConfig(
     token: string,
-    type: "groups" | "apps" | "profiles",
+    type: EditableConfigType,
     data: Record<string, unknown>,
   ) {
     return request<{ message: string; warnings: string[] }>(
@@ -230,14 +255,14 @@ export const api = {
   },
 
   // Config version history: every save snapshots the previous document.
-  listConfigHistory(token: string, type: "groups" | "apps" | "profiles") {
+  listConfigHistory(token: string, type: EditableConfigType) {
     return request<{ versions: ConfigVersion[] }>(
       `/api/v1/config/${type}/history`,
       token,
     );
   },
 
-  getConfigVersion(token: string, type: "groups" | "apps" | "profiles", id: string) {
+  getConfigVersion(token: string, type: EditableConfigType, id: string) {
     return request<ConfigVersion & { content: string }>(
       `/api/v1/config/${type}/history/${encodeURIComponent(id)}`,
       token,
@@ -246,7 +271,7 @@ export const api = {
 
   // Restore runs the same validate → snapshot → write → reconcile path as a
   // save, so a restore is itself undoable.
-  restoreConfigVersion(token: string, type: "groups" | "apps" | "profiles", id: string) {
+  restoreConfigVersion(token: string, type: EditableConfigType, id: string) {
     return request<{ message: string; warnings: string[] }>(
       `/api/v1/config/${type}/history/${encodeURIComponent(id)}/restore`,
       token,
@@ -378,6 +403,8 @@ export interface Device {
   os_version: string;
   hostname: string | null;
   groups: string[];
+  // Imperative labels (manual / ATC / Dispatcher); matched by the "tag" condition.
+  tags: string[];
   enrollment_state: EnrollmentState;
   management_type: string; // "apple_mdm"
   enrollment_date: string;

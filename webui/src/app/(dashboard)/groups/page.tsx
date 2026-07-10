@@ -44,6 +44,7 @@ import {
   renderNameTemplate,
   unknownNameVariables,
   useConfigResource,
+  useTagRegistry,
   type Condition,
   type Group as GroupT,
   type GroupsConfig,
@@ -98,6 +99,7 @@ export default function GroupsPage() {
     () => groups.filter((_, i) => i !== editIndex).map((g) => g.name),
     [groups, editIndex],
   );
+  const { tagNames } = useTagRegistry();
 
   const conditionSuggestions = useMemo(
     () => ({
@@ -352,6 +354,7 @@ export default function GroupsPage() {
               conditions={draft.conditions}
               onChange={(conditions) => setDraft({ ...draft, conditions })}
               groupNames={otherGroupNames}
+              tagNames={tagNames}
               suggestions={conditionSuggestions}
             />
           </Box>

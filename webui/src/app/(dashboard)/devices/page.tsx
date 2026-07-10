@@ -33,6 +33,7 @@ import {
 } from "@tabler/icons-react";
 import { api, type Device, type EnrollmentState } from "../../../../lib/api";
 import { useAuth } from "../../../../lib/auth-context";
+import { useTagRegistry } from "../../../../lib/config";
 
 const PAGE_SIZE = 20;
 
@@ -61,8 +62,10 @@ export default function DevicesPage() {
   const [page, setPage]         = useState(1);
   const [search, setSearch]     = useState("");
   const [groupFilter, setGroup] = useState<string | null>(null);
+  const [tagFilter, setTag]     = useState<string | null>(null);
   const [stateFilter, setState] = useState<string>("all");
   const [loading, setLoading]   = useState(true);
+  const { tagNames, colorOf, labelOf } = useTagRegistry();
 
   // Add-placeholder modal
   const [addOpen, setAddOpen]   = useState(false);
@@ -82,6 +85,7 @@ export default function DevicesPage() {
         limit: PAGE_SIZE,
         ...(debounced ? { search: debounced } : {}),
         ...(groupFilter ? { group: groupFilter } : {}),
+        ...(tagFilter ? { tag: tagFilter } : {}),
         ...(stateFilter !== "all" ? { state: stateFilter } : {}),
       });
       setDevices(res.devices);
@@ -92,11 +96,15 @@ export default function DevicesPage() {
     } finally {
       setLoading(false);
     }
-  }, [token, page, debounced, groupFilter, stateFilter]);
+  }, [token, page, debounced, groupFilter, tagFilter, stateFilter]);
 
   useEffect(() => { load(); }, [load]);
 
   const allGroups = Array.from(new Set(devices.flatMap((d) => d.groups))).sort();
+  // Registry tags first, plus any tag seen on the loaded page (free-form ones).
+  const allTags = Array.from(
+    new Set([...tagNames, ...devices.flatMap((d) => d.tags ?? [])]),
+  ).sort();
 
   const handleAdd = async () => {
     if (!token || !addSerial.trim()) return;
@@ -158,6 +166,16 @@ export default function DevicesPage() {
             ))}
             {d.groups.length > 3 && (
               <Badge variant="dot" size="xs" color="gray">+{d.groups.length - 3}</Badge>
+            )}
+          </Group>
+        </Table.Td>
+        <Table.Td>
+          <Group gap={4} wrap="wrap">
+            {(d.tags ?? []).slice(0, 2).map((t) => (
+              <Badge key={t} variant="light" size="xs" color={colorOf(t) || "gray"}>{labelOf(t)}</Badge>
+            ))}
+            {(d.tags?.length ?? 0) > 2 && (
+              <Badge variant="light" size="xs" color="gray">+{(d.tags!.length) - 2}</Badge>
             )}
           </Group>
         </Table.Td>
@@ -225,6 +243,14 @@ export default function DevicesPage() {
           clearable
           w={200}
         />
+        <Select
+          placeholder="Tag"
+          data={allTags}
+          value={tagFilter}
+          onChange={(v) => { setTag(v); setPage(1); }}
+          clearable
+          w={180}
+        />
       </Group>
 
       {loading ? (
@@ -246,6 +272,7 @@ export default function DevicesPage() {
                 <Table.Th>Model</Table.Th>
                 <Table.Th>OS</Table.Th>
                 <Table.Th>Groups</Table.Th>
+                <Table.Th>Tags</Table.Th>
                 <Table.Th>Activity</Table.Th>
                 <Table.Th />
               </Table.Tr>

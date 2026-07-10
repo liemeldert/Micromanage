@@ -23,7 +23,9 @@ import {
 } from "../../../lib/config";
 
 function defaultValueForKind(kind: string): string | string[] {
-  return kind === "list" || kind === "group" || kind === "platform" ? [] : "";
+  return kind === "list" || kind === "group" || kind === "platform" || kind === "tag"
+    ? []
+    : "";
 }
 
 function newCondition(type: ConditionType = "platform"): Condition {
@@ -47,6 +49,7 @@ export function ConditionBuilder({
   onChange,
   allowedTypes,
   groupNames = [],
+  tagNames = [],
   suggestions = {},
   emptyHint = "No conditions yet! This group will not match to any devices until you add one.",
 }: {
@@ -54,6 +57,9 @@ export function ConditionBuilder({
   onChange: (next: Condition[]) => void;
   allowedTypes?: ConditionType[];
   groupNames?: string[];
+  // Known tag names (from the advisory registry) offered as autocomplete for the
+  // "tag" condition. Free-form tags are still allowed.
+  tagNames?: string[];
   suggestions?: ConditionSuggestions;
   emptyHint?: string;
 }) {
@@ -105,8 +111,9 @@ export function ConditionBuilder({
         const meta = conditionTypeMeta(c.type);
         const kind = meta.valueKindFor(c.operator);
         // The operator is fixed ("in") and implied by the label for group /
-        // platform, so its dropdown is hidden -- polarity + value are enough.
-        const showOperator = c.type !== "group" && c.type !== "platform";
+        // platform / tag, so its dropdown is hidden -- polarity + value are enough.
+        const showOperator =
+          c.type !== "group" && c.type !== "platform" && c.type !== "tag";
         return (
           <Group key={idx} gap="xs" align="flex-start" wrap="nowrap">
             <Select
@@ -156,6 +163,16 @@ export function ConditionBuilder({
                 style={{ flex: 1 }}
                 placeholder={groupNames.length ? "Select group(s)" : "No other groups"}
                 data={groupNames}
+                value={asList(c.value)}
+                onChange={(v) => update(idx, { value: v })}
+                clearable
+                comboboxProps={{ withinPortal: true }}
+              />
+            ) : kind === "tag" ? (
+              <TagsInput
+                style={{ flex: 1 }}
+                placeholder="Add tag(s), press Enter"
+                data={tagNames}
                 value={asList(c.value)}
                 onChange={(v) => update(idx, { value: v })}
                 clearable

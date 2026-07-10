@@ -408,6 +408,19 @@ async def update_tenant(update: TenantUpdate, admin: Principal = Depends(require
 
 
 # YAML Configuration Management
+
+# Editable YAML config documents: validated PUT + version history. Grows as
+# subsystems land (tags in Phase 0; flows / dispatcher follow in later phases).
+# "config" is READABLE but not editable via the API -- it embeds S3 secrets --
+# so reads allow it while writes/history do not.
+_EDITABLE_CONFIG_TYPES = ["groups", "apps", "profiles", "tags"]
+_READABLE_CONFIG_TYPES = _EDITABLE_CONFIG_TYPES + ["config"]
+# Optional config docs (advisory registries / new-subsystem documents) that have
+# no required-file stub. Copied into the validation sandbox when present so
+# cross-document checks (e.g. a tag referenced by a group) resolve on any save.
+_OPTIONAL_CONFIG_FILES = ["tags.yaml"]
+
+
 @app.get("/api/v1/config/{config_type}")
 async def get_yaml_config(
         config_type: str,
@@ -420,7 +433,7 @@ async def get_yaml_config(
     used by the YAML viewer. config.yaml is re-rendered after credential
     redaction in raw mode too, so S3 secrets never leave the server.
     """
-    if config_type not in ["groups", "apps", "profiles", "config"]:
+    if config_type not in _READABLE_CONFIG_TYPES:
         raise HTTPException(status_code=400, detail="Invalid config type")
 
     tenant = principal.tenant
@@ -527,9 +540,30 @@ async def update_yaml_config(
     it in an isolated copy of the tenant config dir, and only commits -- atomically
     -- when validation passes. The previous document is snapshotted to history.
     """
-    if config_type not in ["groups", "apps", "profiles"]:
+    if config_type not in _EDITABLE_CONFIG_TYPES:
         raise HTTPException(status_code=400, detail="Invalid config type")
     return await _apply_config_update(principal, config_type, config_data)
+
+
+def _spawn_tenant_reconcile(tenant_id: str) -> None:
+    """Fire-and-forget a reactive reconcile for a tenant.
+
+    Used after any change that alters desired-vs-observed state (config save,
+    device tag update). ``_spawn`` keeps a strong reference -- a bare
+    ``create_task`` handle can be garbage-collected mid-run. Best-effort: a
+    reconcile failure is logged, never surfaced to the caller.
+    """
+    from controller.services.reconciler import reconcile_tenant, _spawn
+
+    async def _run() -> None:
+        try:
+            t = await Tenant.get_or_none(id=tenant_id)
+            if t:
+                await reconcile_tenant(t, YAML_BASE)
+        except Exception:
+            logger.exception("reactive reconcile failed for tenant %s", tenant_id)
+
+    _spawn(_run())
 
 
 async def _apply_config_update(
@@ -585,7 +619,14 @@ async def _apply_config_update(
             else:
                 with open(tdp / fn, "w") as f:
                     yaml.safe_dump(stubs[fn], f, default_flow_style=False)
-        # Overwrite the file being updated with the submitted candidate data.
+        # Optional docs (e.g. tags.yaml) are copied when present so cross-document
+        # checks resolve during any save; they have no required stub.
+        for fn in _OPTIONAL_CONFIG_FILES:
+            src = tenant_dir / fn
+            if src.exists():
+                shutil.copy(src, tdp / fn)
+        # Overwrite the file being updated with the submitted candidate data (this
+        # wins even if the same file was copied above as an optional doc).
         with open(tdp / f"{config_type}.yaml", "w") as f:
             yaml.safe_dump(config_data, f, default_flow_style=False)
 
@@ -609,19 +650,8 @@ async def _apply_config_update(
         )
 
     # Reconcile reactively so the change produces tasks now, not at the next
-    # scheduled sync (which remains the periodic safety net). _spawn keeps a
-    # strong reference -- bare create_task handles can be GC'd mid-run.
-    from controller.services.reconciler import reconcile_tenant, _spawn
-
-    async def _reconcile_after_save(tenant_id: str):
-        try:
-            t = await Tenant.get_or_none(id=tenant_id)
-            if t:
-                await reconcile_tenant(t, YAML_BASE)
-        except Exception:
-            logger.exception(f"post-save reconcile failed for tenant {tenant_id}")
-
-    _spawn(_reconcile_after_save(tenant.id))
+    # scheduled sync (which remains the periodic safety net).
+    _spawn_tenant_reconcile(tenant.id)
 
     return {"message": f"{config_type} configuration updated", "warnings": warnings}
 
@@ -638,7 +668,7 @@ async def validate_yaml_configs(principal: Principal = Depends(get_current_princ
 
 
 def _load_history_entry(tenant_id: str, config_type: str, version_id: str) -> Dict[str, Any]:
-    if config_type not in ["groups", "apps", "profiles"]:
+    if config_type not in _EDITABLE_CONFIG_TYPES:
         raise HTTPException(status_code=400, detail="Invalid config type")
     if not _HISTORY_ID_RE.match(version_id):
         raise HTTPException(status_code=400, detail="Invalid version id")
@@ -661,7 +691,7 @@ async def list_config_history(
         principal: Principal = Depends(get_current_principal),
 ):
     """Previous versions of a config document (newest first)."""
-    if config_type not in ["groups", "apps", "profiles"]:
+    if config_type not in _EDITABLE_CONFIG_TYPES:
         raise HTTPException(status_code=400, detail="Invalid config type")
     hdir = _history_dir(principal.tenant.id, config_type)
     versions = []
@@ -830,6 +860,7 @@ def _device_summary(device: Device) -> Dict[str, Any]:
         "os_version": device.os_version,
         "hostname": device.hostname,
         "groups": device.groups,
+        "tags": device.tags or [],
         "enrollment_state": device.enrollment_state,
         "management_type": device.management_type,
         "enrollment_date": device.enrollment_date,
@@ -850,6 +881,7 @@ async def list_devices(
         skip: int = Query(0, ge=0),
         limit: int = Query(100, ge=1, le=500),
         group: Optional[str] = None,
+        tag: Optional[str] = None,
         model: Optional[str] = None,
         search: Optional[str] = None,
         state: Optional[str] = Query(None, description="enrolled | unenrolled | pending"),
@@ -864,6 +896,8 @@ async def list_devices(
         query = query.filter(enrollment_state=state)
     if group:
         query = query.filter(groups__contains=[group])
+    if tag:
+        query = query.filter(tags__contains=[tag])
     if model:
         query = query.filter(device_model__icontains=model)
     if search:
@@ -1065,6 +1099,106 @@ async def rename_device(
             await mdm_connector.close()
 
     return {"device": _device_summary(device), "pushed": task_id is not None, "task_id": task_id}
+
+
+class DeviceTagsUpdate(BaseModel):
+    add: List[str] = []
+    remove: List[str] = []
+
+
+@app.post("/api/v1/devices/{device_id}/tags")
+async def update_device_tags(
+        device_id: str,
+        body: DeviceTagsUpdate,
+        principal: Principal = Depends(get_current_principal),
+):
+    """Add and/or remove imperative tags on a device (member+).
+
+    Additive and idempotent: the listed tags are added, the listed tags removed,
+    and nothing else is touched -- so a tag applied elsewhere (by hand, an ATC
+    flow, or a Dispatcher rule) is never clobbered. Tags can drive group
+    membership, so after the write we recompute the device's groups and queue a
+    reactive reconcile (tags -> groups -> profile/app scoping). Audited as a
+    ``tag_update`` Task.
+    """
+    tenant = principal.tenant
+    device = await Device.get_or_none(id=device_id, tenant=tenant)
+    if not device:
+        raise HTTPException(status_code=404, detail="Device not found")
+
+    def _clean(items: List[str]) -> List[str]:
+        seen: List[str] = []
+        for raw in items or []:
+            s = str(raw).strip()
+            if not s:
+                continue
+            if len(s) > 100:
+                raise HTTPException(
+                    status_code=400, detail=f"Tag too long (max 100 characters): {s[:20]}..."
+                )
+            if s not in seen:
+                seen.append(s)
+        return seen
+
+    add = _clean(body.add)
+    remove = _clean(body.remove)
+    if not add and not remove:
+        raise HTTPException(status_code=400, detail="No tags to add or remove")
+
+    current = [str(t) for t in (device.tags or [])]
+    before = set(current)
+    remove_set = set(remove)
+    # Preserve existing order; drop removals, then append genuinely-new tags.
+    result = [t for t in current if t not in remove_set]
+    for t in add:
+        if t not in result:
+            result.append(t)
+    after = set(result)
+
+    if after == before:
+        # Idempotent no-op -- skip the write, reconcile and audit entirely.
+        return {"device": _device_summary(device), "changed": False,
+                "added": [], "removed": []}
+
+    device.tags = result
+    await device.save(update_fields=["tags"])
+
+    added = sorted(after - before)
+    removed = sorted(before - after)
+
+    # Tags can drive group membership -> recompute so profile/app scoping follows.
+    # Best-effort: a malformed groups.yaml must not fail the tag write.
+    groups_changed = False
+    try:
+        from controller.services.group_manager import GroupManager
+        from controller.services.tenant_config import load_groups
+        groups_config = load_groups(tenant.id)
+        new_groups = GroupManager(tenant.id).evaluate_device_groups(device, groups_config)
+        # Compare as sets: a pure reorder of the same membership is not a change
+        # and must not trigger a spurious write or a misleading groups_changed.
+        if set(new_groups) != set(device.groups or []):
+            device.groups = new_groups
+            await device.save(update_fields=["groups"])
+            groups_changed = True
+    except Exception:
+        logger.exception("group recompute after tag update failed for device %s", device_id)
+
+    # Audit trail. A tag write is synchronous, so complete the task immediately.
+    try:
+        task = await task_manager.create_task(
+            tenant=tenant, task_type="tag_update",
+            description=f"Tags updated on {device.serial_number}",
+            device=device, user=principal.email,
+            details={"added": added, "removed": removed, "tags": result},
+        )
+        await task.update_progress(100, "completed")
+    except Exception:
+        logger.exception("tag_update audit task failed for device %s", device_id)
+
+    _spawn_tenant_reconcile(tenant.id)
+
+    return {"device": _device_summary(device), "changed": True,
+            "added": added, "removed": removed, "groups_changed": groups_changed}
 
 
 @app.post("/api/v1/devices/{device_id}/command")

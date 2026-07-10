@@ -17,6 +17,7 @@ import type { Device } from "../../../lib/api";
 import {
   deviceGroupNames,
   evaluateScope,
+  useTagRegistry,
   type Group as GroupDef,
   type Scope,
 } from "../../../lib/config";
@@ -52,6 +53,7 @@ export function ScopeEditor({
   );
 
   const groupOptions = allGroups.map((g) => g.name);
+  const { tagNames } = useTagRegistry();
   const suggestions: ConditionSuggestions = useMemo(
     () => ({
       device_model: uniq(devices.map((d) => d.device_model)),
@@ -106,6 +108,7 @@ export function ScopeEditor({
           conditions={scope.conditions ?? []}
           onChange={(conditions) => patch({ conditions })}
           groupNames={groupOptions}
+          tagNames={tagNames}
           suggestions={suggestions}
           emptyHint="No extra conditions. Add one to further narrow the target (all must match)."
         />

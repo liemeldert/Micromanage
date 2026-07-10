@@ -5,9 +5,10 @@ group conditions, profile scopes and app-version scopes all evaluate through
 here (mirrored client-side in webui/lib/config.ts for previews).
 
 A *condition* is ``{type, operator, value, negate?}``. Types: device_model,
-serial_number, hostname, os_version, enrollment_date, and ``group`` (membership
-in another group -- combined with ``negate: true`` this expresses
-"device NOT IN group"). ``negate`` inverts any condition.
+serial_number, hostname, os_version, enrollment_date, ``group`` (membership in
+another group -- combined with ``negate: true`` this expresses "device NOT IN
+group"), ``platform`` (coarse device family) and ``tag`` (an imperative device
+label). ``negate`` inverts any condition.
 
 A *scope* is a dict with any of ``groups`` / ``conditions`` /
 ``include_devices`` / ``exclude_devices`` (profiles and app versions embed
@@ -132,6 +133,13 @@ def _evaluate_base(
         return _version(getattr(device, "os_version", "") or "", operator, value)
     if ctype == "enrollment_date":
         return _date(getattr(device, "enrollment_date", None), operator, value)
+    if ctype == "tag":
+        # Membership in the device's imperative tag set (models.Device.tags),
+        # written by ATC/Dispatcher and by hand. Operator is ``in`` like
+        # ``group``/``platform``; combine with ``negate: true`` for "NOT tagged X".
+        want = [str(n) for n in (value if isinstance(value, list) else [value]) if n]
+        have = set(getattr(device, "tags", []) or [])
+        return any(n in have for n in want)
     return False
 
 

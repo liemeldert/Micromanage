@@ -16,7 +16,7 @@ class Condition(BaseModel):
     @validator('type')
     def validate_type(cls, v):
         valid_types = ['device_model', 'serial_number', 'hostname', 'os_version',
-                       'enrollment_date', 'group', 'platform']
+                       'enrollment_date', 'group', 'platform', 'tag']
         if v not in valid_types:
             raise ValueError(f"Invalid condition type: {v}. Must be one of {valid_types}")
         return v
@@ -34,6 +34,8 @@ class Condition(BaseModel):
             'group': ['in'],
             # Membership in a device family (Mac/iPhone/...); premade options.
             'platform': ['in'],
+            # Membership in the device's imperative tag set (see models.Device).
+            'tag': ['in'],
         }
 
         if condition_type and v not in valid_operators.get(condition_type, []):
@@ -57,6 +59,14 @@ class Condition(BaseModel):
 def _condition_group_refs(condition: Condition) -> List[str]:
     """Group names a group-type condition references (empty for other types)."""
     if condition.type != 'group':
+        return []
+    value = condition.value
+    return [str(n) for n in (value if isinstance(value, list) else [value]) if n]
+
+
+def _condition_tag_refs(condition: Condition) -> List[str]:
+    """Tag names a tag-type condition references (empty for other types)."""
+    if condition.type != 'tag':
         return []
     value = condition.value
     return [str(n) for n in (value if isinstance(value, list) else [value]) if n]
@@ -211,6 +221,34 @@ class TenantConfig(BaseModel):
     dep: Optional[Dict[str, Any]] = {}
 
 
+class Tag(BaseModel):
+    """One entry in the advisory tag registry (tags.yaml).
+
+    The registry is optional: free-form tags are always allowed, so a tag not in
+    the registry is a *warning*, never an error. Registered entries drive the UI
+    picker and chip colours. See models.Device.tags / services.scoping.
+    """
+    name: str
+    label: Optional[str] = None
+    description: Optional[str] = None
+    # Optional Mantine colour name for the chip (advisory; not validated against a
+    # palette so new Mantine colours don't require a controller change).
+    color: Optional[str] = None
+
+    @validator('name')
+    def validate_name(cls, v):
+        if not re.match(r'^[a-zA-Z0-9-_]+$', v or ''):
+            raise ValueError(
+                "Tag name must contain only alphanumeric characters, hyphens, "
+                "and underscores"
+            )
+        return v
+
+
+class TagRegistry(BaseModel):
+    tags: List[Tag] = []
+
+
 class YAMLValidator:
     def __init__(self, tenant_path: Path):
         self.tenant_path = tenant_path
@@ -237,9 +275,19 @@ class YAMLValidator:
         apps = self._validate_apps(groups)
         profiles = self._validate_profiles(groups)
 
+        # Optional advisory tag registry (tags.yaml). Returns the registered tag
+        # names, or None when there is no (non-empty) registry -- in which case
+        # tags are purely free-form and references are never flagged.
+        known_tags = self._validate_tags()
+
         # Cross-validation
         if config and groups and apps and profiles:
             self._cross_validate(config, groups, apps, profiles)
+
+        # Warn (never error) on tag conditions that reference a tag absent from a
+        # non-empty registry -- most often a typo. Free-form tags stay allowed.
+        if known_tags:
+            self._warn_unknown_tag_refs(groups, apps, profiles, known_tags)
 
         return len(self.errors) == 0, self.errors, self.warnings
 
@@ -525,3 +573,55 @@ class YAMLValidator:
         for group in groups:
             if group.name not in used_groups:
                 self.warnings.append(f"Group '{group.name}' is defined but not used")
+
+    def _validate_tags(self) -> Optional[set]:
+        """Validate the optional advisory tags.yaml registry.
+
+        Returns the set of registered tag names, or None when there is no
+        registry (or it is empty) -- in that case tags are purely free-form and
+        callers should not warn on any tag reference. A malformed registry is an
+        error; duplicate/ill-named entries are errors, mirroring groups.
+        """
+        path = self.tenant_path / 'tags.yaml'
+        if not path.exists():
+            return None
+        data = self._load_yaml('tags.yaml')
+        if not data:
+            return None  # empty file or load error (the latter already recorded)
+
+        names: set = set()
+        for idx, tag_data in enumerate(data.get('tags', []) or []):
+            try:
+                tag = Tag(**tag_data)
+            except Exception as e:
+                self.errors.append(f"Invalid tag at index {idx}: {e}")
+                continue
+            if tag.name in names:
+                self.errors.append(f"Duplicate tag name: {tag.name}")
+            names.add(tag.name)
+
+        # An empty (or all-invalid) registry means "no registry" for the purpose
+        # of reference warnings -- don't flag every tag as unknown.
+        return names or None
+
+    def _warn_unknown_tag_refs(self, groups: Optional[List[Group]],
+                               apps: Optional[List[App]],
+                               profiles: Optional[List[Profile]],
+                               known_tags: set) -> None:
+        """Warn on ``tag`` conditions referencing a tag not in the registry."""
+        def scan(owner: str, conditions: Optional[List[Condition]]) -> None:
+            for condition in conditions or []:
+                for ref in _condition_tag_refs(condition):
+                    if ref not in known_tags:
+                        self.warnings.append(
+                            f"{owner} references tag '{ref}' which is not defined in "
+                            "tags.yaml"
+                        )
+
+        for group in groups or []:
+            scan(f"group '{group.name}'", group.conditions)
+        for app in apps or []:
+            for version in app.versions:
+                scan(f"app '{app.id}' version {version.version}", version.conditions)
+        for profile in profiles or []:
+            scan(f"profile '{profile.id}'", profile.conditions)

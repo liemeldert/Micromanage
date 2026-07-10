@@ -86,6 +86,14 @@ class Device(Model):
     # QueryResponses, SecurityInfo, ...) -- kept as-is so the UI can render
     # properties data-driven instead of hardcoding a column per attribute.
     attributes = fields.JSONField(default=dict)
+    # Imperative device labels, written by ATC flows / Dispatcher rules and by
+    # hand. A flat list[str] (mirrors ``groups``); matched by the ``tag`` scope
+    # condition. Assignment is additive and idempotent -- automated writers only
+    # add their own tags or remove tags they name explicitly, never bulk-reconcile
+    # the set, so a manually-applied tag is never clobbered. Unlike groups (which
+    # are computed from state), tags are the one piece of device state a flow may
+    # write; a "devices tagged X" group is expressed with a ``tag`` condition.
+    tags = fields.JSONField(default=list)
 
     class Meta:
         table = "devices"

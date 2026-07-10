@@ -60,6 +60,7 @@ import { api, type CatalogCommand, type DeviceDetail, type Task } from "../../..
 import { useAuth } from "../../../../../lib/auth-context";
 import { TaskDetailDrawer } from "../../../../components/TaskDetailDrawer";
 import { QuickActionsCard, CommandsPanel, RefreshButton } from "../../../../components/DeviceCommandKit";
+import { DeviceTagsCard } from "../../../../components/DeviceTagsCard";
 import { DeviceLocationMap, type DeviceLocation } from "../../../../components/DeviceLocationMap";
 import {
   organizeAttributes,
@@ -465,6 +466,8 @@ export default function DeviceDetailPage({ params }: { params: Promise<{ id: str
                   </FactRow>
                 </SimpleGrid>
               </Card>
+
+              <DeviceTagsCard device={device} onChanged={handleDispatched} />
 
               {(battery !== null || usedPct !== null) && (
                 <SimpleGrid cols={{ base: 1, sm: 2 }} spacing="md">

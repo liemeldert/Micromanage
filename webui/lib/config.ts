@@ -2,7 +2,7 @@
 // Types mirror the controller's YAML schema (controller/utils/yaml_validator.py)
 // and group evaluation logic (controller/services/group_manager.py).
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { notifications } from "@mantine/notifications";
 import { api, ApiError, type Device } from "./api";
 import { useAuth } from "./auth-context";
@@ -16,7 +16,8 @@ export type ConditionType =
   | "os_version"
   | "enrollment_date"
   | "group"
-  | "platform";
+  | "platform"
+  | "tag";
 
 export interface Condition {
   type: ConditionType;
@@ -98,6 +99,19 @@ export interface ProfilesConfig {
   profiles: Profile[];
 }
 
+// Advisory tag registry (tags.yaml). Optional: free-form tags are always
+// allowed; registered entries drive the picker + chip colours. Mirrors the
+// controller's Tag / TagRegistry models (controller/utils/yaml_validator.py).
+export interface TagDef {
+  name: string;
+  label?: string;
+  description?: string;
+  color?: string; // Mantine colour name for the chip
+}
+export interface TagsConfig {
+  tags: TagDef[];
+}
+
 // Normalise a profile's payloads to a list regardless of which form it was saved in.
 export function profilePayloads(p: Profile): Record<string, unknown>[] {
   if (Array.isArray(p.payloads)) return p.payloads;
@@ -107,7 +121,7 @@ export function profilePayloads(p: Profile): Record<string, unknown>[] {
 
 // ── Condition metadata (drives the visual builder) ───────────────────────────
 
-export type ValueKind = "text" | "version" | "date" | "list" | "group" | "platform";
+export type ValueKind = "text" | "version" | "date" | "list" | "group" | "platform" | "tag";
 
 // Device families for the "platform" condition -- premade options so an
 // "all Macs" group is one click. Mirrors scoping.PLATFORM_CATEGORIES.
@@ -180,6 +194,14 @@ export const CONDITION_TYPES: ConditionTypeMeta[] = [
     operators: ["in"],
     valueKindFor: () => "group",
   },
+  {
+    // Membership in the device's imperative tag set (assigned by hand, ATC
+    // flows or Dispatcher rules). "is not" expresses "NOT tagged X".
+    value: "tag",
+    label: "Tag",
+    operators: ["in"],
+    valueKindFor: () => "tag",
+  },
 ];
 
 // Operator labels, worded to read after an "is" / "is not" polarity dropdown
@@ -206,6 +228,7 @@ export function describeCondition(c: Condition): string {
   const v = Array.isArray(c.value) ? c.value.join(", ") : c.value;
   if (c.type === "group") return `device ${pol} in group ${v}`;
   if (c.type === "platform") return `platform ${pol} ${v}`;
+  if (c.type === "tag") return `device ${pol} tagged ${v}`;
   const op = OPERATOR_LABELS[c.operator] ?? c.operator;
   return `${conditionTypeMeta(c.type).label} ${pol} ${op} ${v}`;
 }
@@ -281,6 +304,12 @@ function evalConditionBase(
     case "platform": {
       const want = (Array.isArray(c.value) ? c.value : [c.value]).filter(Boolean).map(String);
       return want.includes(devicePlatformCategory(device.device_model));
+    }
+    case "tag": {
+      // Membership in the device's tag set -- mirrors scoping._evaluate_base.
+      const want = (Array.isArray(c.value) ? c.value : [c.value]).filter(Boolean).map(String);
+      const have = new Set((device.tags ?? []).map(String));
+      return want.some((t) => have.has(t));
     }
     case "device_model":
       return evalString(device.device_model ?? "", c.operator, c.value);
@@ -510,7 +539,7 @@ export function devicePlatform(model: string | null | undefined): "iOS" | "macOS
 
 // ── Config resource hook (load / save a single config type) ──────────────────
 
-type ConfigType = "groups" | "apps" | "profiles";
+type ConfigType = "groups" | "apps" | "profiles" | "tags";
 
 export function useConfigResource<T>(type: ConfigType, empty: T) {
   const { token } = useAuth();
@@ -571,6 +600,44 @@ export function useConfigResource<T>(type: ConfigType, empty: T) {
   );
 
   return { data, setData, loading, saving, reload, save };
+}
+
+// Load the advisory tag registry (tags.yaml) for pickers / autocomplete / chip
+// colours. Silent by design: a missing registry (404) or any load error is just
+// an empty list -- free-form tags remain valid everywhere.
+export function useTagRegistry() {
+  const { token } = useAuth();
+  const [tags, setTags] = useState<TagDef[]>([]);
+  const [loading, setLoading] = useState(true);
+
+  const reload = useCallback(async () => {
+    if (!token) return;
+    setLoading(true);
+    try {
+      const res = (await api.getConfig(token, "tags")) as { tags?: TagDef[] } | null;
+      setTags(Array.isArray(res?.tags) ? (res!.tags as TagDef[]) : []);
+    } catch {
+      setTags([]);
+    } finally {
+      setLoading(false);
+    }
+  }, [token]);
+
+  useEffect(() => {
+    reload();
+  }, [reload]);
+
+  const tagNames = useMemo(() => tags.map((t) => t.name), [tags]);
+  const colorOf = useCallback(
+    (name: string): string | undefined => tags.find((t) => t.name === name)?.color,
+    [tags],
+  );
+  const labelOf = useCallback(
+    (name: string): string => tags.find((t) => t.name === name)?.label || name,
+    [tags],
+  );
+
+  return { tags, tagNames, colorOf, labelOf, loading, reload };
 }
 
 export async function sha256Hex(file: File): Promise<string> {

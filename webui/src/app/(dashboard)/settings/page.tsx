@@ -29,6 +29,7 @@ import {
 import { api, type TenantInfo } from "../../../../lib/api";
 import { useAuth } from "../../../../lib/auth-context";
 import { SHOW_YAML_STORAGE_KEY } from "../../../../lib/preferences";
+import { TagRegistryEditor } from "../../../components/config/TagRegistryEditor";
 
 export default function SettingsPage() {
   const { token, tenantId, email } = useAuth();
@@ -84,6 +85,9 @@ export default function SettingsPage() {
           onChange={(e) => setShowYaml(e.currentTarget.checked)}
         />
       </Card>
+
+      {/* Advisory tag registry (tags.yaml) */}
+      <TagRegistryEditor />
 
       {/* Tenant info */}
       <Card withBorder radius="md" p="md">
