@@ -91,6 +91,27 @@ def _redact_s3_config(s3_config: Optional[Dict[str, Any]]) -> Dict[str, Any]:
 
 
 _REDACTED = "***redacted***"
+
+
+def _restore_tenant_s3_secrets(
+    stored: Optional[Dict[str, Any]], incoming: Dict[str, Any]
+) -> Dict[str, Any]:
+    """Before saving a tenant's S3 config, replace any secret the UI echoed back
+    still redacted with the value currently stored, so an edit that never
+    revealed a credential can't overwrite it with the ``***redacted***``
+    sentinel (GET redacts every _SECRET_S3_KEYS value). Returns a new dict;
+    inputs are not mutated. The tenant analog of _restore_dispatcher_secrets."""
+    stored = stored or {}
+    result = dict(incoming or {})
+    for key in _SECRET_S3_KEYS:
+        if result.get(key) == _REDACTED:
+            if key in stored:
+                result[key] = stored[key]
+            else:
+                # Placeholder for a key that was never stored: drop the sentinel
+                # rather than persist it as a live credential.
+                result.pop(key, None)
+    return result
 # A Dispatcher webhook's url is itself a credential (e.g. a Slack incoming
 # webhook URL), so both url and secret are redacted from every API response.
 _SECRET_WEBHOOK_KEYS = ("url", "secret")
@@ -432,7 +453,9 @@ async def update_tenant(update: TenantUpdate, admin: Principal = Depends(require
     if update.allowed_users is not None:
         tenant.allowed_users = update.allowed_users
     if update.s3_config is not None:
-        tenant.s3_config = update.s3_config
+        # Never let a redacted secret the UI echoed back overwrite the stored
+        # credential; restore any ***redacted*** sentinel from the current value.
+        tenant.s3_config = _restore_tenant_s3_secrets(tenant.s3_config, update.s3_config)
     if update.dep_enabled is not None:
         tenant.dep_enabled = update.dep_enabled
     if update.is_active is not None:
