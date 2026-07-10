@@ -27,8 +27,10 @@ import {
   Title,
   Tooltip,
 } from "@mantine/core";
+import { modals } from "@mantine/modals";
 import { notifications } from "@mantine/notifications";
 import {
+  IconAlertTriangle,
   IconApps,
   IconArrowLeft,
   IconBattery3,
@@ -52,7 +54,9 @@ import {
   IconWand,
   IconSettings,
   IconShieldLock,
+  IconTarget,
   IconTerminal2,
+  IconTrash,
   IconWifi,
   IconX,
   IconActivityHeartbeat,
@@ -60,10 +64,13 @@ import {
 } from "@tabler/icons-react";
 import {
   api,
+  ApiError,
   type CatalogCommand,
   type DeviceDetail,
   type DispatcherAlert,
   type FlowRunSummary,
+  type ScopeExplain,
+  type ScopeExplainEntry,
   type Task,
 } from "../../../../../lib/api";
 import { useAuth } from "../../../../../lib/auth-context";
@@ -180,6 +187,56 @@ function PropertyGrid({ items }: { items: AttrItem[] }) {
   );
 }
 
+// Scope-explain: one Profiles/Apps/Groups card of matched/excluded rows with
+// the server's plain-English reason -- the main "why does/doesn't this device
+// get X" troubleshooting view.
+function ScopeGroupCard({
+  title,
+  icon: Icon,
+  entries,
+}: {
+  title: string;
+  icon: React.FC<{ size?: number }>;
+  entries: ScopeExplainEntry[];
+}) {
+  return (
+    <Card withBorder radius="md" p="md">
+      <Group gap="xs" mb="sm">
+        <Icon size={16} />
+        <Text fz="sm" fw={600}>{title} ({entries.length})</Text>
+      </Group>
+      {entries.length === 0 ? (
+        <Text fz="sm" c="dimmed">No {title.toLowerCase()} configured for this tenant.</Text>
+      ) : (
+        <Stack gap={0}>
+          {entries.map((e) => (
+            <Box
+              key={e.id}
+              py={8}
+              style={{ borderBottom: "1px solid var(--mantine-color-default-border)" }}
+            >
+              <Group justify="space-between" wrap="nowrap" gap="sm">
+                <Text fz="sm" fw={500} truncate style={{ minWidth: 0 }}>{e.name}</Text>
+                <Badge
+                  size="sm"
+                  variant="light"
+                  color={e.matched ? "teal" : "gray"}
+                  style={{ flexShrink: 0 }}
+                >
+                  {e.matched ? "Receives" : "Excluded"}
+                </Badge>
+              </Group>
+              <Text fz="xs" c="dimmed" mt={2} style={{ wordBreak: "break-word" }}>
+                {e.reason}
+              </Text>
+            </Box>
+          ))}
+        </Stack>
+      )}
+    </Card>
+  );
+}
+
 // ── Page ──────────────────────────────────────────────────────────────────────
 
 // Compliance triage colours (black > red > yellow > green).
@@ -192,16 +249,26 @@ const SEVERITY_COLOR: Record<string, string> = {
 
 export default function DeviceDetailPage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = use(params);
-  const { token } = useAuth();
+  const { token, isAdmin } = useAuth();
   const router = useRouter();
   const [detail, setDetail]   = useState<DeviceDetail | null>(null);
   const [catalog, setCatalog] = useState<CatalogCommand[]>([]);
   const [loading, setLoading] = useState(true);
   const [section, setSection] = useState("summary");
   const [selectedTask, setSelectedTask] = useState<Task | null>(null);
+  const [cancellingTask, setCancellingTask] = useState<string | null>(null);
+  const [retryingTask, setRetryingTask] = useState<string | null>(null);
   const [renaming, setRenaming] = useState(false);
   const [nameDraft, setNameDraft] = useState("");
   const [savingName, setSavingName] = useState(false);
+  const [forgetting, setForgetting] = useState(false);
+
+  // Scope-explain ("why does/doesn't this device get X") -- fetched lazily,
+  // only once the Scope section is opened, since it's a read-only
+  // troubleshooting view most visits never need.
+  const [scope, setScope] = useState<ScopeExplain | null>(null);
+  const [scopeLoading, setScopeLoading] = useState(false);
+  const [scopeError, setScopeError] = useState<string | null>(null);
 
   const load = async (background = false) => {
     if (!token) return;
@@ -258,6 +325,52 @@ export default function DeviceDetailPage({ params }: { params: Promise<{ id: str
     return () => { cancelled = true; clearTimeout(timer); };
   }, [token, id]); // eslint-disable-line react-hooks/exhaustive-deps
 
+  const handleCancelTask = async (taskId: string) => {
+    if (!token) return;
+    setCancellingTask(taskId);
+    try {
+      const res = await api.cancelTask(token, taskId);
+      notifications.show({ color: "teal", message: res.message });
+      load(true);
+    } catch (e: unknown) {
+      notifications.show({ color: "red", message: (e as Error).message });
+    } finally {
+      setCancellingTask(null);
+    }
+  };
+
+  const handleRetryTask = async (taskId: string) => {
+    if (!token) return;
+    setRetryingTask(taskId);
+    try {
+      const res = await api.retryTask(token, taskId);
+      notifications.show({ color: "teal", message: res.message });
+      setSelectedTask(null); // close the drawer if the retried task was open
+      load(true);
+    } catch (e: unknown) {
+      notifications.show({ color: "red", message: (e as Error).message });
+    } finally {
+      setRetryingTask(null);
+    }
+  };
+
+  // Loaded on first visit to the Scope section; not refetched on later visits
+  // in the same session (it doesn't change from viewing it, and a manual
+  // section switch back in is cheap enough not to warrant a refresh button).
+  const loadScope = async () => {
+    if (!token || scope || scopeLoading) return;
+    setScopeLoading(true);
+    setScopeError(null);
+    try {
+      const r = await api.explainDeviceScope(token, id);
+      setScope(r);
+    } catch (e: unknown) {
+      setScopeError(e instanceof ApiError ? e.message : (e as Error).message);
+    } finally {
+      setScopeLoading(false);
+    }
+  };
+
   if (loading) return <Box py={80} style={{ textAlign: "center" }}><Loader /></Box>;
   if (!detail)  return <Text c="red">Device not found.</Text>;
 
@@ -294,6 +407,39 @@ export default function DeviceDetailPage({ params }: { params: Promise<{ id: str
     }
   };
 
+  const handleForget = async () => {
+    if (!token) return;
+    setForgetting(true);
+    try {
+      const res = await api.deleteDevice(token, id);
+      notifications.show({ color: "teal", message: res.message });
+      router.push("/devices");
+    } catch (e: unknown) {
+      notifications.show({
+        color: "red",
+        title: "Couldn't forget device",
+        message: e instanceof ApiError ? e.message : (e as Error).message,
+      });
+    } finally {
+      setForgetting(false);
+    }
+  };
+
+  const confirmForget = () => {
+    modals.openConfirmModal({
+      title: "Forget device",
+      children: (
+        <Text size="sm">
+          Permanently remove <b>{device.display_name}</b> from Micromanage? Its history, tags,
+          and group membership will be deleted. This cannot be undone.
+        </Text>
+      ),
+      labels: { confirm: "Forget device", cancel: "Cancel" },
+      confirmProps: { color: "red" },
+      onConfirm: handleForget,
+    });
+  };
+
   // Gauges
   const battery = typeof attrs.BatteryLevel === "number" ? attrs.BatteryLevel : null;
   const capacity = typeof attrs.DeviceCapacity === "number" ? attrs.DeviceCapacity : null;
@@ -326,6 +472,7 @@ export default function DeviceDetailPage({ params }: { params: Promise<{ id: str
     ...groups.map((g) => ({ value: g.category, label: g.category, icon: SECTION_ICONS[g.category] ?? IconDotsCircleHorizontal })),
     { value: "profiles", label: `Profiles (${deviceProfiles.length || installed_profiles.length})`, icon: IconCertificate },
     { value: "apps", label: `Apps (${deviceApps.length || installed_apps.length})`, icon: IconApps },
+    { value: "scope", label: "Scope", icon: IconTarget },
     { value: "tasks", label: `Activity (${recent_tasks.length})`, icon: IconClock },
     { value: "commands", label: "Commands", icon: IconTerminal2 },
     {
@@ -394,19 +541,55 @@ export default function DeviceDetailPage({ params }: { params: Promise<{ id: str
             </Tooltip>
           )}
         </Group>
-        {/* Re-poll the whole device -- the common "get fresh data" action. */}
-        {enrolled && (
-          <RefreshButton
-            device={device}
-            catalog={catalog}
-            commandType="refresh_info"
-            label="Refresh device"
-            size="sm"
-            variant="default"
-            onDispatched={handleDispatched}
-          />
-        )}
+        <Group gap="xs">
+          {/* Re-poll the whole device -- the common "get fresh data" action. */}
+          {enrolled && (
+            <RefreshButton
+              device={device}
+              catalog={catalog}
+              commandType="refresh_info"
+              label="Refresh device"
+              size="sm"
+              variant="default"
+              onDispatched={handleDispatched}
+            />
+          )}
+          {/* Destructive, admin-only, and blocked server-side too while enrolled
+              (it must be unenrolled/checked out first). */}
+          {isAdmin && (
+            <Tooltip
+              label={enrolled ? "Unenroll the device before forgetting it" : "Permanently remove this device"}
+            >
+              <Box style={{ display: "inline-flex" }}>
+                <ActionIcon
+                  variant="subtle"
+                  color="red"
+                  size="lg"
+                  disabled={enrolled}
+                  loading={forgetting}
+                  onClick={confirmForget}
+                  aria-label="Forget device"
+                >
+                  <IconTrash size={18} />
+                </ActionIcon>
+              </Box>
+            </Tooltip>
+          )}
+        </Group>
       </Group>
+
+      {device.last_task_error && (
+        <Alert color="red" variant="light" icon={<IconAlertTriangle size={16} />}>
+          <Text fz="sm">
+            <b>Last operation failed</b> -- {device.last_task_error.task_type}: {device.last_task_error.error ?? "no error message"}
+            {device.last_task_error.completed_at
+              ? ` (${new Date(device.last_task_error.completed_at).toLocaleString()})`
+              : device.last_task_error.created_at
+                ? ` (${new Date(device.last_task_error.created_at).toLocaleString()})`
+                : ""}
+          </Text>
+        </Alert>
+      )}
 
       {!enrolled && (
         <Alert
@@ -456,7 +639,10 @@ export default function DeviceDetailPage({ params }: { params: Promise<{ id: str
                   label={s.label}
                   leftSection={<s.icon size={15} />}
                   active={section === s.value}
-                  onClick={() => setSection(s.value)}
+                  onClick={() => {
+                    setSection(s.value);
+                    if (s.value === "scope") loadScope();
+                  }}
                   style={{ borderRadius: 6 }}
                 />
               ))}
@@ -726,6 +912,28 @@ export default function DeviceDetailPage({ params }: { params: Promise<{ id: str
             </Stack>
           )}
 
+          {section === "scope" && (
+            scopeLoading ? (
+              <Box py={60} style={{ textAlign: "center" }}><Loader /></Box>
+            ) : scopeError ? (
+              <Alert color="red" variant="light" icon={<IconAlertTriangle size={16} />}>
+                {scopeError}
+              </Alert>
+            ) : scope ? (
+              <Stack gap="md">
+                <Text fz="xs" c="dimmed">
+                  Why this device does or doesn&apos;t receive each profile, app, and group --
+                  evaluated against its current attributes and group membership.
+                </Text>
+                <ScopeGroupCard title="Profiles" icon={IconCertificate} entries={scope.profiles} />
+                <ScopeGroupCard title="Apps" icon={IconApps} entries={scope.apps} />
+                <ScopeGroupCard title="Groups" icon={IconSitemap} entries={scope.groups} />
+              </Stack>
+            ) : (
+              <Text fz="sm" c="dimmed">No scope data available.</Text>
+            )
+          )}
+
           {section === "tasks" && (
             <Card withBorder radius="md" p="md">
               {recent_tasks.length === 0 ? (
@@ -864,6 +1072,10 @@ export default function DeviceDetailPage({ params }: { params: Promise<{ id: str
         task={selectedTask}
         opened={selectedTask !== null}
         onClose={() => setSelectedTask(null)}
+        onCancel={handleCancelTask}
+        cancelling={cancellingTask !== null}
+        onRetry={handleRetryTask}
+        retrying={retryingTask !== null}
       />
     </Stack>
   );

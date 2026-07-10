@@ -17,7 +17,7 @@ import {
   Text,
   Alert,
 } from "@mantine/core";
-import { IconAlertTriangle, IconX } from "@tabler/icons-react";
+import { IconAlertTriangle, IconRotateClockwise, IconX } from "@tabler/icons-react";
 import Link from "next/link";
 import type { Task } from "../../lib/api";
 
@@ -49,18 +49,23 @@ export function TaskDetailDrawer({
   onClose,
   onCancel,
   cancelling,
+  onRetry,
+  retrying,
 }: {
   task: Task | null;
   opened: boolean;
   onClose: () => void;
   onCancel?: (id: string) => void;
   cancelling?: boolean;
+  onRetry?: (id: string) => void;
+  retrying?: boolean;
 }) {
   if (!task) return null;
 
   const detailsJson = JSON.stringify(task.details ?? {}, null, 2);
   const commandUuid = (task.details as Record<string, unknown> | undefined)?.command_uuid;
   const cancellable = task.status === "pending" || task.status === "running";
+  const retryable = task.status === "failed" || task.status === "cancelled";
 
   return (
     <Drawer
@@ -124,17 +129,31 @@ export function TaskDetailDrawer({
           </>
         )}
 
-        {cancellable && onCancel && (
-          <Button
-            color="red"
-            variant="light"
-            leftSection={<IconX size={14} />}
-            loading={cancelling}
-            onClick={() => onCancel(task.id)}
-            mt="sm"
-          >
-            Cancel task
-          </Button>
+        {((cancellable && onCancel) || (retryable && onRetry)) && (
+          <Group mt="sm">
+            {cancellable && onCancel && (
+              <Button
+                color="red"
+                variant="light"
+                leftSection={<IconX size={14} />}
+                loading={cancelling}
+                onClick={() => onCancel(task.id)}
+              >
+                Cancel task
+              </Button>
+            )}
+            {retryable && onRetry && (
+              <Button
+                color="blue"
+                variant="light"
+                leftSection={<IconRotateClockwise size={14} />}
+                loading={retrying}
+                onClick={() => onRetry(task.id)}
+              >
+                Retry task
+              </Button>
+            )}
+          </Group>
         )}
       </Stack>
     </Drawer>

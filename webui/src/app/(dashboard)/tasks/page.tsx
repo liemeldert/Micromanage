@@ -41,6 +41,7 @@ export default function TasksPage() {
   const [statusFilter, setStatus]   = useState<string | null>(null);
   const [loading, setLoading]       = useState(true);
   const [cancelling, setCancelling] = useState<string | null>(null);
+  const [retrying, setRetrying]     = useState<string | null>(null);
   const [syncing, setSyncing]       = useState(false);
   const [selected, setSelected]     = useState<Task | null>(null);
   const loadingRef = useRef(false);
@@ -89,6 +90,21 @@ export default function TasksPage() {
       notifications.show({ color: "red", message: (e as Error).message });
     } finally {
       setCancelling(null);
+    }
+  };
+
+  const handleRetry = async (id: string) => {
+    if (!token) return;
+    setRetrying(id);
+    try {
+      const res = await api.retryTask(token, id);
+      notifications.show({ color: "teal", message: res.message });
+      setSelected(null); // close the drawer if the retried task was open
+      load(true);
+    } catch (e: unknown) {
+      notifications.show({ color: "red", message: (e as Error).message });
+    } finally {
+      setRetrying(null);
     }
   };
 
@@ -157,19 +173,34 @@ export default function TasksPage() {
         )}
       </Table.Td>
       <Table.Td onClick={(e) => e.stopPropagation()}>
-        {(t.status === "pending" || t.status === "running") && (
-          <Tooltip label="Cancel task">
-            <ActionIcon
-              variant="subtle"
-              color="red"
-              size="sm"
-              loading={cancelling === t.id}
-              onClick={() => handleCancel(t.id)}
-            >
-              <IconX size={14} />
-            </ActionIcon>
-          </Tooltip>
-        )}
+        <Group gap={4} wrap="nowrap" justify="flex-end">
+          {(t.status === "pending" || t.status === "running") && (
+            <Tooltip label="Cancel task">
+              <ActionIcon
+                variant="subtle"
+                color="red"
+                size="sm"
+                loading={cancelling === t.id}
+                onClick={() => handleCancel(t.id)}
+              >
+                <IconX size={14} />
+              </ActionIcon>
+            </Tooltip>
+          )}
+          {(t.status === "failed" || t.status === "cancelled") && (
+            <Tooltip label="Retry task">
+              <ActionIcon
+                variant="subtle"
+                color="blue"
+                size="sm"
+                loading={retrying === t.id}
+                onClick={() => handleRetry(t.id)}
+              >
+                <IconRotateClockwise size={14} />
+              </ActionIcon>
+            </Tooltip>
+          )}
+        </Group>
       </Table.Td>
     </Table.Tr>
   ));
@@ -242,6 +273,8 @@ export default function TasksPage() {
         onClose={() => setSelected(null)}
         onCancel={handleCancel}
         cancelling={cancelling !== null}
+        onRetry={handleRetry}
+        retrying={retrying !== null}
       />
     </Stack>
   );
