@@ -16,6 +16,13 @@ class Tenant(Model):
     # Dynamic device naming: {"template": "IT-{serial}", "apply_on_enroll": bool}.
     # Mirrored from config.yaml. See services.naming.
     device_naming = fields.JSONField(default=dict)
+    # Admin-entered expiry dates for renewal reminders. The controller cannot
+    # read the live APNs cert (it lives in NanoMDM's own db, fed once via a
+    # throwaway apns-init container) or a DEP/ABM token (no such integration
+    # exists yet), so these are manually maintained, not introspected. Dates,
+    # not secrets -- no redaction needed.
+    apns_cert_expires_at = fields.DatetimeField(null=True)
+    dep_token_expires_at = fields.DatetimeField(null=True)
     created_at = fields.DatetimeField(auto_now_add=True)
     updated_at = fields.DatetimeField(auto_now=True)
     is_active = fields.BooleanField(default=True)
@@ -146,6 +153,47 @@ class EnrollmentProfile(Model):
     class Meta:
         table = "enrollment_profiles"
         unique_together = (("tenant", "profile_id"),)
+
+
+class EnrollmentAttempt(Model):
+    """A logged POST-SCEP webhook check-in that could NOT be turned into (or
+    matched to) a Device row -- observability for enrollment drops that
+    otherwise fail silently (services.webhook_handler).
+
+    SCEP-stage failures (a device that never reaches the controller at all)
+    are invisible here by construction; this only covers the two known
+    silent-drop points inside ``_upsert_device``.
+
+    Security: ``tenant`` is populated ONLY when a real Tenant row was
+    resolved (e.g. a no_serial drop on an already-known tenant). For a
+    no_tenant drop, the attempted tenant id in the request is UNVERIFIED --
+    an attacker could pass ``?tenant=<victim>`` on the enrollment ServerURL to
+    try to pollute a victim's view, so it is never written to the FK; if kept
+    at all it goes only in ``detail`` (never used to scope a query)."""
+    id = fields.UUIDField(pk=True)
+    tenant = fields.ForeignKeyField("models.Tenant", related_name="enrollment_attempts", null=True)
+    udid = fields.CharField(max_length=40, null=True)
+    serial_number = fields.CharField(max_length=20, null=True)
+    topic = fields.CharField(max_length=50, null=True)
+    outcome = fields.CharField(max_length=30)  # no_tenant | no_serial
+    detail = fields.JSONField(default=dict)  # never secrets; may hold an unverified tenant id
+    created_at = fields.DatetimeField(auto_now_add=True)
+
+    class Meta:
+        table = "enrollment_attempts"
+        ordering = ["-created_at"]
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "id": str(self.id),
+            "tenant_id": str(self.tenant_id) if self.tenant_id else None,
+            "udid": self.udid,
+            "serial_number": self.serial_number,
+            "topic": self.topic,
+            "outcome": self.outcome,
+            "detail": self.detail or {},
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+        }
 
 
 class Task(Model):

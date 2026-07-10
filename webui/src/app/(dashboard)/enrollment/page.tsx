@@ -15,6 +15,7 @@ import {
   List,
   Loader,
   Stack,
+  Table,
   Text,
   Title,
   Tooltip,
@@ -29,8 +30,56 @@ import {
   IconRefresh,
 } from "@tabler/icons-react";
 import QRCode from "react-qr-code";
-import { api, type EnrollmentDetails } from "../../../../lib/api";
+import { api, type EnrollmentAttempt, type EnrollmentDetails } from "../../../../lib/api";
 import { useAuth } from "../../../../lib/auth-context";
+
+const ATTEMPT_OUTCOME_LABELS: Record<string, string> = {
+  no_tenant: "No tenant resolved",
+  no_serial: "No serial number",
+};
+
+// Renewal-reminder severity for an admin-entered expiry date. Unset (null
+// days_remaining) is never shown -- there's nothing to warn about yet.
+function expirySeverity(daysRemaining: number | null): "red" | "orange" | null {
+  if (daysRemaining === null) return null;
+  if (daysRemaining < 7) return "red"; // includes already-expired (negative)
+  if (daysRemaining < 30) return "orange";
+  return null;
+}
+
+function expiryMessage(label: string, expiresAt: string, daysRemaining: number) {
+  const date = new Date(expiresAt).toLocaleDateString();
+  if (daysRemaining < 0) {
+    return `${label} expired ${date} (${Math.abs(daysRemaining)} day(s) ago).`;
+  }
+  if (daysRemaining === 0) {
+    return `${label} expires today (${date}).`;
+  }
+  return `${label} expires ${date} -- ${daysRemaining} day(s) remaining.`;
+}
+
+function RenewalAlert({
+  label,
+  expiresAt,
+  daysRemaining,
+}: {
+  label: string;
+  expiresAt: string | null;
+  daysRemaining: number | null;
+}) {
+  const severity = expirySeverity(daysRemaining);
+  if (!severity || expiresAt === null || daysRemaining === null) return null;
+  return (
+    <Alert
+      color={severity}
+      variant="light"
+      icon={<IconAlertTriangle size={16} />}
+      title={severity === "red" ? `${label} renewal overdue` : `${label} renewal due soon`}
+    >
+      <Text fz="sm">{expiryMessage(label, expiresAt, daysRemaining)} Update the date in Settings.</Text>
+    </Alert>
+  );
+}
 
 function DetailRow({ label, value }: { label: string; value: string | null }) {
   return (
@@ -55,6 +104,94 @@ function DetailRow({ label, value }: { label: string; value: string | null }) {
         )}
       </Group>
     </Group>
+  );
+}
+
+// Recent POST-SCEP webhook check-ins that never became a device -- catches
+// only failures after a device reaches the controller (SCEP-stage drops,
+// where the device never talks to the controller at all, are invisible).
+function RecentAttemptsCard() {
+  const { token } = useAuth();
+  const [attempts, setAttempts] = useState<EnrollmentAttempt[] | null>(null);
+  const [loading, setLoading] = useState(true);
+
+  const load = useCallback(async () => {
+    if (!token) return;
+    setLoading(true);
+    try {
+      const res = await api.getEnrollmentAttempts(token, { limit: 20 });
+      setAttempts(res.attempts);
+    } catch (e: unknown) {
+      notifications.show({ color: "red", message: (e as Error).message });
+    } finally {
+      setLoading(false);
+    }
+  }, [token]);
+
+  useEffect(() => {
+    load();
+  }, [load]);
+
+  return (
+    <Card withBorder radius="md" padding="lg">
+      <Group justify="space-between" mb="md">
+        <Stack gap={0}>
+          <Text fw={600}>Recent failed attempts</Text>
+          <Text fz="xs" c="dimmed">
+            Check-ins that reached the controller but couldn&apos;t be matched to a device. SCEP-stage
+            failures (before a device ever talks to the controller) aren&apos;t visible here.
+          </Text>
+        </Stack>
+        <ActionIcon variant="subtle" onClick={load} loading={loading}>
+          <IconRefresh size={16} />
+        </ActionIcon>
+      </Group>
+
+      {loading ? (
+        <Box py="md" ta="center">
+          <Loader size="sm" />
+        </Box>
+      ) : !attempts || attempts.length === 0 ? (
+        <Text c="dimmed" fz="sm" ta="center" py="md">
+          No failed attempts logged.
+        </Text>
+      ) : (
+        <Table highlightOnHover verticalSpacing="xs" fz="sm">
+          <Table.Thead>
+            <Table.Tr>
+              <Table.Th>Outcome</Table.Th>
+              <Table.Th>UDID / Serial</Table.Th>
+              <Table.Th>Topic</Table.Th>
+              <Table.Th>When</Table.Th>
+            </Table.Tr>
+          </Table.Thead>
+          <Table.Tbody>
+            {attempts.map((a) => (
+              <Table.Tr key={a.id}>
+                <Table.Td>
+                  <Badge size="sm" color="red" variant="light">
+                    {ATTEMPT_OUTCOME_LABELS[a.outcome] ?? a.outcome}
+                  </Badge>
+                </Table.Td>
+                <Table.Td>
+                  <Text fz="xs" style={{ fontFamily: "monospace" }}>
+                    {a.udid ?? a.serial_number ?? "--"}
+                  </Text>
+                </Table.Td>
+                <Table.Td>
+                  <Text fz="xs" c="dimmed">{a.topic ?? "--"}</Text>
+                </Table.Td>
+                <Table.Td>
+                  <Text fz="xs" c="dimmed">
+                    {a.created_at ? new Date(a.created_at).toLocaleString() : "--"}
+                  </Text>
+                </Table.Td>
+              </Table.Tr>
+            ))}
+          </Table.Tbody>
+        </Table>
+      )}
+    </Card>
   );
 }
 
@@ -133,6 +270,17 @@ export default function EnrollmentPage() {
             </Alert>
           )}
 
+          <RenewalAlert
+            label="APNs certificate"
+            expiresAt={details.apns_cert_expires_at}
+            daysRemaining={details.apns_days_remaining}
+          />
+          <RenewalAlert
+            label="DEP token"
+            expiresAt={details.dep_token_expires_at}
+            daysRemaining={details.dep_days_remaining}
+          />
+
           <Group align="stretch" gap="lg" wrap="wrap">
             {/* Details */}
             <Card withBorder radius="md" padding="lg" style={{ flex: "1 1 420px", minWidth: 320 }}>
@@ -198,6 +346,8 @@ export default function EnrollmentPage() {
               </Stack>
             </Card>
           </Group>
+
+          <RecentAttemptsCard />
         </>
       )}
     </Stack>

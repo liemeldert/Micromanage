@@ -24,6 +24,10 @@ _AUX_DDL = [
     # Imperative device tags (ATC/Dispatcher writers + manual); flat list[str],
     # matched by the "tag" scope condition. See services.scoping / models.tenant.
     'ALTER TABLE "devices" ADD COLUMN IF NOT EXISTS "tags" JSONB NOT NULL DEFAULT \'[]\'::jsonb',
+    # Admin-entered APNs cert / DEP token expiry dates (manual-entry MVP -- the
+    # controller can't read the live cert or a DEP token; see models.tenant).
+    'ALTER TABLE "tenants" ADD COLUMN IF NOT EXISTS "apns_cert_expires_at" TIMESTAMPTZ NULL',
+    'ALTER TABLE "tenants" ADD COLUMN IF NOT EXISTS "dep_token_expires_at" TIMESTAMPTZ NULL',
 ]
 
 

@@ -14,9 +14,11 @@ import {
   Stack,
   Table,
   Text,
+  TextInput,
   Title,
   Tooltip,
 } from "@mantine/core";
+import { useDebouncedValue } from "@mantine/hooks";
 import { notifications } from "@mantine/notifications";
 import { IconRefresh, IconRotateClockwise, IconX } from "@tabler/icons-react";
 import { api, type Task } from "../../../../lib/api";
@@ -39,12 +41,14 @@ export default function TasksPage() {
   const [total, setTotal]           = useState(0);
   const [page, setPage]             = useState(1);
   const [statusFilter, setStatus]   = useState<string | null>(null);
+  const [userFilter, setUserFilter] = useState("");
   const [loading, setLoading]       = useState(true);
   const [cancelling, setCancelling] = useState<string | null>(null);
   const [retrying, setRetrying]     = useState<string | null>(null);
   const [syncing, setSyncing]       = useState(false);
   const [selected, setSelected]     = useState<Task | null>(null);
   const loadingRef = useRef(false);
+  const [debouncedUser] = useDebouncedValue(userFilter, 300);
 
   const load = useCallback(async (background = false) => {
     if (!token || loadingRef.current) return;
@@ -55,6 +59,7 @@ export default function TasksPage() {
         skip: (page - 1) * PAGE_SIZE,
         limit: PAGE_SIZE,
         ...(statusFilter ? { status: statusFilter } : {}),
+        ...(debouncedUser ? { user: debouncedUser } : {}),
       });
       setTasks(res.tasks);
       setTotal(res.total);
@@ -66,7 +71,7 @@ export default function TasksPage() {
       loadingRef.current = false;
       if (!background) setLoading(false);
     }
-  }, [token, page, statusFilter]);
+  }, [token, page, statusFilter, debouncedUser]);
 
   useEffect(() => { load(); }, [load]);
 
@@ -235,6 +240,12 @@ export default function TasksPage() {
           onChange={(v) => { setStatus(v); setPage(1); }}
           clearable
           w={180}
+        />
+        <TextInput
+          placeholder="Filter by user (email)"
+          value={userFilter}
+          onChange={(e) => { setUserFilter(e.currentTarget.value); setPage(1); }}
+          w={220}
         />
         <Text fz="sm" c="dimmed">{total} total</Text>
       </Group>

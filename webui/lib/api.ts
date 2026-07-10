@@ -317,7 +317,7 @@ export const api = {
   // Tasks
   listTasks(
     token: string,
-    params: { skip?: number; limit?: number; status?: string; device_id?: string } = {},
+    params: { skip?: number; limit?: number; status?: string; device_id?: string; user?: string } = {},
   ) {
     const qs = new URLSearchParams(
       Object.entries(params)
@@ -435,6 +435,11 @@ export const api = {
       s3_config?: Record<string, unknown>;
       dep_enabled?: boolean;
       is_active?: boolean;
+      // Renewal reminders (manual-entry MVP). "YYYY-MM-DD" or a full ISO
+      // datetime; omitted leaves the stored value unchanged (there is no
+      // way to clear a date via this endpoint today).
+      apns_cert_expires_at?: string;
+      dep_token_expires_at?: string;
     },
   ) {
     return request<{ message: string }>("/api/v1/tenant", token, {
@@ -483,6 +488,23 @@ export const api = {
   // Same-origin download path (through the proxy) for the enrollment profile.
   enrollmentDownloadPath(tenantId: string, enrollToken: string) {
     return `/api/proxy/api/v1/enroll/${encodeURIComponent(tenantId)}/${encodeURIComponent(enrollToken)}`;
+  },
+
+  // Recent POST-SCEP webhook check-ins that never became a device (diagnostic;
+  // SCEP-stage failures are invisible -- see EnrollmentAttempt).
+  getEnrollmentAttempts(
+    token: string,
+    params: { skip?: number; limit?: number; outcome?: string } = {},
+  ) {
+    const qs = new URLSearchParams(
+      Object.entries(params)
+        .filter(([, v]) => v !== undefined)
+        .map(([k, v]) => [k, String(v)]),
+    ).toString();
+    return request<{ total: number; attempts: EnrollmentAttempt[] }>(
+      `/api/v1/enrollment-attempts${qs ? `?${qs}` : ""}`,
+      token,
+    );
   },
 
   // Health
@@ -622,6 +644,28 @@ export interface EnrollmentDetails {
   token: string;
   configured: boolean;
   missing: string[];
+  // Admin-entered renewal reminders (manual-entry MVP -- not live cert/token
+  // introspection). days_remaining may be negative (already expired); both
+  // are null when the corresponding date is unset.
+  apns_cert_expires_at: string | null;
+  apns_days_remaining: number | null;
+  dep_token_expires_at: string | null;
+  dep_days_remaining: number | null;
+}
+
+// A logged POST-SCEP webhook check-in that could not be turned into (or
+// matched to) a device. Mirrors EnrollmentAttempt.to_dict()
+// (controller/models/tenant.py). tenant_id is always null here -- the
+// tenant-scoped list endpoint can only ever return this tenant's own rows.
+export interface EnrollmentAttempt {
+  id: string;
+  tenant_id: string | null;
+  udid: string | null;
+  serial_number: string | null;
+  topic: string | null;
+  outcome: string; // "no_tenant" | "no_serial"
+  detail: Record<string, unknown>;
+  created_at: string | null;
 }
 
 export interface TenantInfo {
@@ -633,6 +677,9 @@ export interface TenantInfo {
   dep_enabled: boolean;
   created_at: string;
   is_active: boolean;
+  // Admin-entered renewal reminders (manual-entry MVP).
+  apns_cert_expires_at: string | null;
+  dep_token_expires_at: string | null;
 }
 
 // Console user (tenant-scoped admin/member account). Mirrors the shape

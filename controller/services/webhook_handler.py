@@ -4,7 +4,9 @@ import plistlib
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
-from controller.models.tenant import Tenant, Device, AppDeployment, ProfileDeployment, Task
+from controller.models.tenant import (
+    Tenant, Device, AppDeployment, ProfileDeployment, Task, EnrollmentAttempt,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -74,6 +76,37 @@ async def _dispatcher_eval(device: Device) -> None:
                          getattr(device, "serial_number", "?"))
 
 
+async def _log_attempt(
+    outcome: str,
+    *,
+    tenant: Optional[Tenant] = None,
+    udid: Optional[str] = None,
+    serial_number: Optional[str] = None,
+    topic: Optional[str] = None,
+    detail: Optional[Dict[str, Any]] = None,
+) -> None:
+    """Best-effort: record a webhook check-in that was silently dropped (no
+    device row created/matched), for enrollment-failure observability.
+
+    Never breaks webhook processing -- the webhook always returns 200
+    regardless of whether this succeeds. SECURITY: ``tenant`` must be a
+    Tenant row the caller has actually RESOLVED (looked up and found), never
+    an unverified id taken from the request -- an attacker could otherwise
+    pass ?tenant=<victim> on the enrollment ServerURL to pollute a victim's
+    attempt log. An unresolved/unverified id belongs only in ``detail``."""
+    try:
+        await EnrollmentAttempt.create(
+            tenant=tenant,
+            udid=udid,
+            serial_number=serial_number,
+            topic=topic,
+            outcome=outcome,
+            detail=detail or {},
+        )
+    except Exception:
+        logger.exception("webhook: failed to log enrollment attempt (outcome=%s)", outcome)
+
+
 class WebhookHandler:
     """Handle MDM webhook callbacks from NanoMDM (MicroMDM-compatible schema).
 
@@ -108,10 +141,11 @@ class WebhookHandler:
         # Authenticate carries the device inventory; TokenUpdate/Connect confirm the
         # enrollment. Upsert on any of them so the device appears in the console.
         info = _decode_plist(event.get("raw_payload"))
-        await self._upsert_device(udid, event.get("url_params") or {}, info)
+        await self._upsert_device(udid, event.get("url_params") or {}, info, topic=topic)
 
     async def _upsert_device(
-        self, udid: str, url_params: Dict[str, Any], info: Dict[str, Any]
+        self, udid: str, url_params: Dict[str, Any], info: Dict[str, Any],
+        topic: Optional[str] = None,
     ) -> Optional[Device]:
         device = await Device.get_or_none(udid=udid)
         created = False
@@ -128,6 +162,17 @@ class WebhookHandler:
             tenant = await _resolve_tenant(url_params)
             if tenant is None:
                 logger.warning(f"webhook: no tenant resolvable for new device {udid}; skipping")
+                # The requested tenant id (if any) is UNVERIFIED -- it is never
+                # resolved to a real row, so it must not land in the FK (an
+                # attacker could pass ?tenant=<victim> to pollute a victim's
+                # attempt log). Keep it only in detail, purely diagnostic.
+                requested = (url_params or {}).get("tenant")
+                if isinstance(requested, (list, tuple)):  # Go url.Values -> JSON arrays
+                    requested = requested[0] if requested else None
+                await _log_attempt(
+                    "no_tenant", tenant=None, udid=udid, topic=topic,
+                    detail={"requested_tenant": requested} if requested else {},
+                )
                 return None
             serial = (info.get("SerialNumber") or "").strip()
             if serial:
@@ -159,6 +204,8 @@ class WebhookHandler:
                 )
             else:
                 logger.info(f"webhook: skipping serial-less check-in for unknown udid={udid}")
+                # tenant IS resolved here (a real row), so it's safe in the FK.
+                await _log_attempt("no_serial", tenant=tenant, udid=udid, topic=topic)
                 return None
 
         # Mark (re-)enrolled and enrich from a fresh Authenticate. A returning
@@ -254,7 +301,7 @@ class WebhookHandler:
         if not udid:
             return
         # Idle polls also arrive here -- make sure the device exists and is fresh.
-        device = await self._upsert_device(udid, event.get("url_params") or {}, {})
+        device = await self._upsert_device(udid, event.get("url_params") or {}, {}, topic=topic)
         command_uuid = event.get("command_uuid")
         status = event.get("status")
         if not device or not command_uuid or status in (None, "Idle"):

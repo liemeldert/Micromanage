@@ -14,7 +14,7 @@ from controller.utils.yaml_validator import YAMLValidator
 from fastapi import FastAPI, HTTPException, Depends, Request, UploadFile, File, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, validator
 from tortoise.contrib.fastapi import register_tortoise
 
 from controller.auth import ROLE_ADMIN, ROLE_MEMBER, ROLES, DESTRUCTIVE_COMMANDS
@@ -32,6 +32,7 @@ from controller.models.tenant import (
     ProfileDeployment,
     FlowRun,
     Alert,
+    EnrollmentAttempt,
 )
 from controller.services.app_manager import AppManager
 from controller.services.mdm_connector import MDMConnector
@@ -240,6 +241,20 @@ class TenantUpdate(BaseModel):
     s3_config: Optional[Dict[str, Any]] = None
     dep_enabled: Optional[bool] = None
     is_active: Optional[bool] = None
+    # Admin-entered renewal reminders (manual-entry MVP -- see models.tenant).
+    # Omitted (None) leaves the stored value unchanged, matching every other
+    # optional field on this model.
+    apns_cert_expires_at: Optional[datetime] = None
+    dep_token_expires_at: Optional[datetime] = None
+
+    @validator("apns_cert_expires_at", "dep_token_expires_at", pre=True)
+    def _coerce_bare_date(cls, v):
+        """Accept a bare "YYYY-MM-DD" (an HTML <input type="date"> value) in
+        addition to a full ISO datetime -- pydantic v1's datetime parser
+        rejects date-only strings outright."""
+        if isinstance(v, str) and re.fullmatch(r"\d{4}-\d{2}-\d{2}", v):
+            return f"{v}T00:00:00Z"
+        return v
 
 
 class GroupConfig(BaseModel):
@@ -440,6 +455,9 @@ async def get_tenant_info(principal: Principal = Depends(get_current_principal))
         "dep_enabled": tenant.dep_enabled,
         "created_at": tenant.created_at,
         "is_active": tenant.is_active,
+        # Admin-entered renewal reminders (manual-entry MVP; see models.tenant).
+        "apns_cert_expires_at": tenant.apns_cert_expires_at,
+        "dep_token_expires_at": tenant.dep_token_expires_at,
     }
 
 
@@ -474,6 +492,10 @@ async def update_tenant(update: TenantUpdate, admin: Principal = Depends(require
         tenant.s3_config = _restore_tenant_s3_secrets(tenant.s3_config, update.s3_config)
     if update.dep_enabled is not None:
         tenant.dep_enabled = update.dep_enabled
+    if update.apns_cert_expires_at is not None:
+        tenant.apns_cert_expires_at = update.apns_cert_expires_at
+    if update.dep_token_expires_at is not None:
+        tenant.dep_token_expires_at = update.dep_token_expires_at
     if update.is_active is not None:
         # Guard against an admin locking the whole tenant out irrecoverably.
         if not update.is_active:
@@ -2017,6 +2039,7 @@ async def list_tasks(
         limit: int = Query(100, ge=1, le=500),
         status: Optional[str] = None,
         device_id: Optional[str] = None,
+        user: Optional[str] = None,
         principal: Principal = Depends(get_current_principal),
 ):
     """List tasks with optional filtering"""
@@ -2028,6 +2051,10 @@ async def list_tasks(
         query = query.filter(status=status)
     if device_id:
         query = query.filter(device_id=device_id)
+    if user:
+        # Exact match: Task.user is always a server-written email (or None for
+        # auto/system tasks), never free text -- icontains would be misleading.
+        query = query.filter(user=user)
 
     total = await query.count()
     tasks = (
@@ -2399,6 +2426,31 @@ async def get_app_manifest_info(
 async def get_enrollment(principal: Principal = Depends(get_current_principal)):
     """Enrollment details for the current tenant (server URLs, topic, enroll URL)."""
     return enrollment_svc.enrollment_details(principal.tenant)
+
+
+@app.get("/api/v1/enrollment-attempts")
+async def list_enrollment_attempts(
+        skip: int = Query(0, ge=0),
+        limit: int = Query(100, ge=1, le=500),
+        outcome: Optional[str] = None,
+        principal: Principal = Depends(get_current_principal),
+):
+    """Recent POST-SCEP webhook check-ins that could not be turned into a
+    device (diagnostic, not admin-only -- any authenticated member may view
+    it). SCEP-stage failures never reach here; see EnrollmentAttempt.
+
+    Note: a no_tenant drop is always logged with tenant=None (the requested
+    id is unverified -- see webhook_handler._log_attempt), so tenant-scoping
+    this query structurally hides those rows from every tenant. Accepted for
+    v1 (see the batch-2 plan); a fast-follow could expose them to a
+    platform-level admin view instead of any tenant's.
+    """
+    query = EnrollmentAttempt.filter(tenant=principal.tenant)
+    if outcome:
+        query = query.filter(outcome=outcome)
+    total = await query.count()
+    attempts = await query.order_by("-created_at").offset(skip).limit(limit).all()
+    return {"total": total, "attempts": [a.to_dict() for a in attempts]}
 
 
 @app.get("/api/v1/enroll/{tenant_id}/{token}")

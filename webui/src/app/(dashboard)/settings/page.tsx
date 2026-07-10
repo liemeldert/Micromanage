@@ -23,6 +23,7 @@ import {
 import { useLocalStorage } from "@mantine/hooks";
 import { notifications } from "@mantine/notifications";
 import {
+  IconCalendarDue,
   IconCheck,
   IconCloud,
   IconCode,
@@ -76,6 +77,11 @@ export default function SettingsPage() {
   const [nameDraft, setNameDraft] = useState("");
   const [depDraft, setDepDraft] = useState(false);
   const [s3Draft, setS3Draft] = useState<S3FormState>(EMPTY_S3_FORM);
+  // Renewal reminders (manual-entry MVP): plain "YYYY-MM-DD", matching what a
+  // native <input type="date"> reads/writes. Empty string = leave unchanged
+  // (the update endpoint has no way to clear a date once set).
+  const [apnsExpiryDraft, setApnsExpiryDraft] = useState("");
+  const [depExpiryDraft, setDepExpiryDraft] = useState("");
   const [tenantDirty, setTenantDirty] = useState(false);
   const [savingTenant, setSavingTenant] = useState(false);
   // Mirror tenantDirty into a ref so the async loadTenant reads the LIVE value,
@@ -103,6 +109,9 @@ export default function SettingsPage() {
           access_key_id: "",
           secret_access_key: "",
         });
+        // ISO datetime -> "YYYY-MM-DD" for the native date input.
+        setApnsExpiryDraft(t.apns_cert_expires_at ? t.apns_cert_expires_at.slice(0, 10) : "");
+        setDepExpiryDraft(t.dep_token_expires_at ? t.dep_token_expires_at.slice(0, 10) : "");
       }
     });
   };
@@ -146,6 +155,18 @@ export default function SettingsPage() {
       const body: Parameters<typeof api.updateTenant>[1] = {};
       if (nameDraft.trim() !== (tenant.name ?? "")) body.name = nameDraft.trim();
       if (depDraft !== !!tenant.dep_enabled) body.dep_enabled = depDraft;
+      // Renewal reminder dates: only send when changed from the loaded value.
+      // An emptied input is NOT sent -- the update endpoint has no way to
+      // clear a date, so silently reverting to "unchanged" is the honest
+      // behavior rather than a no-op PUT that looks like it cleared it.
+      const apnsLoaded = tenant.apns_cert_expires_at ? tenant.apns_cert_expires_at.slice(0, 10) : "";
+      if (apnsExpiryDraft.trim() !== "" && apnsExpiryDraft !== apnsLoaded) {
+        body.apns_cert_expires_at = apnsExpiryDraft;
+      }
+      const depLoaded = tenant.dep_token_expires_at ? tenant.dep_token_expires_at.slice(0, 10) : "";
+      if (depExpiryDraft.trim() !== "" && depExpiryDraft !== depLoaded) {
+        body.dep_token_expires_at = depExpiryDraft;
+      }
 
       // s3_config is a whole-object replace server-side, so the PUT must carry
       // every field we intend to keep. For each secret: send a freshly typed
@@ -278,6 +299,44 @@ export default function SettingsPage() {
                 setTenantDirty(true);
               }}
             />
+
+            <Divider
+              label={
+                <Group gap={6}>
+                  <IconCalendarDue size={14} />
+                  <Text fz="xs" fw={500}>Renewal reminders</Text>
+                </Group>
+              }
+              labelPosition="left"
+            />
+            <Text fz="xs" c="dimmed" mt={-8}>
+              The controller can&apos;t read your live APNs certificate or DEP token, so track their
+              expiry here manually -- the Enrollment page warns as these dates approach.
+            </Text>
+            <Grid gutter="sm">
+              <Grid.Col span={{ base: 12, sm: 6 }}>
+                <TextInput
+                  type="date"
+                  label="APNs certificate expires"
+                  value={apnsExpiryDraft}
+                  onChange={(e) => {
+                    setApnsExpiryDraft(e.currentTarget.value);
+                    setTenantDirty(true);
+                  }}
+                />
+              </Grid.Col>
+              <Grid.Col span={{ base: 12, sm: 6 }}>
+                <TextInput
+                  type="date"
+                  label="DEP token expires"
+                  value={depExpiryDraft}
+                  onChange={(e) => {
+                    setDepExpiryDraft(e.currentTarget.value);
+                    setTenantDirty(true);
+                  }}
+                />
+              </Grid.Col>
+            </Grid>
 
             <Divider
               label={

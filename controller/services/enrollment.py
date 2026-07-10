@@ -13,8 +13,9 @@ import hmac
 import os
 import plistlib
 import uuid
+from datetime import datetime, timezone
 from hashlib import sha256
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 
 def enrollment_token(tenant_id: str) -> str:
@@ -58,6 +59,17 @@ def _scep_challenge() -> str:
     return os.getenv("SCEP_CHALLENGE", "")
 
 
+def _days_remaining(expires_at: Optional[datetime]) -> Optional[int]:
+    """Whole days from now until ``expires_at`` (may be negative if already
+    past). ``None`` when the date is unset."""
+    if expires_at is None:
+        return None
+    now = datetime.now(timezone.utc)
+    if expires_at.tzinfo is None:
+        expires_at = expires_at.replace(tzinfo=timezone.utc)
+    return (expires_at - now).days
+
+
 def enrollment_details(tenant) -> Dict[str, Any]:
     """Non-secret details for the Enrollment page (no SCEP challenge)."""
     public = (os.getenv("PUBLIC_API_URL") or "").rstrip("/")
@@ -72,6 +84,9 @@ def enrollment_details(tenant) -> Dict[str, Any]:
     if not public:
         missing.append("PUBLIC_API_URL")
 
+    apns_expires = getattr(tenant, "apns_cert_expires_at", None)
+    dep_expires = getattr(tenant, "dep_token_expires_at", None)
+
     return {
         "tenant_id": tenant.id,
         "organization": tenant.name,
@@ -84,6 +99,11 @@ def enrollment_details(tenant) -> Dict[str, Any]:
         "token": token,
         "configured": len(missing) == 0,
         "missing": missing,
+        # Admin-entered renewal dates (manual-entry MVP; see models.tenant).
+        "apns_cert_expires_at": apns_expires,
+        "apns_days_remaining": _days_remaining(apns_expires),
+        "dep_token_expires_at": dep_expires,
+        "dep_days_remaining": _days_remaining(dep_expires),
     }
 
 
