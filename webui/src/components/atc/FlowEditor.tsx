@@ -36,7 +36,6 @@ import { NodeInspector } from "./NodeInspector";
 import {
   CATEGORY_COLOR,
   EDGE_COLOR,
-  EDGE_HANDLES,
   EDGE_LABEL,
   flowToGraph,
   graphToNodes,
@@ -187,11 +186,6 @@ function FlowEditorInner({
   options: FlowEditorOptions;
   onChange: (patch: { nodes: FlowNodeT[]; start: string }) => void;
 }) {
-  const specByType = useMemo(
-    () => Object.fromEntries(catalog.map((s) => [s.type, s])),
-    [catalog],
-  );
-
   const initial = useMemo(
     () => flowToGraph({ id: flowId, name: flowId, trigger: { on: "enroll" }, start: initialStart, nodes: initialNodes }, catalog),
     // rebuild only when the selected flow changes

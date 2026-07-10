@@ -539,7 +539,7 @@ export function devicePlatform(model: string | null | undefined): "iOS" | "macOS
 
 // ── Config resource hook (load / save a single config type) ──────────────────
 
-type ConfigType = "groups" | "apps" | "profiles" | "tags" | "flows";
+type ConfigType = "groups" | "apps" | "profiles" | "tags" | "flows" | "dispatcher";
 
 export function useConfigResource<T>(type: ConfigType, empty: T) {
   const { token } = useAuth();

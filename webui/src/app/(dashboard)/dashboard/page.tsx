@@ -19,7 +19,9 @@ import {
   IconCircleCheck,
   IconPackage,
   IconClock,
+  IconActivityHeartbeat,
 } from "@tabler/icons-react";
+import { useRouter } from "next/navigation";
 import { BarChart } from "@mantine/charts";
 import { api } from "../../../../lib/api";
 import { useAuth } from "../../../../lib/auth-context";
@@ -76,9 +78,11 @@ function StatCard({
 
 export default function DashboardPage() {
   const { token } = useAuth();
+  const router = useRouter();
   const [stats, setStats] = useState<Stats | null>(null);
   const [byModel, setByModel] = useState<{ device_model: string; count: number }[]>([]);
   const [byOs, setByOs] = useState<{ os_version: string; count: number }[]>([]);
+  const [compliance, setCompliance] = useState<{ active: number; counts: Record<string, number> } | null>(null);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
@@ -91,6 +95,8 @@ export default function DashboardPage() {
       })
       .catch((e) => notifications.show({ color: "red", message: e.message }))
       .finally(() => setLoading(false));
+    // Compliance summary is independent + best-effort (feature may be unconfigured).
+    api.listAlerts(token).then((a) => setCompliance({ active: a.active, counts: a.counts })).catch(() => {});
   }, [token]);
 
   if (loading) {
@@ -142,6 +148,28 @@ export default function DashboardPage() {
           icon={IconClock}
           color={taskFailed > 0 ? "red" : "orange"}
         />
+        <Box style={{ cursor: "pointer" }} onClick={() => router.push("/compliance")}>
+          <StatCard
+            label="Compliance Alerts"
+            value={compliance?.active ?? 0}
+            sub={
+              compliance && compliance.active > 0
+                ? (["black", "red", "yellow", "green"] as const)
+                    .filter((s) => (compliance.counts[s] ?? 0) > 0)
+                    .map((s) => `${compliance.counts[s]} ${s}`)
+                    .join(" · ")
+                : "all clear"
+            }
+            icon={IconActivityHeartbeat}
+            color={
+              compliance && ((compliance.counts.black ?? 0) > 0 || (compliance.counts.red ?? 0) > 0)
+                ? "red"
+                : compliance && compliance.active > 0
+                  ? "yellow"
+                  : "teal"
+            }
+          />
+        </Box>
       </SimpleGrid>
 
       <Grid gutter="md">

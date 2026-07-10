@@ -15,7 +15,7 @@ import {
 } from "@mantine/core";
 import { IconInfoCircle } from "@tabler/icons-react";
 import type { CatalogCommand, FlowNode, FlowNodeSpec, WaitSignal } from "../../../lib/api";
-import type { Condition, Group as GroupDef } from "../../../lib/config";
+import type { Condition } from "../../../lib/config";
 import { ConditionBuilder } from "../config/ConditionBuilder";
 import { NameTemplateInput } from "../config/NameTemplateInput";
 

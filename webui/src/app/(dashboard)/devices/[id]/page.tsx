@@ -55,8 +55,17 @@ import {
   IconTerminal2,
   IconWifi,
   IconX,
+  IconActivityHeartbeat,
+  IconSitemap,
 } from "@tabler/icons-react";
-import { api, type CatalogCommand, type DeviceDetail, type Task } from "../../../../../lib/api";
+import {
+  api,
+  type CatalogCommand,
+  type DeviceDetail,
+  type DispatcherAlert,
+  type FlowRunSummary,
+  type Task,
+} from "../../../../../lib/api";
 import { useAuth } from "../../../../../lib/auth-context";
 import { TaskDetailDrawer } from "../../../../components/TaskDetailDrawer";
 import { QuickActionsCard, CommandsPanel, RefreshButton } from "../../../../components/DeviceCommandKit";
@@ -173,6 +182,14 @@ function PropertyGrid({ items }: { items: AttrItem[] }) {
 
 // ── Page ──────────────────────────────────────────────────────────────────────
 
+// Compliance triage colours (black > red > yellow > green).
+const SEVERITY_COLOR: Record<string, string> = {
+  black: "dark",
+  red: "red",
+  yellow: "yellow",
+  green: "green",
+};
+
 export default function DeviceDetailPage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = use(params);
   const { token } = useAuth();
@@ -207,6 +224,16 @@ export default function DeviceDetailPage({ params }: { params: Promise<{ id: str
     if (!token) return;
     api.getCommandCatalog(token).then((r) => setCatalog(r.commands)).catch(() => {});
   }, [token]);
+
+  // Compliance alerts + ATC flow runs for this device (best-effort; features may
+  // be unconfigured). Refreshed when the burst-poll refreshes the device too.
+  const [deviceAlerts, setDeviceAlerts] = useState<DispatcherAlert[]>([]);
+  const [deviceRuns, setDeviceRuns] = useState<FlowRunSummary[]>([]);
+  useEffect(() => {
+    if (!token) return;
+    api.listAlerts(token, { device_id: id }).then((r) => setDeviceAlerts(r.alerts)).catch(() => {});
+    api.getDeviceFlowRuns(token, id).then((r) => setDeviceRuns(r.flow_runs)).catch(() => {});
+  }, [token, id]);
 
   // Command results land asynchronously via the webhook, so we poll the device
   // for fresh data. Baseline is quiet (15s); after dispatching a command we
@@ -292,6 +319,8 @@ export default function DeviceDetailPage({ params }: { params: Promise<{ id: str
   const isMacModel = (device.device_model || "").toLowerCase().includes("mac");
   const showLocationCard = location !== null || (bool(attrs.IsSupervised) && !isMacModel);
 
+  const activeAlerts = deviceAlerts.filter((a) => a.status !== "resolved");
+
   const SECTIONS = [
     { value: "summary", label: "Summary", icon: IconLayoutDashboard },
     ...groups.map((g) => ({ value: g.category, label: g.category, icon: SECTION_ICONS[g.category] ?? IconDotsCircleHorizontal })),
@@ -299,6 +328,12 @@ export default function DeviceDetailPage({ params }: { params: Promise<{ id: str
     { value: "apps", label: `Apps (${deviceApps.length || installed_apps.length})`, icon: IconApps },
     { value: "tasks", label: `Activity (${recent_tasks.length})`, icon: IconClock },
     { value: "commands", label: "Commands", icon: IconTerminal2 },
+    {
+      value: "compliance",
+      label: `Compliance${activeAlerts.length ? ` (${activeAlerts.length})` : ""}`,
+      icon: IconActivityHeartbeat,
+    },
+    { value: "flows", label: `Flows${deviceRuns.length ? ` (${deviceRuns.length})` : ""}`, icon: IconSitemap },
   ];
 
   return (
@@ -731,6 +766,96 @@ export default function DeviceDetailPage({ params }: { params: Promise<{ id: str
                 </Text>
               </Card>
             )
+          )}
+
+          {section === "compliance" && (
+            <Card withBorder radius="md" p="md">
+              <Text fz="sm" fw={600} mb="md">
+                Compliance ({activeAlerts.length} active)
+              </Text>
+              {deviceAlerts.length === 0 ? (
+                <Text fz="sm" c="dimmed">
+                  No compliance alerts for this device.
+                </Text>
+              ) : (
+                <Stack gap={6}>
+                  {deviceAlerts.map((a) => (
+                    <Group
+                      key={a.id}
+                      justify="space-between"
+                      wrap="nowrap"
+                      p="xs"
+                      style={{
+                        borderRadius: 6,
+                        borderLeft: `3px solid var(--mantine-color-${SEVERITY_COLOR[a.severity] ?? "gray"}-6)`,
+                        background: "var(--mantine-color-dark-6)",
+                        cursor: "pointer",
+                      }}
+                      onClick={() => router.push("/compliance")}
+                    >
+                      <Group gap="xs" wrap="nowrap" style={{ minWidth: 0 }}>
+                        <Badge color={SEVERITY_COLOR[a.severity] ?? "gray"} variant="filled" tt="uppercase">
+                          {a.severity}
+                        </Badge>
+                        <Text fz="sm" truncate>
+                          {a.summary}
+                        </Text>
+                      </Group>
+                      <Badge size="sm" variant="light" color={a.status === "resolved" ? "gray" : "orange"}>
+                        {a.status}
+                      </Badge>
+                    </Group>
+                  ))}
+                </Stack>
+              )}
+            </Card>
+          )}
+
+          {section === "flows" && (
+            <Card withBorder radius="md" p="md">
+              <Text fz="sm" fw={600} mb="md">
+                ATC flow runs
+              </Text>
+              {deviceRuns.length === 0 ? (
+                <Text fz="sm" c="dimmed">
+                  No flow runs for this device yet.
+                </Text>
+              ) : (
+                <Stack gap={6}>
+                  {deviceRuns.map((r) => (
+                    <Group
+                      key={r.id}
+                      justify="space-between"
+                      wrap="nowrap"
+                      p="xs"
+                      style={{ borderRadius: 6, background: "var(--mantine-color-dark-6)", cursor: "pointer" }}
+                      onClick={() => router.push(`/atc/runs/${r.id}`)}
+                    >
+                      <Group gap="xs" wrap="nowrap" style={{ minWidth: 0 }}>
+                        <IconSitemap size={16} />
+                        <Text fz="sm" truncate>
+                          {r.flow_id}
+                        </Text>
+                        {r.status === "waiting" && r.waiting_signal && (
+                          <Text fz="xs" c="dimmed">
+                            waiting: {r.waiting_signal}
+                          </Text>
+                        )}
+                      </Group>
+                      <Badge
+                        size="sm"
+                        variant="light"
+                        color={
+                          { running: "blue", waiting: "yellow", completed: "teal", failed: "red", cancelled: "gray" }[r.status] ?? "gray"
+                        }
+                      >
+                        {r.status}
+                      </Badge>
+                    </Group>
+                  ))}
+                </Stack>
+              )}
+            </Card>
           )}
         </Grid.Col>
       </Grid>

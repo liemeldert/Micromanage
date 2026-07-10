@@ -71,7 +71,7 @@ async function request<T>(
 // Config documents editable via the validated PUT (+ version history). "config"
 // is readable but not editable (it embeds secrets). Kept in sync with the
 // controller allow-list (controller/api/main.py).
-export type EditableConfigType = "groups" | "apps" | "profiles" | "tags" | "flows";
+export type EditableConfigType = "groups" | "apps" | "profiles" | "tags" | "flows" | "dispatcher";
 export type ReadableConfigType = EditableConfigType | "config";
 
 export const api = {
@@ -352,6 +352,47 @@ export const api = {
     });
   },
 
+  // ── Dispatcher (compliance) ─────────────────────────────────────────────────
+  getDispatcherCheckCatalog(token: string) {
+    return request<{ checks: DispatcherCheckSpec[] }>("/api/v1/dispatcher/check-catalog", token);
+  },
+  listAlerts(
+    token: string,
+    params: { severity?: string; status?: string; device_id?: string } = {},
+  ) {
+    const qs = new URLSearchParams(
+      Object.entries(params).filter(([, v]) => v !== undefined).map(([k, v]) => [k, String(v)]),
+    ).toString();
+    return request<{ alerts: DispatcherAlert[]; counts: Record<string, number>; active: number }>(
+      `/api/v1/alerts${qs ? `?${qs}` : ""}`,
+      token,
+    );
+  },
+  getAlert(token: string, id: string) {
+    return request<DispatcherAlert>(`/api/v1/alerts/${id}`, token);
+  },
+  acknowledgeAlert(token: string, id: string) {
+    return request<DispatcherAlert>(`/api/v1/alerts/${id}/acknowledge`, token, { method: "POST" });
+  },
+  resolveAlert(token: string, id: string) {
+    return request<DispatcherAlert>(`/api/v1/alerts/${id}/resolve`, token, { method: "POST" });
+  },
+  // Admin-approve a queued destructive remediation.
+  approveRemediation(token: string, id: string, actionKey: string) {
+    return request<{ message: string; outcome: string; alert: DispatcherAlert }>(
+      `/api/v1/alerts/${id}/remediate`,
+      token,
+      { method: "POST", body: JSON.stringify({ action_key: actionKey }) },
+    );
+  },
+  dispatcherEvaluate(token: string) {
+    return request<{ message: string; devices_evaluated: number }>(
+      "/api/v1/dispatcher/evaluate",
+      token,
+      { method: "POST" },
+    );
+  },
+
   cancelTask(token: string, id: string) {
     return request<{ message: string }>(`/api/v1/tasks/${id}/cancel`, token, {
       method: "POST",
@@ -588,4 +629,73 @@ export interface FlowDoc {
 
 export interface FlowsConfig {
   flows: FlowDoc[];
+}
+
+// ── Dispatcher (compliance) types ──────────────────────────────────────────
+
+export interface DispatcherCheckParamSpec {
+  name: string;
+  label: string;
+  type: string; // string | int | tags | select
+  required?: boolean;
+  help?: string;
+  options?: string[];
+}
+
+export interface DispatcherCheckSpec {
+  type: string;
+  label: string;
+  description: string;
+  category: string;
+  params: DispatcherCheckParamSpec[];
+}
+
+export type Severity = "black" | "red" | "yellow" | "green";
+
+export interface DispatcherAlert {
+  id: string;
+  tenant_id: string;
+  device_id: string | null;
+  rule_id: string;
+  severity: Severity;
+  status: string; // pending | open | acknowledged | resolved
+  summary: string;
+  detail: Record<string, unknown>;
+  first_detected_at: string | null;
+  opened_at: string | null;
+  acknowledged_at: string | null;
+  acknowledged_by: string | null;
+  resolved_at: string | null;
+  updated_at: string | null;
+  device?: { serial_number: string | null; display_name: string | null } | null;
+}
+
+export interface DispatcherWebhook {
+  name: string;
+  url: string;
+  secret?: string;
+}
+
+export interface DispatcherAction {
+  type: string; // webhook | assign_tag | remove_tag | install_profiles | install_apps | send_command
+  params?: Record<string, unknown>;
+  dry_run?: boolean;
+}
+
+export interface DispatcherRule {
+  id: string;
+  name: string;
+  enabled?: boolean;
+  severity: Severity;
+  scope?: Record<string, unknown>;
+  check: Record<string, unknown>;
+  grace_minutes?: number;
+  actions?: DispatcherAction[];
+  auto_resolve?: boolean;
+}
+
+export interface DispatcherConfig {
+  webhooks?: DispatcherWebhook[];
+  rules?: DispatcherRule[];
+  auto_remediation_enabled?: boolean;
 }
