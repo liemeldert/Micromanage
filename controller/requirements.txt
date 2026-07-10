@@ -8,6 +8,8 @@ typer[all]==0.9.4
 rich==13.7.1
 apscheduler==3.10.4
 packaging==24.0
+# re-superset with a per-match timeout= (ReDoS backstop for group-condition regexes)
+regex==2026.6.28
 python-dotenv==1.2.2
 fastapi==0.104.1
 uvicorn[standard]==0.24.0.post1

@@ -117,7 +117,7 @@ def _profile_needs_deploy(
         return None  # in flight
     if deployment.status == "installed":
         if deployment.payload_hash != desired_hash:
-            # Covers both real edits and legacy rows with no recorded hash —
+            # Covers both real edits and legacy rows with no recorded hash --
             # one idempotent re-push backfills the hash.
             return "profile definition changed"
         return None
@@ -143,7 +143,9 @@ async def reconcile_tenant(tenant: Tenant, yaml_base: Path) -> Dict[str, int]:
 
     summary["tasks_timed_out"] = await _fail_timed_out_tasks(tenant)
 
-    devices = await Device.filter(tenant=tenant).all()
+    # Only enrolled devices can receive commands; unenrolled/pending are retained
+    # for history but skipped by reconciliation.
+    devices = await Device.filter(tenant=tenant, enrollment_state="enrolled").all()
     summary["devices"] = len(devices)
     if not devices:
         return summary
@@ -164,10 +166,13 @@ async def reconcile_tenant(tenant: Tenant, yaml_base: Path) -> Dict[str, int]:
     for device in devices:
         try:
             # ── Profiles: desired set ─────────────────────────────────────────
-            desired = await profile_manager.evaluate_device_profiles(
+            # held_ids: scoped to this device but frozen by a gradual rollout
+            # (wave not reached). Held profiles are DESIRED for removal purposes
+            # -- never uninstalled -- but receive no install/update yet.
+            desired, held_ids = await profile_manager.evaluate_device_profiles(
                 device, profiles_config, groups_config
             )
-            desired_ids = {p["id"] for p in desired}
+            desired_ids = {p["id"] for p in desired} | held_ids
 
             for profile in desired:
                 key = (str(device.id), "profile_install", profile["id"])
@@ -199,7 +204,7 @@ async def reconcile_tenant(tenant: Tenant, yaml_base: Path) -> Dict[str, int]:
                 if deployment.profile_id in desired_ids:
                     continue
                 if deployment.status in ("failed", "pending"):
-                    # Nothing (reliably) on the device — just drop the record.
+                    # Nothing (reliably) on the device -- just drop the record.
                     await deployment.delete()
                     continue
                 key = (str(device.id), "profile_remove", deployment.profile_id)

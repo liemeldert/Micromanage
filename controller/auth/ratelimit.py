@@ -31,7 +31,7 @@ class SlidingWindowLimiter:
 
         The key set is bounded: empty/stale keys are evicted, and if the table
         is at capacity (e.g. an attacker spraying distinct unvalidated keys),
-        new keys are not tracked — failing open for unknown keys rather than
+        new keys are not tracked -- failing open for unknown keys rather than
         allowing unbounded memory growth.
         """
         now = time.monotonic()

@@ -90,26 +90,56 @@ class WebhookHandler:
         self, udid: str, url_params: Dict[str, Any], info: Dict[str, Any]
     ) -> Optional[Device]:
         device = await Device.get_or_none(udid=udid)
+
+        # New UDID. The durable identity of a physical device is its SERIAL, not
+        # its udid (a wipe + re-enroll yields a new udid). So reuse an existing
+        # record for this serial -- a pre-provisioned placeholder, or a prior
+        # enrollment that came back -- instead of creating a duplicate; its
+        # history/state and pre-defined groups carry over. A serial-less check-in
+        # for an unknown udid (e.g. a TokenUpdate/Connect that races ahead of
+        # Authenticate) can't be identified, so it no-ops rather than creating a
+        # blank-serial ghost -- the serial-bearing Authenticate creates it.
         if device is None:
             tenant = await _resolve_tenant(url_params)
             if tenant is None:
                 logger.warning(f"webhook: no tenant resolvable for new device {udid}; skipping")
                 return None
-            device = await Device.create(
-                tenant=tenant,
-                udid=udid,
-                serial_number=info.get("SerialNumber") or "",
-                device_model=info.get("ProductName") or info.get("Model") or "",
-                os_version=info.get("OSVersion") or "",
-                hostname=info.get("DeviceName"),
-            )
-            logger.info(
-                f"webhook: enrolled device udid={udid} serial={device.serial_number!r} "
-                f"tenant={tenant.id}"
-            )
-            return device
+            serial = (info.get("SerialNumber") or "").strip()
+            if serial:
+                # .first() (not get_or_none) so legacy duplicate serials can't
+                # raise MultipleObjectsReturned and drop the enrollment.
+                device = (
+                    await Device.filter(tenant=tenant, serial_number=serial)
+                    .order_by("enrollment_date").first()
+                )
+            if device is not None:
+                if device.udid != udid:
+                    logger.info(
+                        f"webhook: re-keying serial={serial!r} to udid={udid} "
+                        f"(was {device.udid}, state {device.enrollment_state})"
+                    )
+                device.udid = udid
+            elif serial:
+                device = await Device.create(
+                    tenant=tenant,
+                    udid=udid,
+                    serial_number=serial,
+                    device_model=info.get("ProductName") or info.get("Model") or "",
+                    os_version=info.get("OSVersion") or "",
+                    hostname=info.get("DeviceName"),
+                )
+                logger.info(
+                    f"webhook: enrolled device udid={udid} serial={serial!r} tenant={tenant.id}"
+                )
+            else:
+                logger.info(f"webhook: skipping serial-less check-in for unknown udid={udid}")
+                return None
 
-        # Enrich an existing record from a fresh Authenticate, and bump last_seen.
+        # Mark (re-)enrolled and enrich from a fresh Authenticate. A returning
+        # device retains its tasks/attributes; the reconciler re-pushes config.
+        was_inactive = device.enrollment_state != "enrolled"
+        device.enrollment_state = "enrolled"
+        device.unenrolled_at = None
         if info.get("SerialNumber"):
             device.serial_number = info["SerialNumber"]
         model = info.get("ProductName") or info.get("Model")
@@ -119,28 +149,71 @@ class WebhookHandler:
             device.os_version = info["OSVersion"]
         if info.get("DeviceName"):
             device.hostname = info["DeviceName"]
+        # Auto-derive the managed name on (re-)enroll -- unless a name is already
+        # set (manual or prior). The governing template is group-scoped first
+        # (first matching group in groups.yaml order that defines one), falling
+        # back to the tenant template; apply_on_enroll on the selected scope
+        # gates it. Records the label; the physical device is renamed only via
+        # an explicit push.
+        #
+        # Best-effort and fully isolated: naming must NEVER gate the device.save()
+        # below (which records the enrollment). Group evaluation is timeout-guarded
+        # and every failure is swallowed, so a bad groups.yaml can't drop enrolls.
+        if not device.name:
+            try:
+                from controller.services.group_manager import GroupManager
+                from controller.services.naming import resolve_name, select_naming_config
+                from controller.services.tenant_config import load_groups
+
+                t = await Tenant.get_or_none(id=device.tenant_id)
+                tenant_cfg = (t.device_naming or {}) if t else {}
+                groups_config = load_groups(device.tenant_id)
+                group_names = GroupManager(device.tenant_id).evaluate_device_groups(
+                    device, groups_config
+                )
+                cfg, _source = select_naming_config(tenant_cfg, groups_config, group_names)
+                if cfg and cfg.get("apply_on_enroll"):
+                    derived = resolve_name(cfg.get("template"), device)
+                    if derived:
+                        device.name = derived
+            except Exception:
+                logger.exception(
+                    f"webhook: naming derivation failed for udid={udid}; enrolling without an auto-name"
+                )
         await device.save()  # last_seen auto-updates
+        if was_inactive:
+            logger.info(f"webhook: device udid={udid} re-enrolled (history retained)")
         return device
 
     async def _handle_checkout(self, udid: str):
         device = await Device.get_or_none(udid=udid)
         if not device:
             return
+        # Soft-unenroll: keep the record (and its task history + last-known
+        # attributes) so a re-enroll of the same device retains its state; just
+        # mark it and stop tracking. Cancel in-flight tasks.
         pending = await Task.filter(device=device, status__in=["pending", "running"]).all()
         for task in pending:
             task.status = "cancelled"
             task.error = "Device unenrolled"
             task.completed_at = datetime.now(timezone.utc)
             await task.save()
-        await device.delete()  # cascades app/profile deployments
-        logger.info(f"webhook: device {udid} checked out (unenrolled)")
+        # Unenrolling strips all managed profiles/apps from the device, so the
+        # live deployment records no longer hold -- clear them (task history
+        # remains). The reconciler re-creates them on re-enroll.
+        await AppDeployment.filter(device=device).delete()
+        await ProfileDeployment.filter(device=device).delete()
+        device.enrollment_state = "unenrolled"
+        device.unenrolled_at = datetime.now(timezone.utc)
+        await device.save()
+        logger.info(f"webhook: device {udid} checked out (unenrolled, record retained)")
 
     # ── Command results (Connect with an acknowledge_event) ───────────────────
     async def _handle_acknowledge(self, topic: str, event: Dict[str, Any]):
         udid = event.get("udid")
         if not udid:
             return
-        # Idle polls also arrive here — make sure the device exists and is fresh.
+        # Idle polls also arrive here -- make sure the device exists and is fresh.
         device = await self._upsert_device(udid, event.get("url_params") or {}, {})
         command_uuid = event.get("command_uuid")
         status = event.get("status")
@@ -161,7 +234,7 @@ class WebhookHandler:
         if not task:
             logger.info(f"webhook: no task for command {command_uuid}")
             return
-        # Never resurrect a task the user cancelled (or that already finished) —
+        # Never resurrect a task the user cancelled (or that already finished) --
         # EXCEPT one failed by the timeout sweep: devices can sit offline (or
         # answer NotNow) for days and then respond, and that late answer is
         # still the truth about the command.
@@ -215,7 +288,7 @@ class WebhookHandler:
         elif status in ("Error", "CommandFormatError"):
             task.error = self._error_message(response, f"{task.type} failed")
             await task.update_progress(task.progress, "failed")
-        # NotNow: device is busy; NanoMDM redelivers on its next connect — keep waiting.
+        # NotNow: device is busy; NanoMDM redelivers on its next connect -- keep waiting.
 
     async def _persist_inventory(self, task: Task, response: Dict[str, Any]):
         """Persist inventory/posture responses onto the Device row.
@@ -262,6 +335,21 @@ class WebhookHandler:
                 return
             device.installed_apps = _json_safe(apps)
 
+        elif task.type == "device_location":
+            # DeviceLocation returns top-level Latitude/Longitude/etc. Keep the
+            # last known fix under a stable key for the UI's map.
+            if response.get("Latitude") is None or response.get("Longitude") is None:
+                return
+            device.attributes = {
+                **(device.attributes or {}),
+                "DeviceLocation": {
+                    "Latitude": response.get("Latitude"),
+                    "Longitude": response.get("Longitude"),
+                    "HorizontalAccuracy": response.get("HorizontalAccuracy"),
+                    "Timestamp": _json_safe(response.get("Timestamp")),
+                },
+            }
+
         else:
             return
 
@@ -270,8 +358,8 @@ class WebhookHandler:
     # ── Per-command response handlers ─────────────────────────────────────────
     # Note on Apple MDM semantics: a device responds "Acknowledged" AFTER it has
     # executed the command (for InstallProfile that means the profile IS
-    # installed). Idle never carries a command_uuid — it's filtered upstream in
-    # _handle_acknowledge — so completion must happen on Acknowledged, not Idle.
+    # installed). Idle never carries a command_uuid -- it's filtered upstream in
+    # _handle_acknowledge -- so completion must happen on Acknowledged, not Idle.
     # NotNow means "busy, redeliver later": leave the task running.
 
     async def _handle_app_install_response(self, task: Task, response: Dict[str, Any], status: str):
@@ -282,7 +370,7 @@ class WebhookHandler:
         if status == 'Acknowledged':
             # The device accepted InstallApplication; the actual download/install
             # continues on-device (tracking that would need InstalledApplicationList
-            # polling). The MDM command itself succeeded — complete the task.
+            # polling). The MDM command itself succeeded -- complete the task.
             await task.update_progress(100, 'completed')
             if deployment:
                 deployment.status = 'installed'

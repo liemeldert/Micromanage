@@ -13,6 +13,9 @@ class Tenant(Model):
     # {"provider": "clerk", "issuer": "https://...", ...}. See controller.auth.
     auth_config = fields.JSONField(default=dict)
     dep_enabled = fields.BooleanField(default=False)
+    # Dynamic device naming: {"template": "IT-{serial}", "apply_on_enroll": bool}.
+    # Mirrored from config.yaml. See services.naming.
+    device_naming = fields.JSONField(default=dict)
     created_at = fields.DatetimeField(auto_now_add=True)
     updated_at = fields.DatetimeField(auto_now=True)
     is_active = fields.BooleanField(default=True)
@@ -52,18 +55,30 @@ class User(Model):
 class Device(Model):
     id = fields.UUIDField(pk=True)
     tenant = fields.ForeignKeyField("models.Tenant", related_name="devices")
-    udid = fields.CharField(max_length=40, unique=True)
+    # Null while a device is a pre-provisioned placeholder (known by serial, not
+    # yet enrolled -- e.g. DEP). Postgres treats NULLs as distinct so the unique
+    # index still allows many placeholders.
+    udid = fields.CharField(max_length=40, unique=True, null=True)
     serial_number = fields.CharField(max_length=20)
     device_model = fields.CharField(max_length=100)
     os_version = fields.CharField(max_length=20)
     hostname = fields.CharField(max_length=255, null=True)
+    # Managed display name -- a manual override or derived from the tenant's
+    # naming template (services.naming). Null falls back to hostname/serial.
+    name = fields.CharField(max_length=255, null=True)
+    # Lifecycle across (un)enrollments: enrolled | unenrolled | pending. Records
+    # are retained through unenroll so history/state survive a re-enroll.
+    enrollment_state = fields.CharField(max_length=20, default="enrolled")
+    # Management backend. Only "apple_mdm" today; delimits future platforms.
+    management_type = fields.CharField(max_length=30, default="apple_mdm")
     enrollment_date = fields.DatetimeField(auto_now_add=True)
+    unenrolled_at = fields.DatetimeField(null=True)
     last_seen = fields.DatetimeField(auto_now=True)
     groups = fields.JSONField(default=list)  # Computed group memberships
     installed_apps = fields.JSONField(default=dict)
     installed_profiles = fields.JSONField(default=list)
     # Everything the device reports about itself (DeviceInformation
-    # QueryResponses, SecurityInfo, ...) — kept as-is so the UI can render
+    # QueryResponses, SecurityInfo, ...) -- kept as-is so the UI can render
     # properties data-driven instead of hardcoding a column per attribute.
     attributes = fields.JSONField(default=dict)
 
@@ -92,7 +107,7 @@ class ProfileDeployment(Model):
     device = fields.ForeignKeyField("models.Device", related_name="profile_deployments")
     profile_id = fields.CharField(max_length=100)
     status = fields.CharField(max_length=20)  # pending, installing, installed, failed
-    # Hash of the profile definition as deployed — lets the sync loop detect edits
+    # Hash of the profile definition as deployed -- lets the sync loop detect edits
     # to an already-installed profile and re-push it (declared state reconciliation).
     payload_hash = fields.CharField(max_length=64, null=True)
     install_date = fields.DatetimeField(null=True)

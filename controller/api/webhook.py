@@ -41,7 +41,7 @@ async def mdm_webhook(request: Request):
         await WebhookHandler().handle_webhook(payload)
         return {"status": "success"}
     except Exception:
-        # Webhook delivery is best-effort: never return 5xx to NanoMDM — that would
+        # Webhook delivery is best-effort: never return 5xx to NanoMDM -- that would
         # just spam its logs and the device's MDM flow must not depend on the
         # controller recording the event. Log the full traceback for diagnosis.
         logger.exception(f"Error processing webhook (topic={payload.get('topic')})")
@@ -49,7 +49,7 @@ async def mdm_webhook(request: Request):
 
 
 # The webhook runs as its own process (supervisord) and needs its own DB
-# connection — it does not share the controller/API process's Tortoise init.
+# connection -- it does not share the controller/API process's Tortoise init.
 register_tortoise(
     app,
     db_url=DATABASE_URL,

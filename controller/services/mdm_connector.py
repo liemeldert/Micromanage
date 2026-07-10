@@ -87,7 +87,7 @@ class MDMConnector:
     async def install_profile(self, device_udid: str, profile_data: Dict[str, Any]) -> Dict[str, Any]:
         """Install a configuration profile on a device"""
         # Create InstallProfile command. Apple requires Payload to be a plist
-        # <data> element — plistlib emits <data> for Python bytes and handles the
+        # <data> element -- plistlib emits <data> for Python bytes and handles the
         # base64 itself. Pre-encoding to a str produced a <string> of base64,
         # which devices reject with a command Error.
         profile_plist = plistlib.dumps(profile_data)
@@ -202,6 +202,15 @@ class MDMConnector:
         logger.info(f"Queued device lock for {device_udid}: {result}")
         return result
 
+    async def set_device_name(self, device_udid: str, name: str) -> Dict[str, Any]:
+        """Rename the device (Settings command, DeviceName item). Supervised only."""
+        command_dict = {'Settings': [{'Item': 'DeviceName', 'DeviceName': name}]}
+        command_plist, command_uuid = self._create_command_plist('Settings', command_dict)
+        result = await self.enqueue_command(device_udid, command_plist, command_uuid=command_uuid)
+
+        logger.info(f"Queued rename for {device_udid} -> {name!r}: {result}")
+        return result
+
     async def erase_device(self, device_udid: str, pin: Optional[str] = None) -> Dict[str, Any]:
         """Erase the device (EraseDevice). Irreversible.
 
@@ -244,15 +253,35 @@ class MDMConnector:
         return await self.enqueue_command(device_udid, command_plist, command_uuid=command_uuid)
 
     async def enable_lost_mode(self, device_udid: str, message: str,
-                              phone_number: Optional[str] = None) -> Dict[str, Any]:
-        """Enable lost mode on device"""
-        command_dict = {
-            'Message': message,
-            'PhoneNumber': phone_number
-        }
+                              phone_number: Optional[str] = None,
+                              footnote: Optional[str] = None) -> Dict[str, Any]:
+        """Enable Managed Lost Mode on a supervised iOS device"""
+        command_dict: Dict[str, Any] = {'Message': message}
+        if phone_number:
+            command_dict['PhoneNumber'] = phone_number
+        if footnote:
+            command_dict['Footnote'] = footnote
 
         command_plist, command_uuid = self._create_command_plist('EnableLostMode', command_dict)
         return await self.enqueue_command(device_udid, command_plist, command_uuid=command_uuid)
+
+    async def disable_lost_mode(self, device_udid: str) -> Dict[str, Any]:
+        """Take a device out of Managed Lost Mode"""
+        command_plist, command_uuid = self._create_command_plist('DisableLostMode')
+        return await self.enqueue_command(device_udid, command_plist, command_uuid=command_uuid)
+
+    async def send_raw_command(self, device_udid: str, request_type: str,
+                               fields: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        """Send any Apple MDM command: RequestType + its keys, verbatim.
+
+        Backs the command catalog's generic entries -- commands that need no
+        payload construction beyond mapping parameters onto plist keys.
+        """
+        command_plist, command_uuid = self._create_command_plist(request_type, fields or {})
+        result = await self.enqueue_command(device_udid, command_plist, command_uuid=command_uuid)
+
+        logger.info(f"Queued {request_type} for {device_udid}: {result}")
+        return result
 
     async def close(self):
         """Close the HTTP client"""

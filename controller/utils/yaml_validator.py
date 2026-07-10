@@ -10,10 +10,13 @@ class Condition(BaseModel):
     type: str
     operator: str
     value: Union[str, List[str]]
+    # Inverts the condition ("device NOT IN group", "model NOT equals ...").
+    negate: Optional[bool] = False
 
     @validator('type')
     def validate_type(cls, v):
-        valid_types = ['device_model', 'serial_number', 'hostname', 'os_version', 'enrollment_date']
+        valid_types = ['device_model', 'serial_number', 'hostname', 'os_version',
+                       'enrollment_date', 'group', 'platform']
         if v not in valid_types:
             raise ValueError(f"Invalid condition type: {v}. Must be one of {valid_types}")
         return v
@@ -26,18 +29,103 @@ class Condition(BaseModel):
             'serial_number': ['in', 'equals'],
             'hostname': ['regex', 'equals', 'contains'],
             'os_version': ['gte', 'gt', 'lte', 'lt', 'equals'],
-            'enrollment_date': ['after', 'before', 'equals']
+            'enrollment_date': ['after', 'before', 'equals'],
+            # Membership in other group(s); combine with negate for NOT IN.
+            'group': ['in'],
+            # Membership in a device family (Mac/iPhone/...); premade options.
+            'platform': ['in'],
         }
 
         if condition_type and v not in valid_operators.get(condition_type, []):
             raise ValueError(f"Invalid operator '{v}' for condition type '{condition_type}'")
         return v
 
+    @validator('value')
+    def validate_platform_value(cls, v, values):
+        if values.get('type') != 'platform':
+            return v
+        from controller.services.scoping import PLATFORM_CATEGORIES
+        vals = v if isinstance(v, list) else [v]
+        unknown = [x for x in vals if x not in PLATFORM_CATEGORIES]
+        if unknown:
+            raise ValueError(
+                f"Unknown platform(s) {unknown}. Valid: {PLATFORM_CATEGORIES}"
+            )
+        return v
+
+
+def _condition_group_refs(condition: Condition) -> List[str]:
+    """Group names a group-type condition references (empty for other types)."""
+    if condition.type != 'group':
+        return []
+    value = condition.value
+    return [str(n) for n in (value if isinstance(value, list) else [value]) if n]
+
+
+class Rollout(BaseModel):
+    """Gradual (wave-based) rollout gate. See services.scoping.
+
+    ``start`` is auto-filled by the API on save when omitted; validation only
+    requires it to be parseable when present.
+    """
+    percent: int
+    interval_hours: float = 24
+    skip_weekends: Optional[bool] = False
+    start: Optional[str] = None
+
+    @validator('percent')
+    def validate_percent(cls, v):
+        if not (1 <= v <= 100):
+            raise ValueError("rollout.percent must be between 1 and 100")
+        return v
+
+    @validator('interval_hours')
+    def validate_interval(cls, v):
+        # Floor at 1h: sub-hour device rollouts aren't a real use case, and a
+        # tiny interval can exhaust the wave-walk's iteration backstop before it
+        # clears a skipped weekend (freezing coverage). See services.scoping.
+        if v < 1:
+            raise ValueError("rollout.interval_hours must be at least 1")
+        if v > 24 * 365:
+            raise ValueError("rollout.interval_hours is unreasonably large (max 1 year)")
+        return v
+
+    @validator('start')
+    def validate_start(cls, v):
+        if v is None:
+            return v
+        from datetime import datetime
+        try:
+            datetime.fromisoformat(str(v))
+        except ValueError:
+            raise ValueError(f"rollout.start is not an ISO timestamp: {v!r}")
+        return v
+
+
+class DeviceNaming(BaseModel):
+    """A naming template scope (per-group here; the tenant scope mirrors the same
+    shape from config.yaml). See controller/services/naming.py."""
+    template: str
+    apply_on_enroll: Optional[bool] = False
+
+    @validator('template')
+    def validate_template(cls, v):
+        if not (v or '').strip():
+            raise ValueError("device_naming.template cannot be empty")
+        return v
+
 
 class Group(BaseModel):
     name: str
     description: Optional[str]
-    conditions: List[Condition]
+    conditions: Optional[List[Condition]] = []
+    # Optional per-group naming template: a device in this group derives its
+    # managed name from here (first matching group wins; see services.naming).
+    device_naming: Optional[DeviceNaming] = None
+    # Cherry-picked serials: always members (include) / never members (exclude
+    # -- wins over everything). Enables hand-picked test cohorts.
+    include_devices: Optional[List[str]] = []
+    exclude_devices: Optional[List[str]] = []
 
     @validator('name')
     def validate_name(cls, v):
@@ -52,6 +140,9 @@ class AppVersion(BaseModel):
     sha256: str  # required: device verifies package integrity against this
     groups: List[str]
     conditions: Optional[List[Condition]] = []
+    include_devices: Optional[List[str]] = []
+    exclude_devices: Optional[List[str]] = []
+    rollout: Optional[Rollout] = None
     install_options: Optional[Dict[str, Any]] = {}
 
     @validator('sha256')
@@ -85,6 +176,13 @@ class Profile(BaseModel):
     # Target platforms (iOS | macOS | tvOS); empty/None means all.
     platforms: Optional[List[str]] = None
     groups: Optional[List[str]] = []
+    # Unified scope extensions (see services.scoping): all conditions must
+    # match; include/exclude cherry-pick serials (exclude wins); rollout gates
+    # scoped devices into gradual waves.
+    conditions: Optional[List[Condition]] = []
+    include_devices: Optional[List[str]] = []
+    exclude_devices: Optional[List[str]] = []
+    rollout: Optional[Rollout] = None
     dep_profile: Optional[bool] = False
     # A profile may carry a single payload (legacy) or a list of payloads.
     payload: Optional[Dict[str, Any]] = None
@@ -198,20 +296,37 @@ class YAMLValidator:
                     self.errors.append(f"Duplicate group name: {group.name}")
                 group_names.add(group.name)
 
-                # An empty conditions list matches NO devices — surface it, since
-                # a profile scoped to such a group silently deploys nowhere.
-                if not group.conditions:
+                # With neither conditions nor cherry-picked devices, a group
+                # matches NO devices -- surface it, since a profile scoped to
+                # such a group silently deploys nowhere.
+                if not group.conditions and not group.include_devices:
                     self.warnings.append(
-                        f"Group '{group.name}' has no conditions and will match no devices"
+                        f"Group '{group.name}' has no conditions or included devices "
+                        "and will match no devices"
                     )
 
-                # Validate regex patterns
-                for condition in group.conditions:
-                    if condition.operator == 'regex':
-                        try:
-                            re.compile(condition.value)
-                        except re.error as e:
-                            self.errors.append(f"Invalid regex in group '{group.name}': {e}")
+                self._check_conditions(f"group '{group.name}'", group.conditions or [])
+
+                # Warn (don't fail) on naming-template variables the controller
+                # can't resolve -- a typo like {seriall} would silently render to
+                # nothing. Not an error: forward-compat with future variables.
+                if group.device_naming:
+                    from controller.services.variables import (
+                        is_self_referential,
+                        unknown_variables,
+                    )
+                    for var in unknown_variables(group.device_naming.template):
+                        self.warnings.append(
+                            f"Group '{group.name}' naming template references unknown "
+                            f"variable '{{{var}}}'"
+                        )
+                    if is_self_referential(group.device_naming.template):
+                        self.warnings.append(
+                            f"Group '{group.name}' naming template uses {{hostname}}; the "
+                            "managed name is pushed to the device as its hostname, so "
+                            "re-deriving can compound the name. Prefer a stable "
+                            "identifier like {serial}."
+                        )
 
                 groups.append(group)
 
@@ -221,7 +336,68 @@ class YAMLValidator:
         if not groups:
             self.warnings.append("No groups defined")
 
+        # Group-membership conditions: referenced groups must exist, and the
+        # reference graph must be acyclic (a cycle would make membership
+        # undefined; the runtime treats it as no-match, but reject it here).
+        names = {g.name for g in groups}
+        edges: Dict[str, List[str]] = {}
+        for g in groups:
+            refs = []
+            for condition in g.conditions or []:
+                for ref in _condition_group_refs(condition):
+                    if ref not in names:
+                        self.errors.append(
+                            f"Group '{g.name}' condition references unknown group: {ref}"
+                        )
+                    refs.append(ref)
+            edges[g.name] = refs
+
+        # Cycle detection (iterative DFS, 3-color).
+        WHITE, GRAY, BLACK = 0, 1, 2
+        color = {n: WHITE for n in edges}
+        for root in edges:
+            if color[root] != WHITE:
+                continue
+            stack = [(root, iter(edges[root]))]
+            color[root] = GRAY
+            while stack:
+                node, it = stack[-1]
+                advanced = False
+                for ref in it:
+                    if ref not in color:
+                        continue  # unknown ref already reported above
+                    if color[ref] == GRAY:
+                        self.errors.append(
+                            f"Group membership cycle detected involving '{node}' and '{ref}'"
+                        )
+                        continue
+                    if color[ref] == WHITE:
+                        color[ref] = GRAY
+                        stack.append((ref, iter(edges[ref])))
+                        advanced = True
+                        break
+                if not advanced:
+                    color[node] = BLACK
+                    stack.pop()
+
         return groups
+
+    def _check_conditions(self, owner: str, conditions: List[Condition],
+                          group_names: Optional[set] = None) -> None:
+        """Shared per-condition checks: regex compiles; group refs exist (when
+        ``group_names`` is supplied -- groups.yaml defers that to a graph pass)."""
+        for condition in conditions:
+            if condition.operator == 'regex' and isinstance(condition.value, str):
+                try:
+                    re.compile(condition.value)
+                except re.error as e:
+                    self.errors.append(f"Invalid regex in {owner}: {e}")
+            if group_names is not None:
+                for ref in _condition_group_refs(condition):
+                    if ref not in group_names:
+                        self.errors.append(
+                            f"{owner} condition references unknown group: {ref}"
+                        )
 
     def _validate_apps(self, groups: Optional[List[Group]]) -> Optional[List[App]]:
         """Validate apps.yaml"""
@@ -247,6 +423,17 @@ class YAMLValidator:
                     for group in version.groups:
                         if group not in group_names:
                             self.errors.append(f"App '{app.id}' references unknown group: {group}")
+
+                    self._check_conditions(
+                        f"app '{app.id}' version {version.version}",
+                        version.conditions or [], group_names,
+                    )
+                    if not version.groups and not (version.conditions or []) \
+                            and not (version.include_devices or []):
+                        self.warnings.append(
+                            f"App '{app.id}' version {version.version} has no groups, "
+                            "conditions or included devices and will match no devices"
+                        )
 
                     # Validate S3 keys
                     if not version.s3_key:
@@ -285,6 +472,19 @@ class YAMLValidator:
                 for group in profile.groups or []:
                     if group not in group_names:
                         self.errors.append(f"Profile '{profile.id}' references unknown group: {group}")
+
+                self._check_conditions(
+                    f"profile '{profile.id}'", profile.conditions or [], group_names,
+                )
+                is_managed = (profile.type or 'configuration') == 'configuration' \
+                    and not profile.dep_profile
+                if is_managed and not (profile.groups or []) \
+                        and not (profile.conditions or []) \
+                        and not (profile.include_devices or []):
+                    self.warnings.append(
+                        f"Profile '{profile.id}' has no groups, conditions or included "
+                        "devices and will deploy to no devices"
+                    )
 
                 # Validate payload (single or list)
                 if not profile.payload and not profile.payloads and profile.type != "enrollment":

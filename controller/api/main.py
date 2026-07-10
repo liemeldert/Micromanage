@@ -1,4 +1,5 @@
 import asyncio
+import json
 import logging
 import os
 import re
@@ -230,7 +231,7 @@ async def discover_login(request: DiscoverRequest, http_request: Request):
     Deliberate tradeoff: this necessarily reveals whether an email has access
     (that's the point of an email-first flow). It is throttled with the same
     limiter as login so it can't be used for bulk enumeration, and it returns
-    only what the sign-in flow needs — never role or user details.
+    only what the sign-in flow needs -- never role or user details.
     """
     email = request.email.strip().lower()
     if not email or not login_limiter.check(f"discover:{email}"):
@@ -399,7 +400,7 @@ async def get_yaml_config(
 ):
     """Get YAML configuration by type (groups, apps, profiles, config).
 
-    With ``raw=true`` the response is the YAML document itself (text/plain) —
+    With ``raw=true`` the response is the YAML document itself (text/plain) --
     used by the YAML viewer. config.yaml is re-rendered after credential
     redaction in raw mode too, so S3 secrets never leave the server.
     """
@@ -416,7 +417,7 @@ async def get_yaml_config(
         text = f.read()
     config = yaml.safe_load(text) or {}
 
-    # config.yaml embeds tenant.s3 which may carry credentials — never return them.
+    # config.yaml embeds tenant.s3 which may carry credentials -- never return them.
     redacted = False
     if config_type == "config" and isinstance(config.get("tenant"), dict):
         if "s3" in config["tenant"]:
@@ -432,6 +433,72 @@ async def get_yaml_config(
     return config
 
 
+# ── Config history ─────────────────────────────────────────────────────────
+# Every successful config save snapshots the PREVIOUS document so breaking
+# changes can be recovered from within the editor. Bounded per config type.
+_HISTORY_LIMIT = 50
+_HISTORY_ID_RE = re.compile(r"^\d{8}T\d{6,12}Z$")
+
+
+def _history_dir(tenant_id: str, config_type: str) -> Path:
+    return _tenant_dir(tenant_id) / "_history" / config_type
+
+
+def _snapshot_config_history(tenant_id: str, config_type: str, user: str) -> None:
+    """Snapshot the current on-disk config before it is overwritten.
+
+    Best-effort: a history failure must never block the save itself.
+    """
+    src = _tenant_dir(tenant_id) / f"{config_type}.yaml"
+    if not src.exists():
+        return
+    try:
+        hdir = _history_dir(tenant_id, config_type)
+        hdir.mkdir(parents=True, exist_ok=True)
+        now = datetime.now(timezone.utc)
+        vid = now.strftime("%Y%m%dT%H%M%S%fZ")
+        (hdir / f"{vid}.json").write_text(json.dumps({
+            "id": vid,
+            "saved_at": now.isoformat(),
+            "user": user,
+            "content": src.read_text(),
+        }))
+        # Prune oldest beyond the cap (ids are lexicographically time-ordered).
+        entries = sorted(hdir.glob("*.json"))
+        for old in entries[:-_HISTORY_LIMIT]:
+            old.unlink()
+    except (OSError, ValueError):
+        # Best-effort: a history failure (incl. a non-UTF-8 outgoing file, which
+        # raises UnicodeDecodeError -- a ValueError) must NEVER block the save.
+        logger.exception("config history snapshot failed for %s/%s", tenant_id, config_type)
+
+
+def _autofill_rollout_starts(config_type: str, config_data: Dict[str, Any]) -> None:
+    """Stamp ``rollout.start`` (now, UTC) on any rollout block that lacks one.
+
+    Keeps the runtime stateless: wave math needs a fixed start, and authors
+    shouldn't have to hand-write timestamps. An existing start is never touched
+    (edit a rollout's start -- or clear it -- to restart its waves).
+    """
+    now_iso = datetime.now(timezone.utc).isoformat()
+
+    def fill(obj: Any) -> None:
+        if not isinstance(obj, dict):
+            return
+        rollout = obj.get("rollout")
+        if isinstance(rollout, dict) and rollout and not rollout.get("start"):
+            rollout["start"] = now_iso
+
+    if config_type == "profiles":
+        for profile in config_data.get("profiles") or []:
+            fill(profile)
+    elif config_type == "apps":
+        for app_entry in config_data.get("apps") or []:
+            if isinstance(app_entry, dict):
+                for version in app_entry.get("versions") or []:
+                    fill(version)
+
+
 @app.put("/api/v1/config/{config_type}")
 async def update_yaml_config(
         config_type: str,
@@ -441,17 +508,25 @@ async def update_yaml_config(
     """Update YAML configuration.
 
     Validates the SUBMITTED data (not the existing on-disk files) by validating
-    it in an isolated copy of the tenant config dir, and only commits — atomically
-    — when validation passes.
+    it in an isolated copy of the tenant config dir, and only commits -- atomically
+    -- when validation passes. The previous document is snapshotted to history.
     """
     if config_type not in ["groups", "apps", "profiles"]:
         raise HTTPException(status_code=400, detail="Invalid config type")
+    return await _apply_config_update(principal, config_type, config_data)
 
+
+async def _apply_config_update(
+        principal: Principal, config_type: str, config_data: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Shared validate → snapshot → write → reconcile path (save and restore)."""
     tenant = principal.tenant
     tenant_dir = _tenant_dir(tenant.id)
+    # New rollout blocks get their wave clock started at save time.
+    _autofill_rollout_starts(config_type, config_data)
     yaml_path = tenant_dir / f"{config_type}.yaml"
     # Tenants created via the admin console / bootstrap exist in the DB but may have
-    # no on-disk config dir yet — scaffold it (and a minimal config.yaml) lazily so
+    # no on-disk config dir yet -- scaffold it (and a minimal config.yaml) lazily so
     # the first save works instead of 404-ing.
     try:
         tenant_dir.mkdir(parents=True, exist_ok=True)
@@ -469,7 +544,7 @@ async def update_yaml_config(
             status_code=500,
             detail=(
                 f"Server cannot write the config directory ({tenant_dir}): {exc}. "
-                "The controller runs as uid 1000 — ensure the yaml-configs volume is "
+                "The controller runs as uid 1000 -- ensure the yaml-configs volume is "
                 "owned by 1000:1000 (the yaml-init service in docker-compose.prod.yml "
                 "handles this)."
             ),
@@ -505,6 +580,9 @@ async def update_yaml_config(
             status_code=400, detail={"errors": errors, "warnings": warnings}
         )
 
+    # Snapshot the outgoing document so this save can be rolled back.
+    _snapshot_config_history(tenant.id, config_type, principal.email)
+
     try:
         _atomic_write_yaml(yaml_path, config_data)
     except OSError as exc:
@@ -516,7 +594,7 @@ async def update_yaml_config(
 
     # Reconcile reactively so the change produces tasks now, not at the next
     # scheduled sync (which remains the periodic safety net). _spawn keeps a
-    # strong reference — bare create_task handles can be GC'd mid-run.
+    # strong reference -- bare create_task handles can be GC'd mid-run.
     from controller.services.reconciler import reconcile_tenant, _spawn
 
     async def _reconcile_after_save(tenant_id: str):
@@ -543,6 +621,91 @@ async def validate_yaml_configs(principal: Principal = Depends(get_current_princ
     return {"valid": valid, "errors": errors, "warnings": warnings}
 
 
+def _load_history_entry(tenant_id: str, config_type: str, version_id: str) -> Dict[str, Any]:
+    if config_type not in ["groups", "apps", "profiles"]:
+        raise HTTPException(status_code=400, detail="Invalid config type")
+    if not _HISTORY_ID_RE.match(version_id):
+        raise HTTPException(status_code=400, detail="Invalid version id")
+    path = _history_dir(tenant_id, config_type) / f"{version_id}.json"
+    if not path.exists():
+        raise HTTPException(status_code=404, detail="Version not found")
+    try:
+        entry = json.loads(path.read_text())
+    except (OSError, ValueError):
+        logger.exception("unreadable history entry %s", path)
+        raise HTTPException(status_code=500, detail="History entry is unreadable")
+    if not isinstance(entry, dict):  # tampered/corrupt: valid JSON but not an object
+        raise HTTPException(status_code=500, detail="History entry is malformed")
+    return entry
+
+
+@app.get("/api/v1/config/{config_type}/history")
+async def list_config_history(
+        config_type: str,
+        principal: Principal = Depends(get_current_principal),
+):
+    """Previous versions of a config document (newest first)."""
+    if config_type not in ["groups", "apps", "profiles"]:
+        raise HTTPException(status_code=400, detail="Invalid config type")
+    hdir = _history_dir(principal.tenant.id, config_type)
+    versions = []
+    if hdir.exists():
+        for path in sorted(hdir.glob("*.json"), reverse=True):
+            try:
+                entry = json.loads(path.read_text())
+                if not isinstance(entry, dict):
+                    raise ValueError("not a JSON object")
+                versions.append({
+                    "id": entry.get("id") or path.stem,
+                    "saved_at": entry.get("saved_at"),
+                    "user": entry.get("user"),
+                    "size": len(entry.get("content") or ""),
+                })
+            except (OSError, ValueError):
+                logger.warning("skipping unreadable history entry %s", path)
+    return {"versions": versions}
+
+
+@app.get("/api/v1/config/{config_type}/history/{version_id}")
+async def get_config_history_version(
+        config_type: str,
+        version_id: str,
+        principal: Principal = Depends(get_current_principal),
+):
+    """One historical config document, including its full YAML content."""
+    entry = _load_history_entry(principal.tenant.id, config_type, version_id)
+    return {
+        "id": entry.get("id") or version_id,
+        "saved_at": entry.get("saved_at"),
+        "user": entry.get("user"),
+        "content": entry.get("content") or "",
+    }
+
+
+@app.post("/api/v1/config/{config_type}/history/{version_id}/restore")
+async def restore_config_history_version(
+        config_type: str,
+        version_id: str,
+        principal: Principal = Depends(get_current_principal),
+):
+    """Restore a historical version.
+
+    Runs the exact same validate → snapshot → write → reconcile path as a
+    normal save (the current document is snapshotted first, so a restore is
+    itself undoable).
+    """
+    entry = _load_history_entry(principal.tenant.id, config_type, version_id)
+    try:
+        config_data = yaml.safe_load(entry.get("content") or "") or {}
+    except yaml.YAMLError as exc:
+        raise HTTPException(status_code=400, detail=f"Stored version is not valid YAML: {exc}")
+    if not isinstance(config_data, dict):
+        raise HTTPException(status_code=400, detail="Stored version is not a YAML mapping")
+    result = await _apply_config_update(principal, config_type, config_data)
+    result["message"] = f"{config_type} configuration restored from {version_id}"
+    return result
+
+
 @app.post("/api/v1/sync")
 async def sync_now(principal: Principal = Depends(get_current_principal)):
     """Reconcile this tenant's declared YAML state against its devices now.
@@ -557,7 +720,115 @@ async def sync_now(principal: Principal = Depends(get_current_principal)):
     return {"message": "Sync complete", **summary}
 
 
+# ── Map tiles ─────────────────────────────────────────────────────────────────
+# Same-origin proxy for OpenStreetMap raster tiles so the device-location map
+# works under the app's strict CSP (img-src 'self' blob:) WITHOUT the browser
+# ever contacting a third-party tile CDN -- device locations don't leak to OSM,
+# only the controller does (and it caches). Authenticated; the browser fetches
+# tiles with its bearer token and renders them as blob: images.
+from collections import OrderedDict
+
+_TILE_CACHE: "OrderedDict[str, bytes]" = OrderedDict()
+_TILE_CACHE_MAX = 4096
+_tile_client: Optional[Any] = None
+
+
+def _get_tile_client():
+    global _tile_client
+    if _tile_client is None:
+        import httpx
+        _tile_client = httpx.AsyncClient(
+            timeout=10.0,
+            # OSM's tile usage policy requires an identifying User-Agent.
+            headers={"User-Agent": "MicromanageIAC/1.0 (self-hosted MDM; device location map)"},
+        )
+    return _tile_client
+
+
+@app.get("/api/v1/map/tile/{z}/{x}/{y}")
+async def map_tile(z: int, x: int, y: int, principal: Principal = Depends(get_current_principal)):
+    """Proxy a single OSM raster tile (cached). Coordinates are strictly bounded
+    to the standard slippy-map range, so this can only ever fetch public tiles."""
+    if not (0 <= z <= 19):
+        raise HTTPException(status_code=404, detail="bad zoom")
+    n = 1 << z
+    if not (0 <= x < n and 0 <= y < n):
+        raise HTTPException(status_code=404, detail="tile out of range")
+
+    key = f"{z}/{x}/{y}"
+    data = _TILE_CACHE.get(key)
+    if data is None:
+        try:
+            resp = await _get_tile_client().get(f"https://tile.openstreetmap.org/{z}/{x}/{y}.png")
+            resp.raise_for_status()
+            data = resp.content
+        except Exception as exc:
+            logger.warning(f"tile fetch failed for {key}: {exc}")
+            raise HTTPException(status_code=502, detail="tile fetch failed")
+        _TILE_CACHE[key] = data
+        _TILE_CACHE.move_to_end(key)
+        while len(_TILE_CACHE) > _TILE_CACHE_MAX:
+            _TILE_CACHE.popitem(last=False)
+
+    return Response(content=data, media_type="image/png",
+                    headers={"Cache-Control": "private, max-age=86400"})
+
+
 # Device Management
+@app.get("/api/v1/commands/catalog")
+async def get_command_catalog(principal: Principal = Depends(get_current_principal)):
+    """All device commands this controller can send, with role-aware metadata.
+
+    The UI renders its command menus from this catalog, so newly added
+    commands appear without frontend changes (unknown ones get a generic
+    parameter form).
+    """
+    from controller.services.command_catalog import catalog_for_role
+
+    return {"commands": catalog_for_role(principal.is_admin)}
+
+
+@app.get("/api/v1/naming/variables")
+async def get_naming_variables(principal: Principal = Depends(get_current_principal)):
+    """The device-state variables usable in naming templates (group/tenant).
+
+    A single server-published registry so the naming-template editors (groups
+    UI, rename helper) stay in sync with what the controller can actually
+    resolve. See controller/services/variables.py.
+    """
+    from controller.services.variables import VARIABLE_SPECS
+
+    return {"variables": VARIABLE_SPECS}
+
+
+def _device_summary(device: Device) -> Dict[str, Any]:
+    """Identity + lifecycle fields shared by the list and detail responses."""
+    from controller.services.naming import display_name
+    return {
+        "id": str(device.id),
+        "udid": device.udid,
+        "name": device.name,
+        "display_name": display_name(device),
+        "serial_number": device.serial_number,
+        "device_model": device.device_model,
+        "os_version": device.os_version,
+        "hostname": device.hostname,
+        "groups": device.groups,
+        "enrollment_state": device.enrollment_state,
+        "management_type": device.management_type,
+        "enrollment_date": device.enrollment_date,
+        "unenrolled_at": device.unenrolled_at,
+        "last_seen": device.last_seen,
+    }
+
+
+class PlaceholderDeviceCreate(BaseModel):
+    serial_number: str
+    device_model: Optional[str] = None
+    management_type: str = "apple_mdm"
+    groups: List[str] = []
+
+
 @app.get("/api/v1/devices")
 async def list_devices(
         skip: int = Query(0, ge=0),
@@ -565,13 +836,16 @@ async def list_devices(
         group: Optional[str] = None,
         model: Optional[str] = None,
         search: Optional[str] = None,
+        state: Optional[str] = Query(None, description="enrolled | unenrolled | pending"),
         principal: Principal = Depends(get_current_principal),
 ):
-    """List all devices with optional filtering"""
+    """List devices (all lifecycle states by default) with optional filtering."""
     tenant = principal.tenant
 
     query = Device.filter(tenant=tenant)
 
+    if state in ("enrolled", "unenrolled", "pending"):
+        query = query.filter(enrollment_state=state)
     if group:
         query = query.filter(groups__contains=[group])
     if model:
@@ -586,26 +860,77 @@ async def list_devices(
             | Q(udid__icontains=search)
         )
 
+    # Enrolled first, then most-recently-seen -- keeps active devices on top even
+    # when unenrolled/pending records are shown.
     total = await query.count()
-    devices = await query.offset(skip).limit(limit).all()
+    devices = (
+        await query.order_by("enrollment_state", "-last_seen").offset(skip).limit(limit).all()
+    )
+
+    # Per-state counts so the UI can label its filter without extra round-trips.
+    from tortoise.functions import Count
+    counts_raw = (
+        await Device.filter(tenant=tenant)
+        .annotate(count=Count("id")).group_by("enrollment_state")
+        .values("enrollment_state", "count")
+    )
+    counts = {c["enrollment_state"]: c["count"] for c in counts_raw}
 
     return {
         "total": total,
-        "devices": [
-            {
-                "id": str(device.id),
-                "udid": device.udid,
-                "serial_number": device.serial_number,
-                "device_model": device.device_model,
-                "os_version": device.os_version,
-                "hostname": device.hostname,
-                "groups": device.groups,
-                "enrollment_date": device.enrollment_date,
-                "last_seen": device.last_seen,
-            }
-            for device in devices
-        ],
+        "counts": {
+            "all": sum(counts.values()),
+            "enrolled": counts.get("enrolled", 0),
+            "unenrolled": counts.get("unenrolled", 0),
+            "pending": counts.get("pending", 0),
+        },
+        "devices": [_device_summary(device) for device in devices],
     }
+
+
+@app.post("/api/v1/devices", status_code=201)
+async def create_placeholder_device(
+        body: PlaceholderDeviceCreate,
+        admin: Principal = Depends(require_admin),
+):
+    """Pre-provision a device by serial before it enrolls (e.g. DEP).
+
+    Its pre-defined group membership is applied when the physical device
+    enrolls and is adopted by serial. Admin only.
+    """
+    tenant = admin.tenant
+    serial = body.serial_number.strip()
+    if not serial:
+        raise HTTPException(status_code=400, detail="serial_number is required")
+    if len(serial) > 20:
+        raise HTTPException(status_code=400, detail="serial_number too long (max 20 characters)")
+    if body.management_type not in ("apple_mdm",):
+        raise HTTPException(status_code=400, detail="unsupported management_type")
+
+    existing = await Device.filter(tenant=tenant, serial_number=serial).first()
+    if existing:
+        raise HTTPException(
+            status_code=409,
+            detail=f"A device with serial {serial} already exists ({existing.enrollment_state})",
+        )
+
+    from tortoise.exceptions import IntegrityError
+    try:
+        device = await Device.create(
+            tenant=tenant,
+            udid=None,
+            serial_number=serial,
+            device_model=body.device_model or "",
+            os_version="",
+            hostname=None,
+            enrollment_state="pending",
+            management_type=body.management_type,
+            groups=body.groups or [],
+        )
+    except IntegrityError:
+        # Lost a race with a concurrent create (unique serial index).
+        raise HTTPException(status_code=409, detail=f"A device with serial {serial} already exists")
+    return _device_summary(device)
 
 
 @app.get("/api/v1/devices/{device_id}")
@@ -622,19 +947,29 @@ async def get_device_details(device_id: str, principal: Principal = Depends(get_
     profiles = await ProfileDeployment.filter(device=device).all()
     tasks = await Task.filter(device=device).order_by("-created_at").limit(10).all()
 
+    # Name the governing naming template would produce for this device -- offered
+    # in the rename UI as a one-click suggestion. Group-scoped first (first
+    # matching group with a template, in config order), else the tenant template.
+    # Purely advisory: fail soft so a bad groups.yaml regex can't 500 the page.
+    suggested_name = None
+    try:
+        from controller.services.group_manager import GroupManager
+        from controller.services.naming import suggested_name_for
+        from controller.services.tenant_config import load_groups
+        groups_config = load_groups(tenant.id)
+        group_names = GroupManager(tenant.id).evaluate_device_groups(device, groups_config)
+        suggested_name = suggested_name_for(
+            device, tenant.device_naming or {}, groups_config, group_names
+        )
+    except Exception:
+        logger.exception("suggested_name computation failed for device %s", device_id)
+
     return {
         "device": {
-            "id": str(device.id),
-            "udid": device.udid,
-            "serial_number": device.serial_number,
-            "device_model": device.device_model,
-            "os_version": device.os_version,
-            "hostname": device.hostname,
-            "groups": device.groups,
-            "enrollment_date": device.enrollment_date,
-            "last_seen": device.last_seen,
+            **_device_summary(device),
+            "suggested_name": suggested_name,
             # Everything the device has reported about itself (DeviceInformation
-            # QueryResponses + SecurityInfo) — rendered data-driven by the UI.
+            # QueryResponses + SecurityInfo) -- rendered data-driven by the UI.
             "attributes": device.attributes or {},
         },
         # Inventory as reported BY THE DEVICE (ProfileList / InstalledApplicationList),
@@ -662,6 +997,60 @@ async def get_device_details(device_id: str, principal: Principal = Depends(get_
     }
 
 
+class DeviceRename(BaseModel):
+    name: str
+
+
+@app.patch("/api/v1/devices/{device_id}/name")
+async def rename_device(
+        device_id: str,
+        body: DeviceRename,
+        principal: Principal = Depends(get_current_principal),
+):
+    """Set a device's managed name and, if it's enrolled, push the rename to the
+    device (Apple Settings/DeviceName -- supervised devices only)."""
+    tenant = principal.tenant
+    device = await Device.get_or_none(id=device_id, tenant=tenant)
+    if not device:
+        raise HTTPException(status_code=404, detail="Device not found")
+
+    name = body.name.strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="Name cannot be empty")
+    if len(name) > 255:
+        raise HTTPException(status_code=400, detail="Name too long (max 255 characters)")
+
+    device.name = name
+    await device.save(update_fields=["name"])
+
+    # Push to the physical device when it has an active MDM channel. Renaming
+    # actually takes effect on supervised devices; the command is a no-op error
+    # otherwise, surfaced as a failed task.
+    task_id = None
+    if device.enrollment_state == "enrolled" and device.udid:
+        task = await task_manager.create_task(
+            tenant=tenant, task_type="set_name",
+            description=f"Rename {device.serial_number} to {name!r}",
+            device=device, user=principal.email, details={},
+        )
+        mdm_connector = MDMConnector()
+        try:
+            result = await mdm_connector.set_device_name(device.udid, name)
+            task.details["command_uuid"] = result.get("command_uuid")
+            task.status = "running"
+            await task.save()
+            task_id = str(task.id)
+        except Exception as exc:
+            task.status = "failed"
+            task.error = str(exc)
+            await task.save()
+            logger.error(f"Rename push failed for {device.udid}: {exc}")
+        finally:
+            await mdm_connector.close()
+
+    return {"device": _device_summary(device), "pushed": task_id is not None, "task_id": task_id}
+
+
 @app.post("/api/v1/devices/{device_id}/command")
 async def send_device_command(
         device_id: str,
@@ -685,6 +1074,12 @@ async def send_device_command(
     device = await Device.get_or_none(id=device_id, tenant=tenant)
     if not device:
         raise HTTPException(status_code=404, detail="Device not found")
+    if device.enrollment_state != "enrolled":
+        # Unenrolled/pending devices have no active MDM channel.
+        raise HTTPException(
+            status_code=409,
+            detail=f"Device is {device.enrollment_state}; commands can only be sent to enrolled devices",
+        )
 
     mdm_connector = MDMConnector()
 
@@ -737,6 +1132,14 @@ async def send_device_command(
             return {"task_id": str(task.id), "message": "App removal started"}
 
         # Direct, immediately-issued commands: record an audit Task, then send.
+        from controller.services.command_catalog import (
+            get_command, build_generic_fields, secret_param_names,
+        )
+
+        entry = get_command(command.command_type)
+        if entry is None:
+            raise HTTPException(status_code=400, detail="Invalid command type")
+
         params = command.parameters or {}
         pin = params.get("pin")
         if command.command_type in ("lock", "erase"):
@@ -749,14 +1152,16 @@ async def send_device_command(
                     status_code=400,
                     detail="Macs require a 6-digit PIN for this command (needed to unlock afterwards)",
                 )
+        if command.command_type == "enable_lost_mode" and not params.get("message"):
+            raise HTTPException(status_code=400, detail="Lost Mode requires a lock screen message")
 
-        direct_dispatch = {
-            # Inventory / posture refreshes (any role)
+        # Commands with bespoke payload handling; everything else in the catalog
+        # is generic -- RequestType + plist-mapped parameters, passed through.
+        special_dispatch = {
             "refresh_info": lambda: mdm_connector.get_device_info(device.udid),
             "security_info": lambda: mdm_connector.get_security_info(device.udid),
             "profile_list": lambda: mdm_connector.get_profile_list(device.udid),
             "app_list": lambda: mdm_connector.get_installed_apps(device.udid),
-            # Power / security actions (admin-only via DESTRUCTIVE_COMMANDS)
             "restart": lambda: mdm_connector.restart_device(device.udid),
             "shutdown": lambda: mdm_connector.shutdown_device(device.udid),
             "clear_passcode": lambda: mdm_connector.clear_passcode(device.udid),
@@ -765,13 +1170,27 @@ async def send_device_command(
                 phone_number=params.get("phone_number"),
             ),
             "erase": lambda: mdm_connector.erase_device(device.udid, pin=pin),
+            "enable_lost_mode": lambda: mdm_connector.enable_lost_mode(
+                device.udid, message=str(params.get("message") or ""),
+                phone_number=params.get("phone_number"), footnote=params.get("footnote"),
+            ),
+            "disable_lost_mode": lambda: mdm_connector.disable_lost_mode(device.udid),
         }
-        handler = direct_dispatch.get(command.command_type)
-        if handler is None:
-            raise HTTPException(status_code=400, detail="Invalid command type")
 
-        # Audit trail: record who ran what — but never persist PINs/secrets.
-        audit_details = {k: v for k, v in params.items() if k not in ("pin",)}
+        handler = special_dispatch.get(command.command_type)
+        if handler is None:
+            request_type = entry.get("request_type")
+            if not request_type:
+                raise HTTPException(status_code=400, detail="Invalid command type")
+            try:
+                fields = build_generic_fields(entry, params)
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=str(exc))
+            handler = lambda: mdm_connector.send_raw_command(device.udid, request_type, fields)  # noqa: E731
+
+        # Audit trail: record who ran what -- but never persist PINs/passwords.
+        redacted = secret_param_names(entry) | {"pin"}
+        audit_details = {k: v for k, v in params.items() if k not in redacted}
         task = await task_manager.create_task(
             tenant=tenant,
             task_type=command.command_type,
@@ -859,7 +1278,7 @@ async def cancel_task(task_id: str, principal: Principal = Depends(get_current_p
 
     Cancellation is DB-backed: tasks may live in another process (sync service)
     or be awaiting a device response, so there is often no in-memory handle to
-    cancel — the status flip is what stops the webhook from completing it later.
+    cancel -- the status flip is what stops the webhook from completing it later.
     A command already queued on the device cannot be recalled; cancelling stops
     the controller from tracking it further.
     """
@@ -1141,7 +1560,7 @@ async def download_enrollment_profile(tenant_id: str, token: str):
         raise HTTPException(status_code=403, detail="Forbidden")
 
     # Refuse to hand a device a structurally-valid but dead profile (empty APNs
-    # topic, SCEP challenge, or URLs) — it would install and never check in.
+    # topic, SCEP challenge, or URLs) -- it would install and never check in.
     details = enrollment_svc.enrollment_details(tenant)
     if not details["configured"]:
         raise HTTPException(
@@ -1177,7 +1596,7 @@ register_tortoise(
 
 
 # Late-added columns (registered AFTER register_tortoise so the connection exists
-# when this startup handler runs — FastAPI runs startup hooks in add order).
+# when this startup handler runs -- FastAPI runs startup hooks in add order).
 @app.on_event("startup")
 async def _apply_aux_ddl():
     from controller.models.database import ensure_aux_columns

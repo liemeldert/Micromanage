@@ -1,8 +1,10 @@
 import boto3
 from botocore.config import Config
+from datetime import datetime, timezone
 from typing import List, Dict, Any, Optional
 from controller.models.tenant import Device, AppDeployment, Tenant
 from controller.services.group_manager import GroupManager
+from controller.services.scoping import device_in_rollout, evaluate_scope
 import asyncio
 import hashlib
 import os
@@ -57,11 +59,12 @@ class AppManager:
         device_groups = self.group_manager.evaluate_device_groups(device, groups_config)
         device.groups = device_groups
         await device.save()
-        
+
         apps_to_install = []
-        
+        now = datetime.now(timezone.utc)
+
         for app in apps_config:
-            app_version = self._get_applicable_version(device, app, device_groups)
+            app_version = self._get_applicable_version(device, app, device_groups, now)
             if app_version:
                 apps_to_install.append({
                     'app_id': app['id'],
@@ -72,54 +75,34 @@ class AppManager:
                     'sha256': app_version.get('sha256'),
                     'install_options': app_version.get('install_options', {})
                 })
-        
+
         return apps_to_install
-    
-    def _get_applicable_version(self, device: Device, app: Dict[str, Any], device_groups: List[str]) -> Optional[Dict[str, Any]]:
-        """Get the applicable version of an app for a device"""
-        for version in app.get('versions', []):
-            # Check if device is in required groups
-            version_groups = version.get('groups', [])
-            if not any(group in device_groups for group in version_groups):
+
+    def _get_applicable_version(
+        self, device: Device, app: Dict[str, Any], device_groups: List[str],
+        now: Optional[datetime] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """Newest version the device is scoped AND waved into.
+
+        Versions are stored oldest-first (the UI appends new versions), so we
+        evaluate NEWEST-first: the last-listed version the device is scoped
+        into wins. Each candidate evaluates through the unified scope engine
+        (groups any-match, conditions all-match, include/exclude overrides). A
+        version whose gradual rollout hasn't reached this device yet is skipped,
+        falling through to the next-older version -- so mid-rollout devices keep
+        receiving the previous version instead of nothing.
+        """
+        for version in reversed(app.get('versions', [])):
+            if not evaluate_scope(device, device_groups, version):
                 continue
-            
-            # Check additional conditions
-            if self._check_version_conditions(device, version.get('conditions', [])):
-                return version
-        
+            rollout = version.get('rollout')
+            if rollout and not device_in_rollout(
+                device, rollout, f"app:{app.get('id')}:{version.get('version')}", now
+            ):
+                continue  # held -- try the next (older) version
+            return version
+
         return None
-    
-    def _check_version_conditions(self, device: Device, conditions: List[Dict[str, Any]]) -> bool:
-        """Check if a device meets version-specific conditions"""
-        for condition in conditions:
-            if condition['type'] == 'os_version':
-                if not self._evaluate_os_version(device.os_version, condition['operator'], condition['value']):
-                    return False
-        
-        return True
-    
-    def _evaluate_os_version(self, device_version: str, operator: str, required_version: str) -> bool:
-        """Compare OS versions"""
-        from packaging import version
-        
-        try:
-            dev_ver = version.parse(device_version)
-            req_ver = version.parse(required_version)
-            
-            if operator == 'gte':
-                return dev_ver >= req_ver
-            elif operator == 'gt':
-                return dev_ver > req_ver
-            elif operator == 'lte':
-                return dev_ver <= req_ver
-            elif operator == 'lt':
-                return dev_ver < req_ver
-            elif operator == 'equals':
-                return dev_ver == req_ver
-        except:
-            return False
-        
-        return False
     
     def _get_s3_bucket(self) -> str:
         """Get S3 bucket name from tenant config or environment"""
@@ -321,7 +304,7 @@ class AppManager:
                 await deployment.delete()
             
             if task_id:
-                # Await the device's response — the webhook completes the task.
+                # Await the device's response -- the webhook completes the task.
                 task = await Task.get(id=task_id)
                 task.status = 'running'
                 task.details['command_uuid'] = result.get('command_uuid')

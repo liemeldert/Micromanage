@@ -62,7 +62,7 @@ def decode_session_token(token: str) -> Optional[Dict[str, Any]]:
     """Return validated claims for a controller-issued session token, else None.
 
     Returns None (rather than raising) for anything that isn't a valid,
-    in-date, correctly-scoped controller session token — including externally
+    in-date, correctly-scoped controller session token -- including externally
     issued provider tokens, which are handled by a different code path.
     """
     try:

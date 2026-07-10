@@ -10,10 +10,11 @@ Identity can be established two ways, selected per-tenant via ``Tenant.auth_conf
 
 Authorization is a simple two-tier model:
 
-* ``member`` – read everything, run non-destructive device commands, edit
-  apps/profiles/groups config.
+* ``member`` – read everything, run non-destructive device commands (inventory
+  refreshes, ring), edit apps/profiles/groups config.
 * ``admin``  – everything ``member`` can do, plus user management, tenant/S3
-  settings, and destructive device commands (restart / shutdown / clear_passcode).
+  settings, and destructive device commands (see ``DESTRUCTIVE_COMMANDS`` below:
+  power, lock/erase, lost mode, passwords, remote desktop, user management).
 """
 
 ROLE_ADMIN = "admin"
@@ -22,6 +23,18 @@ ROLES = (ROLE_ADMIN, ROLE_MEMBER)
 
 # Device commands that are disruptive/destructive and therefore admin-only.
 # Keep this in sync with the dispatch table in send_device_command.
-DESTRUCTIVE_COMMANDS = frozenset({"restart", "shutdown", "clear_passcode", "lock", "erase"})
+DESTRUCTIVE_COMMANDS = frozenset({
+    # Power / device state
+    "restart", "shutdown", "lock", "erase",
+    # Passwords & account state
+    "clear_passcode", "clear_restrictions_password", "unlock_user_account",
+    "set_recovery_lock", "verify_recovery_lock",
+    "set_firmware_password", "verify_firmware_password",
+    # Remote management & lost mode (location is privacy-sensitive)
+    "enable_remote_desktop", "disable_remote_desktop",
+    "enable_lost_mode", "disable_lost_mode", "device_location",
+    # User management
+    "logout_user", "delete_user",
+})
 
 __all__ = ["ROLE_ADMIN", "ROLE_MEMBER", "ROLES", "DESTRUCTIVE_COMMANDS"]

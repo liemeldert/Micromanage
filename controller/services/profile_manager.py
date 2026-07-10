@@ -1,6 +1,8 @@
-from typing import List, Dict, Any, Optional
+from datetime import datetime, timezone
+from typing import List, Dict, Any, Optional, Set, Tuple
 from controller.models.tenant import Device, ProfileDeployment, Tenant, EnrollmentProfile
 from controller.services.group_manager import GroupManager
+from controller.services.scoping import device_in_rollout, evaluate_scope
 import hashlib
 import json
 import uuid
@@ -36,12 +38,25 @@ class ProfileManager:
             return 'tvOS'
         return 'iOS'  # iPhone / iPad / iPod
 
-    async def evaluate_device_profiles(self, device: Device, profiles_config: List[Dict[str, Any]], groups_config: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        """Determine which profiles should be installed on a device"""
+    async def evaluate_device_profiles(
+        self,
+        device: Device,
+        profiles_config: List[Dict[str, Any]],
+        groups_config: List[Dict[str, Any]],
+    ) -> Tuple[List[Dict[str, Any]], Set[str]]:
+        """Determine which profiles should be installed on a device.
+
+        Returns ``(to_install, held_ids)``. A profile is *held* when it is
+        scoped to the device but its gradual rollout hasn't reached the
+        device's wave yet -- the reconciler must treat held profiles as still
+        desired (no removal) while not installing/updating them either.
+        """
         device_groups = self.group_manager.evaluate_device_groups(device, groups_config)
         device_platform = self._device_platform(device)
+        now = datetime.now(timezone.utc)
 
-        profiles_to_install = []
+        profiles_to_install: List[Dict[str, Any]] = []
+        held_ids: Set[str] = set()
 
         for profile in profiles_config:
             if profile.get('dep_profile') or profile.get('type') == 'enrollment':
@@ -52,11 +67,21 @@ class ProfileManager:
             if profile_platforms and device_platform not in profile_platforms:
                 continue
 
-            profile_groups = profile.get('groups', [])
-            if any(group in device_groups for group in profile_groups):
-                profiles_to_install.append(profile)
-        
-        return profiles_to_install
+            # Unified scope: groups (any) AND conditions (all), with
+            # include_devices/exclude_devices overrides. See services.scoping.
+            if not evaluate_scope(device, device_groups, profile):
+                continue
+
+            rollout = profile.get('rollout')
+            if rollout and not device_in_rollout(
+                device, rollout, f"profile:{profile.get('id')}", now
+            ):
+                held_ids.add(profile.get('id'))
+                continue
+
+            profiles_to_install.append(profile)
+
+        return profiles_to_install, held_ids
     
     async def deploy_profile(self, device: Device, profile_info: Dict[str, Any],
                            mdm_connector: 'MDMConnector', task_id: Optional[str] = None) -> ProfileDeployment:
@@ -141,7 +166,7 @@ class ProfileManager:
                 await deployment.delete()
 
             if task_id:
-                # Await the device's response — the webhook completes the task.
+                # Await the device's response -- the webhook completes the task.
                 task = await Task.get(id=task_id)
                 task.status = 'running'
                 task.details['command_uuid'] = result.get('command_uuid')

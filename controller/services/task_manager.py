@@ -36,7 +36,7 @@ class TaskManager:
         The handler (and the deploy helpers it calls) own the task's status. If,
         after the handler returns, the task is 'running' with a command_uuid in
         its details, the command is queued on the device and the WEBHOOK will
-        complete/fail it when the device responds — do not mark it completed
+        complete/fail it when the device responds -- do not mark it completed
         here. Only synchronous tasks (no command enqueued) complete immediately.
         """
         task_id = str(task.id)
@@ -72,7 +72,7 @@ class TaskManager:
         """Cancel the in-process asyncio task, if this process is running it.
 
         Returns whether an in-memory task was cancelled. Callers must still
-        cancel the DB row — tasks created by other processes (sync service) or
+        cancel the DB row -- tasks created by other processes (sync service) or
         awaiting a device response have no in-memory handle here.
         """
         if task_id in self.running_tasks:

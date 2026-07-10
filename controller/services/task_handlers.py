@@ -27,7 +27,7 @@ async def handle_app_install_task(task: Task):
 
             # Deploy the app. This enqueues the MDM command and stores the
             # command_uuid on the task; the WEBHOOK completes/fails the task
-            # when the device responds — do not mark it completed here.
+            # when the device responds -- do not mark it completed here.
             await app_manager.deploy_app(
                 device,
                 app_info,

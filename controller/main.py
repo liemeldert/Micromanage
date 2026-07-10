@@ -50,7 +50,7 @@ class MDMController:
         Set CONTROLLER_BOOTSTRAP_ADMIN_EMAIL and CONTROLLER_BOOTSTRAP_ADMIN_PASSWORD
         (and optionally CONTROLLER_BOOTSTRAP_TENANT, default "default") to seed an
         initial local admin so someone can log in on a fresh deployment. This is a
-        no-op once that user exists, and is skipped entirely if the vars are unset —
+        no-op once that user exists, and is skipped entirely if the vars are unset --
         there is no implicit credential-free admin.
         """
         email = os.getenv("CONTROLLER_BOOTSTRAP_ADMIN_EMAIL")
@@ -146,6 +146,7 @@ class MDMController:
                 tenant.allowed_users = tcfg.get('allowed_users', tenant.allowed_users)
                 tenant.s3_config = tcfg.get('s3', {})
                 tenant.dep_enabled = tcfg.get('dep', {}).get('enabled', False)
+                tenant.device_naming = tcfg.get('device_naming', {}) or {}
                 await tenant.save()
         except Exception:
             logger.exception(f"sync[{tenant.id}]: updating tenant from config.yaml failed")
