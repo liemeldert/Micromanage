@@ -50,6 +50,19 @@ async def _resolve_tenant(url_params: Dict[str, Any]) -> Optional[Tenant]:
     return await Tenant.get_or_none(id="default")
 
 
+async def _atc_signal(device_id: Any, signal: str, ref: Optional[str] = None) -> None:
+    """Best-effort: advance any ATC flow runs waiting on a device signal.
+
+    Called from webhook handlers, so it swallows and logs every failure -- an
+    ATC error must never break webhook processing (the webhook returns 200
+    regardless)."""
+    try:
+        from controller.services import atc
+        await atc.advance_on_signal(str(device_id), signal, ref)
+    except Exception:
+        logger.exception("ATC: signal %s (ref=%s) failed for device %s", signal, ref, device_id)
+
+
 class WebhookHandler:
     """Handle MDM webhook callbacks from NanoMDM (MicroMDM-compatible schema).
 
@@ -241,6 +254,10 @@ class WebhookHandler:
     async def _dispatch_command_response(
         self, device: Device, command_uuid: str, status: str, response: Dict[str, Any]
     ):
+        # ATC: any command response means the device checked in -- fire before the
+        # task lookup so a wait_for(checkin) resolves even for an untracked
+        # command_uuid (aged past the lookback / device-initiated).
+        await _atc_signal(device.id, "checkin")
         # Tortoise can't filter on a JSON key, so match command_uuid in Python.
         candidates = await Task.filter(device=device).order_by("-created_at").limit(50)
         task = next(
@@ -301,6 +318,8 @@ class WebhookHandler:
                 await task.save(update_fields=["details"])
             await self._persist_inventory(task, response)
             await task.update_progress(100, "completed")
+            # ATC: a send_command step's command was acknowledged.
+            await _atc_signal(task.device_id, "command_ack", ref=str(task.id))
         elif status in ("Error", "CommandFormatError"):
             task.error = self._error_message(response, f"{task.type} failed")
             await task.update_progress(task.progress, "failed")
@@ -389,6 +408,8 @@ class WebhookHandler:
             return
 
         await device.save()
+        # ATC: a device that reported inventory satisfies a wait_for(device_info).
+        await _atc_signal(device.id, "device_info")
 
     # ── Per-command response handlers ─────────────────────────────────────────
     # Note on Apple MDM semantics: a device responds "Acknowledged" AFTER it has
@@ -411,6 +432,8 @@ class WebhookHandler:
                 deployment.status = 'installed'
                 deployment.install_date = datetime.utcnow()
                 await deployment.save()
+            # ATC: satisfies a wait_for(app_installed) for this app.
+            await _atc_signal(task.device_id, "app_installed", ref=app_id)
 
         elif status in ('Error', 'CommandFormatError'):
             error_msg = self._error_message(response, 'Installation failed')
@@ -444,6 +467,8 @@ class WebhookHandler:
                 deployment.install_date = datetime.utcnow()
                 deployment.last_error = None
                 await deployment.save()
+            # ATC: satisfies a wait_for(profile_installed) for this profile.
+            await _atc_signal(task.device_id, "profile_installed", ref=profile_id)
 
         elif status in ('Error', 'CommandFormatError'):
             error_msg = self._error_message(response, 'Installation failed')

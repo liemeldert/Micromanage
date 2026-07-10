@@ -30,6 +30,7 @@ from controller.models.tenant import (
     Task,
     AppDeployment,
     ProfileDeployment,
+    FlowRun,
 )
 from controller.services.app_manager import AppManager
 from controller.services.mdm_connector import MDMConnector
@@ -413,12 +414,13 @@ async def update_tenant(update: TenantUpdate, admin: Principal = Depends(require
 # subsystems land (tags in Phase 0; flows / dispatcher follow in later phases).
 # "config" is READABLE but not editable via the API -- it embeds S3 secrets --
 # so reads allow it while writes/history do not.
-_EDITABLE_CONFIG_TYPES = ["groups", "apps", "profiles", "tags"]
+_EDITABLE_CONFIG_TYPES = ["groups", "apps", "profiles", "tags", "flows"]
 _READABLE_CONFIG_TYPES = _EDITABLE_CONFIG_TYPES + ["config"]
 # Optional config docs (advisory registries / new-subsystem documents) that have
 # no required-file stub. Copied into the validation sandbox when present so
-# cross-document checks (e.g. a tag referenced by a group) resolve on any save.
-_OPTIONAL_CONFIG_FILES = ["tags.yaml"]
+# cross-document checks (e.g. a tag referenced by a group, a profile referenced
+# by a flow) resolve on any save.
+_OPTIONAL_CONFIG_FILES = ["tags.yaml", "flows.yaml"]
 
 
 @app.get("/api/v1/config/{config_type}")
@@ -834,6 +836,18 @@ async def get_command_catalog(principal: Principal = Depends(get_current_princip
     return {"commands": catalog_for_role(principal.is_admin)}
 
 
+@app.get("/api/v1/flows/step-catalog")
+async def get_flow_step_catalog(principal: Principal = Depends(get_current_principal)):
+    """The ATC flow node palette + wait-signal registry.
+
+    The visual editor renders its palette and per-node parameter forms from
+    this, so adding a node type is a catalog + engine change with no bespoke
+    frontend wiring (mirrors GET /api/v1/commands/catalog)."""
+    from controller.services.flow_step_catalog import catalog
+
+    return catalog()
+
+
 @app.get("/api/v1/naming/variables")
 async def get_naming_variables(principal: Principal = Depends(get_current_principal)):
     """The device-state variables usable in naming templates (group/tenant).
@@ -1201,6 +1215,67 @@ async def update_device_tags(
             "added": added, "removed": removed, "groups_changed": groups_changed}
 
 
+# ── ATC flow runs ────────────────────────────────────────────────────────────
+
+class FlowRunStart(BaseModel):
+    flow_id: str
+
+
+@app.get("/api/v1/devices/{device_id}/flow-runs")
+async def list_device_flow_runs(
+        device_id: str,
+        principal: Principal = Depends(get_current_principal),
+):
+    """ATC flow runs for a device (most recent first)."""
+    tenant = principal.tenant
+    device = await Device.get_or_none(id=device_id, tenant=tenant)
+    if not device:
+        raise HTTPException(status_code=404, detail="Device not found")
+    runs = await FlowRun.filter(device=device).order_by("-started_at").limit(50).all()
+    return {"flow_runs": [run.to_dict() for run in runs]}
+
+
+@app.get("/api/v1/flow-runs/{run_id}")
+async def get_flow_run(run_id: str, principal: Principal = Depends(get_current_principal)):
+    """One flow run, including the pinned flow snapshot it is executing so the
+    run viewer can render the exact graph with the taken path highlighted."""
+    run = await FlowRun.get_or_none(id=run_id, tenant=principal.tenant)
+    if not run:
+        raise HTTPException(status_code=404, detail="Flow run not found")
+    data = run.to_dict()
+    # The pinned definition (flow_hash), so the viewer highlights the real graph
+    # even if flows.yaml has since been edited.
+    data["flow"] = (run.context or {}).get("flow")
+    return data
+
+
+@app.post("/api/v1/devices/{device_id}/flow-runs", status_code=201)
+async def start_device_flow_run(
+        device_id: str,
+        body: FlowRunStart,
+        principal: Principal = Depends(get_current_principal),
+):
+    """Manually start a flow against a device (testing / re-run). Ignores the
+    trigger match (the operator asked for this flow explicitly)."""
+    tenant = principal.tenant
+    device = await Device.get_or_none(id=device_id, tenant=tenant)
+    if not device:
+        raise HTTPException(status_code=404, detail="Device not found")
+    if device.enrollment_state != "enrolled":
+        raise HTTPException(
+            status_code=409,
+            detail=f"Device is {device.enrollment_state}; flows run only on enrolled devices",
+        )
+    from controller.services import atc
+    run = await atc.start_flow_by_id(device, body.flow_id.strip())
+    if run is None:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Flow '{body.flow_id}' not found or has no valid start node",
+        )
+    return run.to_dict()
+
+
 @app.post("/api/v1/devices/{device_id}/command")
 async def send_device_command(
         device_id: str,
@@ -1281,10 +1356,11 @@ async def send_device_command(
 
             return {"task_id": str(task.id), "message": "App removal started"}
 
-        # Direct, immediately-issued commands: record an audit Task, then send.
-        from controller.services.command_catalog import (
-            get_command, build_generic_fields, secret_param_names,
-        )
+        # Direct, immediately-issued commands: validate here, then dispatch via
+        # the shared audited path (services.device_commands) so this endpoint,
+        # ATC send_command steps and Dispatcher remediation all enforce the same
+        # catalog / secret-redaction / destructive-gating rules.
+        from controller.services.command_catalog import get_command
 
         entry = get_command(command.command_type)
         if entry is None:
@@ -1349,65 +1425,30 @@ async def send_device_command(
                 ),
             }
 
-        # Commands with bespoke payload handling; everything else in the catalog
-        # is generic -- RequestType + plist-mapped parameters, passed through.
-        special_dispatch = {
-            "refresh_info": lambda: mdm_connector.get_device_info(device.udid),
-            "security_info": lambda: mdm_connector.get_security_info(device.udid),
-            "profile_list": lambda: mdm_connector.get_profile_list(device.udid),
-            "app_list": lambda: mdm_connector.get_installed_apps(device.udid),
-            "restart": lambda: mdm_connector.restart_device(device.udid),
-            "shutdown": lambda: mdm_connector.shutdown_device(device.udid),
-            "clear_passcode": lambda: mdm_connector.clear_passcode(device.udid),
-            "lock": lambda: mdm_connector.device_lock(
-                device.udid, pin=pin, message=params.get("message"),
-                phone_number=params.get("phone_number"),
-            ),
-            "erase": lambda: mdm_connector.erase_device(
-                device.udid, pin=pin, return_to_service=rts_payload,
-            ),
-            "enable_lost_mode": lambda: mdm_connector.enable_lost_mode(
-                device.udid, message=str(params.get("message") or ""),
-                phone_number=params.get("phone_number"), footnote=params.get("footnote"),
-            ),
-            "disable_lost_mode": lambda: mdm_connector.disable_lost_mode(device.udid),
-        }
-
-        handler = special_dispatch.get(command.command_type)
-        if handler is None:
-            request_type = entry.get("request_type")
-            if not request_type:
-                raise HTTPException(status_code=400, detail="Invalid command type")
-            try:
-                fields = build_generic_fields(entry, params)
-            except ValueError as exc:
-                raise HTTPException(status_code=400, detail=str(exc))
-            handler = lambda: mdm_connector.send_raw_command(device.udid, request_type, fields)  # noqa: E731
-
-        # Audit trail: record who ran what -- but never persist PINs/passwords.
-        redacted = secret_param_names(entry) | {"pin"}
-        audit_details = {k: v for k, v in params.items() if k not in redacted}
-        task = await task_manager.create_task(
-            tenant=tenant,
-            task_type=command.command_type,
-            description=f"{command.command_type} on {device.serial_number}",
-            device=device,
-            user=principal.email,
-            details=audit_details,
+        from controller.services.device_commands import (
+            CommandError, CommandSendError, dispatch_catalog_command,
         )
         try:
-            result = await handler()
-            task.details["command_uuid"] = result.get("command_uuid")
-            task.status = "running"
-            await task.save()
-        except Exception as exc:
-            task.status = "failed"
-            task.error = str(exc)
-            await task.save()
-            logger.error(f"Command {command.command_type} failed for {device.udid}: {exc}")
-            raise HTTPException(status_code=502, detail="Failed to send command to device")
+            outcome = await dispatch_catalog_command(
+                device,
+                command.command_type,
+                params,
+                user=principal.email,
+                tenant=tenant,
+                # The admin-role gate above already authorized any destructive
+                # command; the helper's own gate is what protects automated
+                # callers (ATC/Dispatcher), which pass allow_destructive=False.
+                allow_destructive=True,
+                rts_payload=rts_payload,
+                mdm_connector=mdm_connector,
+            )
+        except CommandSendError as exc:
+            raise HTTPException(status_code=502, detail=str(exc))
+        except CommandError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
 
-        return {"task_id": str(task.id), "message": "Command sent", "result": result}
+        return {"task_id": outcome["task_id"], "message": "Command sent",
+                "result": outcome["result"]}
 
     finally:
         await mdm_connector.close()

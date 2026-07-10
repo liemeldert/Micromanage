@@ -200,3 +200,68 @@ class Task(Model):
             'completed_at': self.completed_at.isoformat() if self.completed_at else None,
             'details': self.details
         }
+
+
+class FlowRun(Model):
+    """A per-device run of an ATC enrollment flow (services.atc).
+
+    A flow is NOT a synchronous script: MDM is asynchronous, so a run executes
+    forward until it hits a step that must wait for the device (a ``wait_for``
+    barrier), then persists its position here and resumes when the matching
+    webhook signal arrives. Model it as a state machine, not a coroutine.
+
+    The flow definition is snapshotted into ``context['flow']`` at start (and
+    fingerprinted by ``flow_hash``) so an admin editing flows.yaml mid-run does
+    not change the definition an in-flight run executes.
+    """
+    id = fields.UUIDField(pk=True)
+    tenant = fields.ForeignKeyField("models.Tenant", related_name="flow_runs")
+    device = fields.ForeignKeyField("models.Device", related_name="flow_runs")
+    flow_id = fields.CharField(max_length=100)
+    # sha256 of the flow document at start -- pins the definition for the run's
+    # lifetime (the full snapshot lives in context['flow']).
+    flow_hash = fields.CharField(max_length=64)
+    # running | waiting | completed | failed | cancelled
+    status = fields.CharField(max_length=20, default="running")
+    # Node id we are at / parked on (null once terminal).
+    current_node = fields.CharField(max_length=100, null=True)
+    # For a parked wait_for node: the signal we're waiting on and an optional
+    # reference (profile_id / app_id / task_id) the signal must match.
+    waiting_signal = fields.CharField(max_length=40, null=True)
+    waiting_ref = fields.CharField(max_length=255, null=True)
+    wait_deadline = fields.DatetimeField(null=True)  # timeout sweep target
+    # Accumulated run state: the pinned flow snapshot, a step timeline, and any
+    # per-node results (never secrets -- send_command redacts before recording).
+    context = fields.JSONField(default=dict)
+    error = fields.TextField(null=True)
+    started_at = fields.DatetimeField(auto_now_add=True)
+    updated_at = fields.DatetimeField(auto_now=True)
+    completed_at = fields.DatetimeField(null=True)
+
+    class Meta:
+        table = "flow_runs"
+        ordering = ["-started_at"]
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Serialize a run for the API / run viewer (no raw flow snapshot -- the
+        editor fetches the definition separately; the timeline is what the
+        viewer needs)."""
+        ctx = self.context or {}
+        return {
+            "id": str(self.id),
+            "tenant_id": str(self.tenant_id),
+            "device_id": str(self.device_id) if self.device_id else None,
+            "flow_id": self.flow_id,
+            "flow_hash": self.flow_hash,
+            "status": self.status,
+            "current_node": self.current_node,
+            "waiting_signal": self.waiting_signal,
+            "waiting_ref": self.waiting_ref,
+            "wait_deadline": self.wait_deadline.isoformat() if self.wait_deadline else None,
+            "error": self.error,
+            "timeline": ctx.get("timeline", []),
+            "visited": ctx.get("visited", []),
+            "started_at": self.started_at.isoformat() if self.started_at else None,
+            "updated_at": self.updated_at.isoformat() if self.updated_at else None,
+            "completed_at": self.completed_at.isoformat() if self.completed_at else None,
+        }

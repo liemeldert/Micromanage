@@ -113,6 +113,13 @@ async def on_device_enrolled(device: Device) -> None:
         await refresh_groups(device, groups_config)
     except Exception:
         logger.exception("enroll-time group match failed for %s", device.serial_number)
+    # ATC: run the matching enrollment flow now that groups are fresh. Best-effort
+    # -- a flow error must never gate enrollment.
+    try:
+        from controller.services import atc
+        await atc.start_flows_for_enroll(device)
+    except Exception:
+        logger.exception("ATC: start_flows_for_enroll failed for %s", device.serial_number)
     if not device.udid:
         return
     connector = MDMConnector()
@@ -180,6 +187,13 @@ async def poll_tenant(tenant: Tenant) -> Dict[str, int]:
                 logger.exception("poll_device failed for %s", device.serial_number)
     finally:
         await connector.close()
+
+    # ATC: resolve flow runs whose wait_for deadline has passed (best-effort).
+    try:
+        from controller.services import atc
+        await atc.sweep_timeouts(tenant)
+    except Exception:
+        logger.exception("ATC: timeout sweep failed for tenant %s", tenant.id)
 
     await _prune_scheduled_tasks(tenant, now)
     if summary["polled"] or summary["groups_changed"]:
