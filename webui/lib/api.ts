@@ -677,8 +677,9 @@ export interface EnrollmentDetails {
 
 // A logged POST-SCEP webhook check-in that could not be turned into (or
 // matched to) a device. Mirrors EnrollmentAttempt.to_dict()
-// (controller/models/tenant.py). tenant_id is always null here -- the
-// tenant-scoped list endpoint can only ever return this tenant's own rows.
+// (controller/models/tenant.py). tenant_id is null for no_tenant rows (the
+// requested tenant was unverified) or this tenant's own id for no_serial rows;
+// the tenant-scoped list endpoint can never return another tenant's rows.
 export interface EnrollmentAttempt {
   id: string;
   tenant_id: string | null;

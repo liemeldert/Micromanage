@@ -61,6 +61,19 @@ async def main():
             a.detail.get("requested_tenant") == "victim-tenant" and a.tenant_id is None,
         )
 
+    # ── 1b. Dedup: a device stuck in a drop state re-hits this on every
+    # check-in; it must UPDATE the single row (latest values + count), never
+    # flood the table (an unbounded, externally-driven table is a DoS vector).
+    await handler._upsert_device(
+        "UDID-NO-TENANT", {"tenant": "victim-tenant"}, {"SerialNumber": "SN1"},
+        topic="mdm.TokenUpdate",
+    )
+    no_tenant_after = await EnrollmentAttempt.filter(outcome="no_tenant").all()
+    check("repeated no_tenant drop dedupes to a single row", len(no_tenant_after) == 1)
+    if no_tenant_after:
+        check("repeated drop increments the detail count", no_tenant_after[0].detail.get("count") == 2)
+        check("repeated drop refreshes topic to the latest", no_tenant_after[0].topic == "mdm.TokenUpdate")
+
     # ── 2. no_serial drop: a real tenant resolves (single-tenant install), but
     # the check-in has no SerialNumber and the udid is unknown -- no-op, but
     # log with the RESOLVED tenant FK set (safe: it was actually looked up).

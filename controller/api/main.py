@@ -2096,9 +2096,10 @@ async def list_tasks(
     if device_id:
         query = query.filter(device_id=device_id)
     if user:
-        # Exact match: Task.user is always a server-written email (or None for
-        # auto/system tasks), never free text -- icontains would be misleading.
-        query = query.filter(user=user)
+        # Case-insensitive substring so the Tasks-page filter works as-you-type
+        # (an exact match returns nothing for every partial keystroke). A full
+        # email still matches exactly, since a string contains itself.
+        query = query.filter(user__icontains=user)
 
     total = await query.count()
     tasks = (

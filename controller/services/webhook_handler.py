@@ -95,14 +95,35 @@ async def _log_attempt(
     pass ?tenant=<victim> on the enrollment ServerURL to pollute a victim's
     attempt log. An unresolved/unverified id belongs only in ``detail``."""
     try:
-        await EnrollmentAttempt.create(
-            tenant=tenant,
-            udid=udid,
-            serial_number=serial_number,
-            topic=topic,
-            outcome=outcome,
-            detail=detail or {},
+        # Dedupe to ONE row per (udid, outcome): a device stuck in a drop state
+        # re-enters this on every check-in (Authenticate/TokenUpdate/Connect/idle
+        # poll), so always-inserting would let a single misconfigured or hostile
+        # device (the ?tenant hint is attacker-influenceable) flood the table
+        # unbounded. Update the existing row -- latest values + a repeat count --
+        # instead, bounding the table to the count of distinct failing devices.
+        existing = (
+            await EnrollmentAttempt.filter(udid=udid, outcome=outcome).first()
+            if udid
+            else None
         )
+        if existing is not None:
+            merged = dict(existing.detail or {})
+            merged.update(detail or {})
+            merged["count"] = int(merged.get("count", 1)) + 1
+            existing.tenant = tenant
+            existing.serial_number = serial_number
+            existing.topic = topic
+            existing.detail = merged
+            await existing.save()
+        else:
+            await EnrollmentAttempt.create(
+                tenant=tenant,
+                udid=udid,
+                serial_number=serial_number,
+                topic=topic,
+                outcome=outcome,
+                detail={**(detail or {}), "count": 1},
+            )
     except Exception:
         logger.exception("webhook: failed to log enrollment attempt (outcome=%s)", outcome)
 
