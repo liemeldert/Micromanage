@@ -1100,6 +1100,57 @@ async def create_placeholder_device(
     return _device_summary(device)
 
 
+@app.delete("/api/v1/devices/{device_id}")
+async def forget_device(
+        device_id: str,
+        admin: Principal = Depends(require_admin),
+):
+    """Forget a device: remove its record and all of its deployments, tasks,
+    flow runs and alerts from the console.
+
+    Only a device that is NOT actively enrolled may be forgotten. An enrolled
+    device still has a live MDM channel, so the webhook would simply re-create
+    the row on its next check-in and the roster entry would reappear -- the
+    admin must let it check out / be unenrolled first. This removes the
+    console's record only; it does not send any command to the hardware (and for
+    an unenrolled device it could not). Admin only.
+    """
+    tenant = admin.tenant
+    device = await Device.get_or_none(id=device_id, tenant=tenant)
+    if not device:
+        raise HTTPException(status_code=404, detail="Device not found")
+
+    if device.enrollment_state == "enrolled":
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "Device is enrolled; unenroll it or let it check out before "
+                "forgetting it, otherwise it will reappear on its next check-in."
+            ),
+        )
+
+    serial = device.serial_number  # captured for the audit log before deletion
+
+    # Remove child rows explicitly inside one transaction rather than relying on
+    # DB-level ON DELETE CASCADE, so the cleanup is predictable regardless of how
+    # the schema's foreign keys were generated.
+    from tortoise.transactions import in_transaction
+
+    async with in_transaction():
+        await AppDeployment.filter(device=device).delete()
+        await ProfileDeployment.filter(device=device).delete()
+        await FlowRun.filter(device=device).delete()
+        await Alert.filter(device=device).delete()
+        await Task.filter(device=device).delete()
+        await device.delete()
+
+    logger.info(
+        "Forgot device %s (serial=%s) for tenant %s by %s",
+        device_id, serial, tenant.id, admin.email,
+    )
+    return {"message": "Device forgotten"}
+
+
 @app.get("/api/v1/devices/{device_id}")
 async def get_device_details(device_id: str, principal: Principal = Depends(get_current_principal)):
     """Get detailed device information"""
