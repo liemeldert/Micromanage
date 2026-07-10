@@ -8,6 +8,7 @@ check. See controller/services/command_catalog.py.
 """
 
 import logging
+import re
 from typing import Any, Dict, Optional
 
 from controller.auth import DESTRUCTIVE_COMMANDS
@@ -83,9 +84,21 @@ async def dispatch_catalog_command(
             f"Device is {device.enrollment_state}; commands need an active MDM channel"
         )
 
+    # Command-specific input validation, enforced here so EVERY caller (manual
+    # API, ATC, Dispatcher approval) gets it -- an approved Mac erase with no PIN
+    # would otherwise brick the device.
+    pin = params.get("pin")
+    if command_type in ("lock", "erase"):
+        is_mac = "mac" in (device.device_model or "").lower()
+        if pin is not None and not re.fullmatch(r"\d{6}", str(pin)):
+            raise CommandError("PIN must be exactly 6 digits")
+        if is_mac and not pin:
+            raise CommandError(
+                "Macs require a 6-digit PIN for this command (needed to unlock afterwards)"
+            )
+
     own_connector = mdm_connector is None
     connector = mdm_connector or MDMConnector()
-    pin = params.get("pin")
     try:
         # Commands with bespoke connector methods; everything else is generic
         # (RequestType + plist-mapped params). Kept in lockstep with the API's

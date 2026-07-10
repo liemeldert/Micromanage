@@ -192,8 +192,13 @@ export function validateFlowClient(flow: FlowDoc, catalog: FlowNodeSpec[]): stri
       errors.push(`Node "${n.id}" needs a signal to wait for.`);
   }
 
-  // reachable end (best-effort)
+  // reachable end + cycle check (best-effort; mirrors the server's
+  // controller/utils/yaml_validator.py _check_flow_graph / _find_cycle_edges:
+  // reachability is computed first, then cycle detection runs ONLY over the
+  // reachable subgraph, and "no reachable end" is suppressed when a cycle is
+  // found -- a cycle explains the missing end on its own).
   if (flow.start && byId.has(flow.start)) {
+    const edges = new Map<string, string[]>();
     const seen = new Set<string>();
     const stack = [flow.start];
     let reachedEnd = false;
@@ -203,12 +208,69 @@ export function validateFlowClient(flow: FlowDoc, catalog: FlowNodeSpec[]): stri
       seen.add(id);
       const n = byId.get(id)!;
       if (n.type === "end") reachedEnd = true;
+      const targets: string[] = [];
       for (const h of EDGE_HANDLES) {
         const t = n[h];
-        if (typeof t === "string" && byId.has(t) && !seen.has(t)) stack.push(t);
+        if (typeof t === "string" && byId.has(t)) {
+          targets.push(t);
+          if (!seen.has(t)) stack.push(t);
+        }
       }
+      edges.set(id, targets);
     }
-    if (!reachedEnd) errors.push("No reachable end node from the start.");
+
+    const cycles = findCycleEdges(edges);
+    for (const [node, ref] of cycles) {
+      errors.push(`Flow has a cycle involving '${node}' and '${ref}' — flows must be acyclic.`);
+    }
+    if (!reachedEnd && cycles.length === 0) errors.push("No reachable end node from the start.");
   }
   return errors;
+}
+
+// Back-edges (node, ref) that make `edges` cyclic, via an iterative 3-color DFS
+// (WHITE/GRAY/BLACK). Mirrors controller/utils/yaml_validator.py
+// _find_cycle_edges exactly so the client can't drift from the server: a
+// GRAY->GRAY edge (a ref still on the current DFS stack) is a back-edge/cycle;
+// refs not present as keys in `edges` are ignored (dangling refs are reported
+// elsewhere).
+function findCycleEdges(edges: Map<string, string[]>): [string, string][] {
+  const WHITE = 0, GRAY = 1, BLACK = 2;
+  const color = new Map<string, number>();
+  for (const n of edges.keys()) color.set(n, WHITE);
+  const back: [string, string][] = [];
+
+  for (const root of edges.keys()) {
+    if (color.get(root) !== WHITE) continue;
+    const stack: { node: string; idx: number }[] = [{ node: root, idx: 0 }];
+    color.set(root, GRAY);
+    while (stack.length) {
+      const frame = stack[stack.length - 1];
+      const targets = edges.get(frame.node) ?? [];
+      let advanced = false;
+      while (frame.idx < targets.length) {
+        const ref = targets[frame.idx];
+        frame.idx += 1;
+        if (!color.has(ref)) continue; // dangling ref, reported elsewhere
+        const refColor = color.get(ref);
+        if (refColor === GRAY) {
+          back.push([frame.node, ref]);
+          continue;
+        }
+        if (refColor === WHITE) {
+          color.set(ref, GRAY);
+          stack.push({ node: ref, idx: 0 });
+          advanced = true;
+          break;
+        }
+      }
+      // Loop exhausted with no WHITE ref pushed (mirrors Python's `for...else`
+      // via the `advanced` flag): this node is fully explored -> BLACK, pop.
+      if (!advanced) {
+        color.set(frame.node, BLACK);
+        stack.pop();
+      }
+    }
+  }
+  return back;
 }

@@ -109,7 +109,10 @@ DISPATCHER_DOC = {
         {  # destructive remediation -> queued for approval, never auto-fired
             "id": "risky-wipe", "name": "Wipe risky", "severity": "black",
             "check": {"type": "tagged", "tags": ["risky"]}, "grace_minutes": 0,
-            "actions": [{"type": "send_command", "params": {"command": "erase"}}],
+            # A Mac erase needs a 6-digit PIN (enforced in the shared command path
+            # so an approved wipe can't brick the device); it is a secret param.
+            "actions": [{"type": "send_command", "params": {
+                "command": "erase", "params": {"pin": "123456"}}}],
             "auto_resolve": False,
         },
         {  # destructive remediation WITH a secret param -> must not leak it

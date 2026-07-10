@@ -159,7 +159,11 @@ async def sweep(tenant: Tenant) -> int:
         logger.exception("dispatcher: sweep query failed for tenant %s", tenant.id)
         return 0
     for device in devices:
-        await evaluate_device(device, reason="sweep")
+        try:
+            await evaluate_device(device, reason="sweep")
+        except Exception:
+            logger.exception("dispatcher: sweep eval failed for %s",
+                             getattr(device, "serial_number", "?"))
     return len(devices)
 
 
@@ -235,10 +239,33 @@ async def _active_alert(device: Device, rule_id: str) -> Optional[Alert]:
             d["resolved_reason"] = "deduplicated (concurrent create)"
             extra.detail = d
             try:
-                await extra.save()
+                await extra.save(update_fields=["status", "resolved_at", "detail"])
             except Exception:
                 logger.exception("dispatcher: deduping alert %s failed", extra.id)
     return active[0]
+
+
+async def _recent_remediation_state(device: Device, rule_id: str) -> Dict[str, Any]:
+    """Loop-protection counters from the most-recently resolved alert for this
+    (device, rule) IF it resolved within the cooldown window -- so a rapid
+    resolve->reopen flap keeps accumulating attempts instead of resetting to 0,
+    while a device compliant for longer than the cooldown gets a fresh budget."""
+    try:
+        prev = await Alert.filter(
+            device_id=device.id, rule_id=rule_id, status="resolved"
+        ).order_by("-resolved_at").first()
+    except Exception:
+        return {}
+    if prev is None or prev.resolved_at is None:
+        return {}
+    resolved_at = prev.resolved_at
+    if resolved_at.tzinfo is None:
+        resolved_at = resolved_at.replace(tzinfo=timezone.utc)
+    if (_now() - resolved_at) > timedelta(minutes=REMEDIATION_COOLDOWN_MINUTES):
+        return {}
+    d = prev.detail or {}
+    return {k: d[k] for k in ("attempt_counts", "last_fired_at", "remediation_failed")
+            if k in d}
 
 
 async def _handle_noncompliant(tenant: Tenant, device: Device, rule: Dict[str, Any],
@@ -253,11 +280,15 @@ async def _handle_noncompliant(tenant: Tenant, device: Device, rule: Dict[str, A
         # (and fires actions) once non-compliant continuously for grace_minutes
         # -- which, for grace_minutes=0, is immediately (handled by the grace
         # check below, so we fall through rather than returning here).
+        detail0 = {"check": finding.get("detail") or {}, "summary": summary,
+                   "severity_original": str(rule.get("severity"))}
+        # Carry loop-protection state forward across a recent resolve->reopen so a
+        # flapping check can't reset the attempt budget and defeat guardrail 5.
+        detail0.update(await _recent_remediation_state(device, str(rule["id"])))
         alert = await Alert.create(
             tenant=tenant, device=device, rule_id=str(rule["id"]),
             severity=str(rule.get("severity")), status="pending", summary=summary,
-            detail={"check": finding.get("detail") or {}, "summary": summary,
-                    "severity_original": str(rule.get("severity"))},
+            detail=detail0,
         )
 
     detail = alert.detail or {}
@@ -277,16 +308,16 @@ async def _handle_noncompliant(tenant: Tenant, device: Device, rule: Dict[str, A
             alert.status = "open"
             alert.opened_at = now
             alert.detail = detail
-            await alert.save()
+            await alert.save(update_fields=["status", "opened_at", "detail", "summary"])
             await _fire_actions(tenant, device, rule, alert, master_on, webhooks)
         else:
             alert.detail = detail
-            await alert.save()
+            await alert.save(update_fields=["detail", "summary"])
     else:
         # Already open/acknowledged and still non-compliant: notifications and
         # reversible tags are idempotent; remediations re-attempt under cooldown.
         alert.detail = detail
-        await alert.save()
+        await alert.save(update_fields=["detail", "summary"])
         await _fire_actions(tenant, device, rule, alert, master_on, webhooks)
 
 
@@ -294,14 +325,21 @@ async def _handle_compliant(device: Device, rule: Dict[str, Any]) -> None:
     alert = await _active_alert(device, str(rule["id"]))
     if alert is None:
         return
-    if rule.get("auto_resolve"):
+    # A 'pending' alert never opened (no actions fired, nothing for a human to
+    # see), so a violation that self-heals within grace must always resolve --
+    # otherwise its stale first_detected_at anchor lets a later violation open
+    # early (broken anti-flap). Opened/acknowledged alerts respect auto_resolve.
+    if alert.status == "pending" or rule.get("auto_resolve"):
         await _resolve_alert(alert, device, "compliant")
-    # else: leave it for a human to resolve.
+    # else: leave the opened alert for a human to resolve.
 
 
 async def _resolve_if_active(device: Device, rule: Dict[str, Any], reason: str) -> None:
+    # The rule no longer applies to this device (left scope), so its alert is
+    # moot regardless of auto_resolve -- resolve unconditionally and reverse any
+    # reversible actions it took.
     alert = await _active_alert(device, str(rule["id"]))
-    if alert is not None and rule.get("auto_resolve"):
+    if alert is not None:
         await _resolve_alert(alert, device, reason)
 
 
@@ -330,7 +368,7 @@ async def _resolve_alert(alert: Alert, device: Device, reason: str) -> None:
     alert.resolved_at = _now()
     detail["resolved_reason"] = reason
     alert.detail = detail
-    await alert.save()
+    await alert.save(update_fields=["status", "resolved_at", "detail"])
 
 
 # ── Actions ──────────────────────────────────────────────────────────────────
@@ -361,8 +399,17 @@ async def _fire_actions(tenant: Tenant, device: Device, rule: Dict[str, Any],
                 await _attempt_remediation(tenant, device, rule, alert, action, master_on, detail)
         except Exception:
             logger.exception("dispatcher: action %s failed for rule %s", atype, rule.get("id"))
+    # If a remediation escalated severity after the webhook action already ran
+    # this pass, notify now so the escalation isn't delayed a full cycle (D4).
+    if detail.get("notified_severity") != alert.severity:
+        for act in rule.get("actions") or []:
+            if act.get("type") == "webhook":
+                _spawn_webhook(tenant, device, rule, alert,
+                               webhooks.get((act.get("params") or {}).get("target")))
+                detail["notified_severity"] = alert.severity
+                break
     alert.detail = detail
-    await alert.save()
+    await alert.save(update_fields=["detail", "severity"])
 
 
 async def _attempt_remediation(tenant: Tenant, device: Device, rule: Dict[str, Any],
@@ -380,6 +427,7 @@ async def _attempt_remediation(tenant: Tenant, device: Device, rule: Dict[str, A
     def record(outcome: str, **extra: Any) -> None:
         ledger.append({"action": atype, "at": now.isoformat(), "dry_run": dry,
                        "outcome": outcome, **extra})
+        del ledger[:-50]  # cap: keep only the most recent entries (bounded growth)
 
     # Guardrail 2: destructive commands NEVER auto-fire -> queue for admin approval.
     if atype == "send_command" and (action.get("params") or {}).get("command") in DESTRUCTIVE_COMMANDS:
@@ -392,9 +440,9 @@ async def _attempt_remediation(tenant: Tenant, device: Device, rule: Dict[str, A
             record("pending-approval", command=cmd)
         return
 
-    # Guardrail 4: tenant/env kill-switch.
+    # Guardrail 4: tenant/env kill-switch. Skip quietly -- recording every eval
+    # while disabled just bloats the ledger; the state is derivable from config.
     if not master_on:
-        record("skipped (auto-remediation disabled)")
         return
 
     # Guardrail 5: stop after N attempts; escalate and require a human.
@@ -607,11 +655,50 @@ def _spawn_webhook(tenant: Tenant, device: Device, rule: Dict[str, Any],
         logger.exception("dispatcher: scheduling webhook failed for rule %s", rule.get("id"))
 
 
+async def _webhook_target_blocked(url: str) -> bool:
+    """SSRF guard: resolve the webhook host and refuse to POST to a private,
+    loopback, link-local (incl. cloud metadata 169.254.169.254), reserved or
+    otherwise non-public address. Fails closed on any parse/resolution error. A
+    residual DNS-rebinding window remains between this check and the client's own
+    connect; acceptable for an admin-configured target."""
+    import asyncio
+    import ipaddress
+    import socket
+    from urllib.parse import urlparse
+    try:
+        parsed = urlparse(url)
+        if parsed.scheme not in ("http", "https") or not parsed.hostname:
+            return True
+        # Self-hosted single-tenant deployments may legitimately target an
+        # internal collector; an explicit opt-out disables the private-range block
+        # (kept OFF by default so a multi-tenant host isn't exposed to SSRF).
+        if _truthy(os.getenv("DISPATCHER_WEBHOOK_ALLOW_PRIVATE", "false")):
+            return False
+        port = parsed.port or (443 if parsed.scheme == "https" else 80)
+        loop = asyncio.get_running_loop()
+        infos = await loop.getaddrinfo(parsed.hostname, port, proto=socket.IPPROTO_TCP)
+        if not infos:
+            return True
+        for info in infos:
+            ip = ipaddress.ip_address(info[4][0])
+            if (ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved
+                    or ip.is_multicast or ip.is_unspecified):
+                return True
+        return False
+    except Exception:
+        return True
+
+
 async def _deliver_webhook(url: str, secret: Optional[str], payload: Dict[str, Any],
                           rule_id: str) -> None:
     import asyncio
 
     import httpx
+
+    if await _webhook_target_blocked(url):
+        logger.error("dispatcher webhook for rule %s blocked: non-public/invalid target",
+                     rule_id)
+        return
 
     body = json.dumps(payload).encode("utf-8")
     headers = {"Content-Type": "application/json"}
@@ -694,5 +781,5 @@ async def approve_remediation(alert: Alert, action_key: str, approver: str) -> D
         "outcome": outcome_str, "approved_by": approver,
     })
     alert.detail = detail
-    await alert.save()
+    await alert.save(update_fields=["detail"])
     return {"outcome": outcome_str}

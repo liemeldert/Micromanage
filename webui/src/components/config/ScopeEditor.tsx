@@ -39,6 +39,7 @@ export function ScopeEditor({
   previous,
   groupsLabel = "Target groups",
   groupsDescription = "Devices in any of these groups are in scope.",
+  emptyMatchesAll = false,
 }: {
   scope: Scope;
   onChange: (next: Scope) => void;
@@ -47,6 +48,10 @@ export function ScopeEditor({
   previous?: Scope;
   groupsLabel?: string;
   groupsDescription?: string;
+  // ATC flow triggers and Dispatcher rules treat an empty scope as "matches
+  // every device" (controller/services/atc.py and dispatcher.py `_scope_matches`);
+  // profiles/apps treat an empty scope as "matches nothing" (the default here).
+  emptyMatchesAll?: boolean;
 }) {
   const [advancedOpen, setAdvancedOpen] = useState(
     (scope.include_devices?.length ?? 0) > 0 || (scope.exclude_devices?.length ?? 0) > 0,
@@ -66,23 +71,24 @@ export function ScopeEditor({
 
   // Precompute each loaded device's group memberships once, then evaluate scope.
   const matched = useMemo(() => {
-    return devices
-      .filter((d) => d.serial_number)
-      .filter((d) => evaluateScope(d, deviceGroupNames(d, allGroups), scope, allGroups));
-  }, [devices, allGroups, scope]);
+    const loaded = devices.filter((d) => d.serial_number);
+    if (emptyMatchesAll && isEmptyScope(scope)) return loaded;
+    return loaded.filter((d) => evaluateScope(d, deviceGroupNames(d, allGroups), scope, allGroups));
+  }, [devices, allGroups, scope, emptyMatchesAll]);
 
   const diff = useMemo(() => {
     if (!previous) return null;
-    const prev = new Set(
-      devices
-        .filter((d) => evaluateScope(d, deviceGroupNames(d, allGroups), previous, allGroups))
-        .map((d) => d.serial_number),
-    );
+    const loaded = devices.filter((d) => d.serial_number);
+    const prevMatched =
+      emptyMatchesAll && isEmptyScope(previous)
+        ? loaded
+        : loaded.filter((d) => evaluateScope(d, deviceGroupNames(d, allGroups), previous, allGroups));
+    const prev = new Set(prevMatched.map((d) => d.serial_number));
     const now = new Set(matched.map((d) => d.serial_number));
     const added = [...now].filter((s) => !prev.has(s));
     const removed = [...prev].filter((s) => !now.has(s));
     return { added, removed };
-  }, [previous, devices, allGroups, matched]);
+  }, [previous, devices, allGroups, matched, emptyMatchesAll]);
 
   const patch = (p: Partial<Scope>) => onChange({ ...scope, ...p });
 
@@ -199,4 +205,16 @@ export function ScopeEditor({
 
 function uniq(values: (string | null | undefined)[]): string[] {
   return Array.from(new Set(values.filter((v): v is string => !!v))).sort();
+}
+
+// Mirrors the Python `_scope_matches` empty-check (controller/services/atc.py,
+// controller/services/dispatcher.py): a scope is "empty" when none of groups /
+// conditions / include_devices / exclude_devices has any entries.
+function isEmptyScope(s: Scope): boolean {
+  return (
+    (s.groups?.length ?? 0) === 0 &&
+    (s.conditions?.length ?? 0) === 0 &&
+    (s.include_devices?.length ?? 0) === 0 &&
+    (s.exclude_devices?.length ?? 0) === 0
+  );
 }

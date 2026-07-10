@@ -251,6 +251,7 @@ export default function ATCPage() {
               allGroups={groups}
               groupsLabel="Target groups"
               groupsDescription="Empty trigger matches every enrolling device."
+              emptyMatchesAll
             />
           </Paper>
 

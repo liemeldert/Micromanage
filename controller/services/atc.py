@@ -63,11 +63,13 @@ def _flow_hash(flow: Dict[str, Any]) -> str:
 
 
 def _nodes_by_id(flow: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
-    return {
-        n["id"]: n
-        for n in (flow.get("nodes") or [])
-        if isinstance(n, dict) and n.get("id")
-    }
+    # Keep the FIRST definition of a duplicate id, matching the validator's graph
+    # build (a dict comprehension would keep the last and diverge from review).
+    by_id: Dict[str, Dict[str, Any]] = {}
+    for n in (flow.get("nodes") or []):
+        if isinstance(n, dict) and n.get("id") and n["id"] not in by_id:
+            by_id[n["id"]] = n
+    return by_id
 
 
 def _scope_matches(device: Device, device_groups: List[str],
@@ -83,6 +85,15 @@ def _scope_matches(device: Device, device_groups: List[str],
 
 def _now() -> datetime:
     return datetime.now(timezone.utc)
+
+
+def _int(value: Any, default: int = 0) -> int:
+    """Coerce a possibly-malformed value (flows.yaml can be hand-edited/restored
+    outside the validated PUT) to int without raising."""
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
 
 
 # ── Entry points ─────────────────────────────────────────────────────────────
@@ -115,36 +126,42 @@ async def start_flows_for_enroll(device: Device) -> Optional[FlowRun]:
     if not matches:
         return None
 
-    # Highest priority wins; ties broken by id (stable, matches the spec).
-    flow = sorted(matches, key=lambda f: (-(f.get("priority") or 0), str(f.get("id"))))[0]
-    flow_id = str(flow.get("id"))
-    start = flow.get("start")
-    nodes = _nodes_by_id(flow)
-    if start not in nodes:
-        logger.error("ATC: flow %r start node %r missing; not starting", flow_id, start)
-        return None
-
-    # A re-enroll supersedes any still-active run of the same flow on this device.
     try:
-        await FlowRun.filter(
-            device_id=device.id, flow_id=flow_id, status__in=["running", "waiting"]
-        ).update(status="cancelled", current_node=None, waiting_signal=None,
-                 waiting_ref=None, wait_deadline=None, completed_at=_now())
-    except Exception:
-        logger.exception("ATC: superseding prior runs failed for flow %s", flow_id)
+        # Highest priority wins; ties broken by id (stable, matches the spec).
+        flow = sorted(matches, key=lambda f: (-_int(f.get("priority")), str(f.get("id"))))[0]
+        flow_id = str(flow.get("id"))
+        start = flow.get("start")
+        nodes = _nodes_by_id(flow)
+        if start not in nodes:
+            logger.error("ATC: flow %r start node %r missing; not starting", flow_id, start)
+            return None
 
-    run = await FlowRun.create(
-        tenant_id=device.tenant_id,
-        device_id=device.id,
-        flow_id=flow_id,
-        flow_hash=_flow_hash(flow),
-        status="running",
-        current_node=start,
-        context={"flow": flow, "timeline": [], "visited": [], "expected": {}},
-    )
-    logger.info("ATC: started flow %s for %s (run %s)", flow_id, device.serial_number, run.id)
-    await _advance(run, device)
-    return run
+        # A re-enroll supersedes ALL still-active runs on this device: only one
+        # flow runs per enroll, and the winning flow can differ from a prior
+        # enroll's (leaving the old one waiting would run two flows at once).
+        try:
+            await FlowRun.filter(
+                device_id=device.id, status__in=["running", "waiting"]
+            ).update(status="cancelled", current_node=None, waiting_signal=None,
+                     waiting_ref=None, wait_deadline=None, completed_at=_now())
+        except Exception:
+            logger.exception("ATC: superseding prior runs failed for device %s", device.id)
+
+        run = await FlowRun.create(
+            tenant_id=device.tenant_id,
+            device_id=device.id,
+            flow_id=flow_id,
+            flow_hash=_flow_hash(flow),
+            status="running",
+            current_node=start,
+            context={"flow": flow, "timeline": [], "visited": [], "expected": {}},
+        )
+        logger.info("ATC: started flow %s for %s (run %s)", flow_id, device.serial_number, run.id)
+        await _advance(run, device)
+        return run
+    except Exception:
+        logger.exception("ATC: starting enroll flow failed for device %s", device.id)
+        return None
 
 
 async def start_flow_by_id(device: Device, flow_id: str) -> Optional[FlowRun]:
@@ -152,25 +169,29 @@ async def start_flow_by_id(device: Device, flow_id: str) -> Optional[FlowRun]:
 
     Ignores the trigger match (an operator asked for this flow explicitly) but
     still supersedes an active run of the same flow. Returns None if the flow
-    doesn't exist or is malformed."""
-    flows = _load_flows(str(device.tenant_id))
-    flow = next((f for f in flows if isinstance(f, dict) and str(f.get("id")) == flow_id), None)
-    if flow is None:
+    doesn't exist, is malformed, or the start fails."""
+    try:
+        flows = _load_flows(str(device.tenant_id))
+        flow = next((f for f in flows if isinstance(f, dict) and str(f.get("id")) == flow_id), None)
+        if flow is None:
+            return None
+        start = flow.get("start")
+        if start not in _nodes_by_id(flow):
+            return None
+        await FlowRun.filter(
+            device_id=device.id, flow_id=flow_id, status__in=["running", "waiting"]
+        ).update(status="cancelled", current_node=None, waiting_signal=None,
+                 waiting_ref=None, wait_deadline=None, completed_at=_now())
+        run = await FlowRun.create(
+            tenant_id=device.tenant_id, device_id=device.id, flow_id=flow_id,
+            flow_hash=_flow_hash(flow), status="running", current_node=start,
+            context={"flow": flow, "timeline": [], "visited": [], "expected": {}, "manual": True},
+        )
+        await _advance(run, device)
+        return run
+    except Exception:
+        logger.exception("ATC: manual start of flow %s failed for device %s", flow_id, device.id)
         return None
-    start = flow.get("start")
-    if start not in _nodes_by_id(flow):
-        return None
-    await FlowRun.filter(
-        device_id=device.id, flow_id=flow_id, status__in=["running", "waiting"]
-    ).update(status="cancelled", current_node=None, waiting_signal=None,
-             waiting_ref=None, wait_deadline=None, completed_at=_now())
-    run = await FlowRun.create(
-        tenant_id=device.tenant_id, device_id=device.id, flow_id=flow_id,
-        flow_hash=_flow_hash(flow), status="running", current_node=start,
-        context={"flow": flow, "timeline": [], "visited": [], "expected": {}, "manual": True},
-    )
-    await _advance(run, device)
-    return run
 
 
 async def advance_on_signal(device_id: str, signal: str, ref: Optional[str] = None) -> None:
@@ -202,6 +223,10 @@ async def advance_on_signal(device_id: str, signal: str, ref: Optional[str] = No
                 if not nxt:
                     await _fail(run, "wait_for node has no 'next' edge")
                     continue
+                # This barrier is done: clear its expected refs so a later
+                # wait_for on the same signal starts fresh (not matched by a
+                # stale ref from this one).
+                _consume_expected(run, signal)
                 run.status = "running"
                 run.current_node = nxt
                 _timeline(run, run.current_node, f"resumed on {signal}")
@@ -237,6 +262,7 @@ async def sweep_timeouts(tenant: Tenant) -> int:
             if on_timeout:
                 run.status = "running"
                 run.current_node = on_timeout
+                _consume_expected(run, ((node or {}).get("params") or {}).get("signal"))
                 _timeline(run, on_timeout, "wait timed out")
                 if device is None:
                     await _fail(run, "device no longer exists")
@@ -299,6 +325,7 @@ async def _advance(run: FlowRun, device: Device) -> None:
                     await _fail(run, "wait_for node has no 'next' edge")
                     return
                 signal = (node.get("params") or {}).get("signal")
+                _consume_expected(run, signal)
                 _timeline(run, nid, f"wait skipped ({signal} already satisfied)")
                 run.current_node = nxt
                 continue
@@ -403,9 +430,7 @@ def _recompute_groups(device: Device) -> None:
 
 
 async def _set_name(run: FlowRun, device: Device, template: str) -> None:
-    from controller.services.mdm_connector import MDMConnector
     from controller.services.naming import resolve_name
-    from controller.services.task_manager import TaskManager
 
     resolved = resolve_name(template, device)
     if not resolved:
@@ -414,16 +439,28 @@ async def _set_name(run: FlowRun, device: Device, template: str) -> None:
     device.name = resolved
     await device.save(update_fields=["name"])
     _timeline(run, run.current_node, f"set_name -> {resolved!r}")
-    # Push to the device (supervised only actually applies); fire-and-forget.
+    # Push to the device fire-and-forget: the MDM round-trip (up to the client
+    # timeout) must not block _advance on the enroll/webhook hot path. set_name
+    # has no wait_for signal, so nothing in the flow depends on its completion.
     if device.enrollment_state != "enrolled" or not device.udid:
         return
+    from controller.services.reconciler import _spawn
+    _spawn(_push_device_name(device, resolved, run.flow_id))
+
+
+async def _push_device_name(device: Device, resolved: str, flow_id: str) -> None:
+    """Background SetName push + audit task (spawned by _set_name so the MDM
+    round-trip never blocks the enroll/webhook hot path)."""
+    from controller.services.mdm_connector import MDMConnector
+    from controller.services.task_manager import TaskManager
+
     tenant = await Tenant.get_or_none(id=device.tenant_id)
     if tenant is None:
         return
     task = await TaskManager().create_task(
         tenant=tenant, task_type="set_name",
         description=f"ATC rename {device.serial_number} to {resolved!r}",
-        device=device, user=f"atc:{run.flow_id}", details={},
+        device=device, user=f"atc:{flow_id}", details={},
     )
     connector = MDMConnector()
     try:
@@ -680,6 +717,19 @@ def _expect(run: FlowRun, signal: str, refs: List[str]) -> None:
         if str(r) not in [str(x) for x in bucket]:
             bucket.append(str(r))
     run.context = ctx
+
+
+def _consume_expected(run: FlowRun, signal: Optional[str]) -> None:
+    """Clear the refs a just-left wait_for was waiting on (resumed / skipped /
+    timed out) so a later wait_for on the SAME signal starts with a fresh
+    expectation instead of being satisfied by a stale ref from the earlier one."""
+    if not signal:
+        return
+    ctx = run.context or {}
+    expected = ctx.get("expected")
+    if isinstance(expected, dict) and signal in expected:
+        expected[signal] = []
+        run.context = ctx
 
 
 def _timeline(run: FlowRun, node_id: Optional[str], message: str) -> None:

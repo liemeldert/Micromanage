@@ -109,6 +109,20 @@ def _redact_dispatcher_config(config: Dict[str, Any]) -> Dict[str, Any]:
     return cfg
 
 
+def _redact_dispatcher_history(content: str) -> str:
+    """Redact webhook url/secret from a raw dispatcher.yaml history snapshot so
+    the history-view endpoint can't leak a secret the live GET already hides.
+    Fails safe (returns empty) if the snapshot can't be parsed."""
+    try:
+        doc = yaml.safe_load(content)
+        if not isinstance(doc, dict):
+            return content
+        return yaml.safe_dump(_redact_dispatcher_config(doc), sort_keys=False)
+    except Exception:
+        logger.exception("could not redact dispatcher history snapshot")
+        return ""
+
+
 def _restore_dispatcher_secrets(tenant_id: str, config_data: Dict[str, Any]) -> None:
     """Before saving dispatcher.yaml, replace any redacted webhook url/secret the
     UI echoed back with the value currently on disk (matched by webhook name), so
@@ -790,11 +804,16 @@ async def get_config_history_version(
 ):
     """One historical config document, including its full YAML content."""
     entry = _load_history_entry(principal.tenant.id, config_type, version_id)
+    content = entry.get("content") or ""
+    # dispatcher.yaml history stores raw webhook url/secret; redact them from the
+    # response the same way the live GET does, so an old version can't leak one.
+    if config_type == "dispatcher" and content:
+        content = _redact_dispatcher_history(content)
     return {
         "id": entry.get("id") or version_id,
         "saved_at": entry.get("saved_at"),
         "user": entry.get("user"),
-        "content": entry.get("content") or "",
+        "content": content,
     }
 
 
@@ -1403,13 +1422,18 @@ async def list_alerts(
         query = query.filter(device_id=device_id)
     alerts = await query.limit(1000).all()
     items = await _enrich_alerts(alerts)
-    # Severity counts across active (non-resolved) alerts, for the board header.
-    active = [a for a in alerts if a.status != "resolved"]
+    # Board header counts: ALL active (non-resolved) alerts by severity, computed
+    # independent of the severity/status VIEW filters so selecting one severity
+    # chip doesn't zero the others (which would hide e.g. black alerts mid-triage).
+    count_q = Alert.filter(tenant=principal.tenant).exclude(status="resolved")
+    if device_id:
+        count_q = count_q.filter(device_id=device_id)
+    active_alerts = await count_q.all()
     counts = {s: 0 for s in ("black", "red", "yellow", "green")}
-    for a in active:
+    for a in active_alerts:
         if a.severity in counts:
             counts[a.severity] += 1
-    return {"alerts": items, "counts": counts, "active": len(active)}
+    return {"alerts": items, "counts": counts, "active": len(active_alerts)}
 
 
 @app.get("/api/v1/alerts/{alert_id}")
@@ -1430,7 +1454,7 @@ async def acknowledge_alert(alert_id: str, principal: Principal = Depends(get_cu
     alert.status = "acknowledged"
     alert.acknowledged_at = datetime.now(timezone.utc)
     alert.acknowledged_by = principal.email
-    await alert.save()
+    await alert.save(update_fields=["status", "acknowledged_at", "acknowledged_by"])
     return alert.to_dict()
 
 
@@ -1449,7 +1473,7 @@ async def resolve_alert(alert_id: str, principal: Principal = Depends(get_curren
     else:
         alert.status = "resolved"
         alert.resolved_at = datetime.now(timezone.utc)
-        await alert.save()
+        await alert.save(update_fields=["status", "resolved_at"])
     return alert.to_dict()
 
 

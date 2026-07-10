@@ -13,11 +13,24 @@ treated per-check and never raises. ``evaluate_check`` returns a *finding*
 """
 
 import logging
+import os
 import re
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
+
+# ReDoS guard for the `attribute` regex operator: the pattern is admin-authored
+# but the subject is device-reported (untrusted) inventory, and evaluate_check
+# runs inline on the webhook hot path. Use the `regex` module's per-match timeout
+# (stdlib `re` has none), mirroring controller/services/scoping.py.
+try:
+    import regex as _regex_engine
+    _HAS_REGEX_TIMEOUT = True
+except ImportError:  # pragma: no cover - regex is pinned in requirements
+    _regex_engine = re
+    _HAS_REGEX_TIMEOUT = False
+_REGEX_TIMEOUT = float(os.getenv("GROUP_REGEX_TIMEOUT_SECONDS", "2.0"))
 
 # Metadata for the UI check picker (curated checks + the generic `attribute`).
 CHECK_CATALOG: List[Dict[str, Any]] = [
@@ -239,9 +252,16 @@ def _attribute(device, params, ctx):
     elif op == "not_equals":
         fired = str(actual) != str(expected)
     elif op == "regex":
+        # Timeout-bounded so a catastrophic-backtracking pattern against
+        # device-reported data can't hang the event loop (see module header).
         try:
-            fired = actual is not None and re.search(str(expected), str(actual)) is not None
-        except re.error:
+            if _HAS_REGEX_TIMEOUT:
+                fired = _regex_engine.search(
+                    str(expected), str(actual), timeout=_REGEX_TIMEOUT
+                ) is not None
+            else:
+                fired = re.search(str(expected), str(actual)) is not None
+        except Exception:
             fired = False
     elif op in ("gt", "lt"):
         try:

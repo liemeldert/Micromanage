@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
 import {
   Background,
@@ -14,7 +14,6 @@ import "@xyflow/react/dist/style.css";
 import {
   Alert,
   Badge,
-  Box,
   Button,
   Group,
   Loader,
@@ -41,6 +40,8 @@ const STATUS_COLOR: Record<string, string> = {
   cancelled: "gray",
 };
 
+const TERMINAL_STATUSES = new Set(["completed", "failed", "cancelled"]);
+
 export default function FlowRunViewer() {
   const { token } = useAuth();
   const router = useRouter();
@@ -49,6 +50,13 @@ export default function FlowRunViewer() {
   const [run, setRun] = useState<FlowRunDetail | null>(null);
   const [catalog, setCatalog] = useState<FlowNodeSpec[]>([]);
   const [loading, setLoading] = useState(true);
+  // Mirrors `run?.status` without being a dependency: the polling interval
+  // below reads this instead of closing over `run`, so status updates don't
+  // need to tear down/recreate the interval (and can't read a stale value).
+  const statusRef = useRef<string | undefined>(undefined);
+  useEffect(() => {
+    statusRef.current = run?.status;
+  }, [run?.status]);
 
   useEffect(() => {
     if (!token) return;
@@ -65,16 +73,19 @@ export default function FlowRunViewer() {
         .catch(() => {})
         .finally(() => live && setLoading(false));
     load();
-    // Poll while the run is still active so the highlighted position advances live.
+    // Poll every 5s until the run reaches a terminal state, then stop.
     const t = setInterval(() => {
-      if (run && (run.status === "running" || run.status === "waiting")) load();
+      if (statusRef.current && TERMINAL_STATUSES.has(statusRef.current)) {
+        clearInterval(t);
+        return;
+      }
+      load();
     }, 5000);
     return () => {
       live = false;
       clearInterval(t);
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [token, id, run?.status]);
+  }, [token, id]);
 
   const graph = useMemo(() => {
     if (!run?.flow) return { nodes: [] as RFNode[], edges: [] as Edge[] };

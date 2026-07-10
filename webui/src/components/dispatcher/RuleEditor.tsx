@@ -207,6 +207,7 @@ export function RuleEditor() {
             allGroups={groups}
             groupsLabel="Target groups"
             groupsDescription="Empty scope applies the rule to every device."
+            emptyMatchesAll
           />
 
           <Divider my="sm" label="Compliance check (fires when true)" labelPosition="left" />
