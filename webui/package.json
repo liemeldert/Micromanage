@@ -26,6 +26,7 @@
     "@tiptap/pm": "^2.22.3",
     "@tiptap/react": "^2.22.3",
     "@tiptap/starter-kit": "^2.22.3",
+    "@xyflow/react": "^12.11.2",
     "dayjs": "^1.11.13",
     "js-yaml": "^4.3.0",
     "leaflet": "^1.9.4",

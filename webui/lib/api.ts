@@ -71,7 +71,7 @@ async function request<T>(
 // Config documents editable via the validated PUT (+ version history). "config"
 // is readable but not editable (it embeds secrets). Kept in sync with the
 // controller allow-list (controller/api/main.py).
-export type EditableConfigType = "groups" | "apps" | "profiles" | "tags";
+export type EditableConfigType = "groups" | "apps" | "profiles" | "tags" | "flows";
 export type ReadableConfigType = EditableConfigType | "config";
 
 export const api = {
@@ -328,6 +328,30 @@ export const api = {
     return request<{ commands: CatalogCommand[] }>("/api/v1/commands/catalog", token);
   },
 
+  // ── ATC flows ──────────────────────────────────────────────────────────────
+  // Node palette + wait-signal registry -- drives the visual editor data-driven.
+  getFlowStepCatalog(token: string) {
+    return request<FlowStepCatalog>("/api/v1/flows/step-catalog", token);
+  },
+  // Runs for a device (observability / run viewer entry points).
+  getDeviceFlowRuns(token: string, deviceId: string) {
+    return request<{ flow_runs: FlowRunSummary[] }>(
+      `/api/v1/devices/${deviceId}/flow-runs`,
+      token,
+    );
+  },
+  // One run, including the pinned flow snapshot it is executing.
+  getFlowRun(token: string, runId: string) {
+    return request<FlowRunDetail>(`/api/v1/flow-runs/${runId}`, token);
+  },
+  // Manually start a flow against a device (testing / re-run).
+  startFlowRun(token: string, deviceId: string, flowId: string) {
+    return request<FlowRunSummary>(`/api/v1/devices/${deviceId}/flow-runs`, token, {
+      method: "POST",
+      body: JSON.stringify({ flow_id: flowId }),
+    });
+  },
+
   cancelTask(token: string, id: string) {
     return request<{ message: string }>(`/api/v1/tasks/${id}/cancel`, token, {
       method: "POST",
@@ -472,4 +496,96 @@ export interface TenantInfo {
   dep_enabled: boolean;
   created_at: string;
   is_active: boolean;
+}
+
+// ── ATC flow types ─────────────────────────────────────────────────────────
+
+export interface FlowNodeParamSpec {
+  name: string;
+  label: string;
+  // tags | profile_ids | app_ids | name_template | condition | command |
+  // command_params | signal | int | string
+  type: string;
+  required?: boolean;
+  help?: string;
+  options?: { value: string; label: string; description?: string }[];
+}
+
+export interface FlowNodeSpec {
+  type: string;
+  label: string;
+  description: string;
+  category: string;
+  waits: boolean;
+  // Output handles this node type wires from, in UI order.
+  edges: ("next" | "on_true" | "on_false" | "on_timeout")[];
+  params: FlowNodeParamSpec[];
+}
+
+export interface WaitSignal {
+  value: string;
+  label: string;
+  description: string;
+}
+
+export interface FlowStepCatalog {
+  nodes: FlowNodeSpec[];
+  wait_signals: WaitSignal[];
+}
+
+export interface FlowRunSummary {
+  id: string;
+  tenant_id: string;
+  device_id: string | null;
+  flow_id: string;
+  flow_hash: string;
+  status: string; // running | waiting | completed | failed | cancelled
+  current_node: string | null;
+  waiting_signal: string | null;
+  waiting_ref: string | null;
+  wait_deadline: string | null;
+  error: string | null;
+  timeline: { at: string; node: string | null; message: string }[];
+  visited: string[];
+  started_at: string | null;
+  updated_at: string | null;
+  completed_at: string | null;
+}
+
+// The run detail additionally carries the pinned flow definition so the run
+// viewer can render the exact graph it executed, with the taken path highlighted.
+export interface FlowRunDetail extends FlowRunSummary {
+  flow: FlowDoc | null;
+}
+
+// ── flows.yaml document shape (authored by the visual editor) ──────────────
+
+export interface FlowNode {
+  id: string;
+  type: string;
+  params?: Record<string, unknown>;
+  next?: string;
+  on_true?: string;
+  on_false?: string;
+  on_timeout?: string;
+  ui?: { x: number; y: number };
+}
+
+export interface FlowTrigger {
+  on: string; // "enroll"
+  match?: Record<string, unknown>;
+}
+
+export interface FlowDoc {
+  id: string;
+  name: string;
+  enabled?: boolean;
+  priority?: number;
+  trigger: FlowTrigger;
+  start: string;
+  nodes: FlowNode[];
+}
+
+export interface FlowsConfig {
+  flows: FlowDoc[];
 }

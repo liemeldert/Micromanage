@@ -29,6 +29,8 @@ import {
   IconLogout,
   IconMoon,
   IconSun,
+  IconSitemap,
+  IconActivityHeartbeat,
 } from "@tabler/icons-react";
 import { useAuth } from "../../../lib/auth-context";
 import { SHOW_YAML_STORAGE_KEY } from "../../../lib/preferences";
@@ -40,6 +42,8 @@ const NAV_ITEMS = [
   { label: "Groups",     icon: IconStack2,             href: "/groups" },
   { label: "Apps",       icon: IconApps,               href: "/apps" },
   { label: "Profiles",   icon: IconFileCertificate,    href: "/profiles" },
+  { label: "ATC",        icon: IconSitemap,            href: "/atc" },
+  { label: "Dispatcher", icon: IconActivityHeartbeat,  href: "/compliance" },
   { label: "Tasks",      icon: IconListCheck,          href: "/tasks" },
   { label: "Settings",   icon: IconSettings,           href: "/settings" },
 ];
