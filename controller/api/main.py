@@ -1114,6 +1114,28 @@ async def get_device_details(device_id: str, principal: Principal = Depends(get_
     profiles = await ProfileDeployment.filter(device=device).all()
     tasks = await Task.filter(device=device).order_by("-created_at").limit(10).all()
 
+    # Why did the last operation on this device fail (if it did)? A dedicated,
+    # tenant-scoped, limit-1 lookup -- deliberately NOT derived from the
+    # `tasks` slice above, since the most recent failure could be older than
+    # the last 10 tasks. Single-device path only (see list_devices) so this
+    # never becomes an N+1 across a device list.
+    last_failed_task = (
+        await Task.filter(device=device, tenant=tenant, status="failed")
+        .order_by("-created_at")
+        .first()
+    )
+    last_task_error = (
+        {
+            "task_id": str(last_failed_task.id),
+            "task_type": last_failed_task.type,
+            "error": last_failed_task.error,
+            "created_at": last_failed_task.created_at,
+            "completed_at": last_failed_task.completed_at,
+        }
+        if last_failed_task
+        else None
+    )
+
     # Name the governing naming template would produce for this device -- offered
     # in the rename UI as a one-click suggestion. Group-scoped first (first
     # matching group with a template, in config order), else the tenant template.
@@ -1138,6 +1160,9 @@ async def get_device_details(device_id: str, principal: Principal = Depends(get_
             # Everything the device has reported about itself (DeviceInformation
             # QueryResponses + SecurityInfo) -- rendered data-driven by the UI.
             "attributes": device.attributes or {},
+            # Why the last operation on this device failed, if it did (null
+            # otherwise) -- so an admin doesn't have to dig through recent_tasks.
+            "last_task_error": last_task_error,
         },
         # Inventory as reported BY THE DEVICE (ProfileList / InstalledApplicationList),
         # distinct from the management-intent deployments below.
@@ -1162,6 +1187,211 @@ async def get_device_details(device_id: str, principal: Principal = Depends(get_
         ],
         "recent_tasks": [task.to_dict() for task in tasks],
     }
+
+
+def _explain_scope(
+    device: Device,
+    device_groups: List[str],
+    scope: Dict[str, Any],
+    item_key: str,
+    now: datetime,
+) -> Dict[str, Any]:
+    """Evaluate one profile/app-version scope against a device and narrate WHY.
+
+    The matched/unmatched decision at every step is delegated to
+    services.scoping (evaluate_condition / evaluate_scope / device_in_rollout)
+    -- this only walks the SAME precedence order evaluate_scope already
+    encodes (exclude > include > groups+conditions, then rollout) to explain
+    which step decided the outcome, rather than re-deriving the boolean itself.
+    """
+    from controller.services.scoping import (
+        device_in_rollout,
+        evaluate_condition,
+        evaluate_scope,
+        rollout_coverage,
+    )
+
+    serial = getattr(device, "serial_number", "") or ""
+    exclude = scope.get("exclude_devices") or []
+    if serial and serial in exclude:
+        return {"matched": False, "reason": f"excluded: serial {serial} is in exclude_devices"}
+
+    include = scope.get("include_devices") or []
+    if serial and serial in include:
+        matched = evaluate_scope(device, device_groups, scope)
+        cherry_pick_reason = f"included: serial {serial} is cherry-picked in include_devices"
+        if not matched:  # defensive; evaluate_scope agrees include wins outright
+            return {"matched": False, "reason": cherry_pick_reason}
+    else:
+        groups = scope.get("groups") or []
+        conditions = scope.get("conditions") or []
+        if not groups and not conditions:
+            return {
+                "matched": False,
+                "reason": "no groups or conditions configured on this scope "
+                          "(include-only; this device was not cherry-picked)",
+            }
+        if groups and not any(g in device_groups for g in groups):
+            return {
+                "matched": False,
+                "reason": f"not in any of the scoped groups: {', '.join(groups)}",
+            }
+        failing_condition = next(
+            (c for c in conditions if not evaluate_condition(device, c, device_groups)),
+            None,
+        )
+        if failing_condition is not None:
+            neg = "negated " if failing_condition.get("negate") else ""
+            return {
+                "matched": False,
+                "reason": (
+                    f"{neg}condition did not match: {failing_condition.get('type')} "
+                    f"{failing_condition.get('operator')} {failing_condition.get('value')!r}"
+                ),
+            }
+        cherry_pick_reason = None
+
+    # Groups/conditions (or a cherry-pick) matched -- last gate is gradual rollout.
+    rollout = scope.get("rollout")
+    if rollout:
+        if not device_in_rollout(device, rollout, item_key, now):
+            coverage = rollout_coverage(rollout, now)
+            return {
+                "matched": False,
+                "reason": f"scoped, but held by gradual rollout (currently covering "
+                          f"{coverage}% of devices; this device's wave hasn't opened yet)",
+            }
+        base = cherry_pick_reason or "matched by group/condition scope"
+        return {"matched": True, "reason": f"{base}; in the current rollout wave"}
+
+    return {"matched": True, "reason": cherry_pick_reason or "matched by group/condition scope"}
+
+
+@app.get("/api/v1/devices/{device_id}/scope-explain")
+async def explain_device_scope(
+        device_id: str, principal: Principal = Depends(get_current_principal),
+):
+    """Explain WHY this device does or doesn't receive each scoped profile,
+    app and group -- read-only, for troubleshooting "why didn't this device
+    get X". Reuses services.scoping's evaluation for every decision; this
+    endpoint only narrates the precedence order that decided the outcome.
+    """
+    tenant = principal.tenant
+    device = await Device.get_or_none(id=device_id, tenant=tenant)
+    if not device:
+        raise HTTPException(status_code=404, detail="Device not found")
+
+    from controller.services.group_manager import GroupManager
+    from controller.services.profile_manager import ProfileManager
+    from controller.services.tenant_config import load_apps, load_groups, load_profiles
+
+    groups_config = load_groups(tenant.id)
+    apps_config = load_apps(tenant.id)
+    profiles_config = load_profiles(tenant.id)
+
+    now = datetime.now(timezone.utc)
+    device_groups = GroupManager(tenant.id).evaluate_device_groups(device, groups_config)
+    device_platform = ProfileManager._device_platform(device)
+
+    groups_out = []
+    for group in groups_config:
+        name = group.get("name")
+        if not name:
+            continue
+        matched = name in device_groups
+        if matched:
+            reason = "matched by group's conditions (or a cherry-picked serial)"
+        else:
+            serial = getattr(device, "serial_number", "") or ""
+            if serial and serial in (group.get("exclude_devices") or []):
+                reason = f"excluded: serial {serial} is in exclude_devices"
+            elif not (group.get("conditions") or []):
+                reason = "group has no conditions (include-only; device not cherry-picked)"
+            else:
+                from controller.services.scoping import evaluate_condition
+                failing = next(
+                    (c for c in group.get("conditions") or []
+                     if not evaluate_condition(device, c, device_groups)),
+                    None,
+                )
+                if failing is not None:
+                    neg = "negated " if failing.get("negate") else ""
+                    reason = (
+                        f"{neg}condition did not match: {failing.get('type')} "
+                        f"{failing.get('operator')} {failing.get('value')!r}"
+                    )
+                else:
+                    reason = "did not match this group's conditions"
+        groups_out.append({"id": name, "name": name, "matched": matched, "reason": reason})
+
+    profiles_out = []
+    for profile in profiles_config:
+        pid = profile.get("id")
+        if not pid:
+            continue
+        if profile.get("dep_profile") or profile.get("type") == "enrollment":
+            profiles_out.append({
+                "id": pid, "name": profile.get("name", pid), "matched": False,
+                "reason": "enrollment/DEP profile -- not pushed as managed config",
+            })
+            continue
+        platforms = profile.get("platforms")
+        if platforms and device_platform not in platforms:
+            profiles_out.append({
+                "id": pid, "name": profile.get("name", pid), "matched": False,
+                "reason": f"excluded by platform: device is {device_platform}, "
+                          f"profile targets {', '.join(platforms)}",
+            })
+            continue
+        outcome = _explain_scope(device, device_groups, profile, f"profile:{pid}", now)
+        profiles_out.append({
+            "id": pid, "name": profile.get("name", pid),
+            "matched": outcome["matched"], "reason": outcome["reason"],
+        })
+
+    apps_out = []
+    for app_entry in apps_config:
+        app_id = app_entry.get("id")
+        if not app_id:
+            continue
+        versions = app_entry.get("versions") or []
+        # Mirror AppManager._get_applicable_version: newest-first, first scoped
+        # (and waved-in) version wins; a version held by rollout falls through
+        # to the next-older version rather than reporting "no match".
+        chosen = None
+        version_reasons = []
+        for version in reversed(versions):
+            outcome = _explain_scope(
+                device, device_groups, version,
+                f"app:{app_id}:{version.get('version')}", now,
+            )
+            version_reasons.append((version.get("version"), outcome))
+            if outcome["matched"]:
+                chosen = version
+                break
+        if chosen is not None:
+            reason = f"version {chosen.get('version')} matched: {version_reasons[-1][1]['reason']}"
+            apps_out.append({
+                "id": app_id, "name": app_entry.get("name", app_id),
+                "matched": True, "reason": reason,
+            })
+        elif version_reasons:
+            # Nothing matched -- report the most recent (newest) version's reason,
+            # since that's the one an author most likely expected to apply.
+            newest_version, newest_outcome = version_reasons[0]
+            apps_out.append({
+                "id": app_id, "name": app_entry.get("name", app_id),
+                "matched": False,
+                "reason": f"no version matched (newest, {newest_version}: "
+                          f"{newest_outcome['reason']})",
+            })
+        else:
+            apps_out.append({
+                "id": app_id, "name": app_entry.get("name", app_id),
+                "matched": False, "reason": "app has no versions configured",
+            })
+
+    return {"profiles": profiles_out, "apps": apps_out, "groups": groups_out}
 
 
 class DeviceRename(BaseModel):
@@ -1557,10 +1787,11 @@ async def send_device_command(
             )
 
             from controller.services.task_handlers import handle_app_install_task
+            from controller.services.reconciler import _spawn
 
-            asyncio.create_task(
-                task_manager.execute_task(task, handle_app_install_task)
-            )
+            # _spawn keeps a strong reference; a bare asyncio.create_task can be
+            # garbage-collected mid-flight, silently dropping the install.
+            _spawn(task_manager.execute_task(task, handle_app_install_task))
 
             return {"task_id": str(task.id), "message": "App installation started"}
 
@@ -1583,8 +1814,11 @@ async def send_device_command(
             )
 
             from controller.services.task_handlers import handle_app_remove_task
+            from controller.services.reconciler import _spawn
 
-            asyncio.create_task(task_manager.execute_task(task, handle_app_remove_task))
+            # _spawn keeps a strong reference; a bare asyncio.create_task can be
+            # garbage-collected mid-flight, silently dropping the removal.
+            _spawn(task_manager.execute_task(task, handle_app_remove_task))
 
             return {"task_id": str(task.id), "message": "App removal started"}
 
@@ -1770,6 +2004,67 @@ async def cancel_task(task_id: str, principal: Principal = Depends(get_current_p
     await task.save(update_fields=["status", "completed_at"])
 
     return {"message": "Task cancelled"}
+
+
+@app.post("/api/v1/tasks/{task_id}/retry")
+async def retry_task(task_id: str, principal: Principal = Depends(get_current_principal)):
+    """Retry a failed or cancelled task by re-dispatching it through the same
+    handler its task_type originally used.
+
+    Only terminal, non-successful tasks (failed/cancelled) may be retried --
+    pending/running tasks are already in flight and completed tasks have
+    nothing to retry. A fresh Task row is created (copying tenant/type/
+    description/device/user/details) rather than mutating the old one, so the
+    original failure stays in the audit history and the retry gets its own
+    lifecycle -- the same pattern the reconciler and send_device_command use
+    when queueing work. task_types with no registered handler (e.g. the
+    synchronous set_name/tag_update audit tasks) are not safely re-runnable
+    and are rejected.
+    """
+    tenant = principal.tenant
+    task = await Task.get_or_none(id=task_id, tenant=tenant).prefetch_related("device")
+
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found")
+
+    if task.status not in ("failed", "cancelled"):
+        raise HTTPException(
+            status_code=409,
+            detail=f"Task is {task.status}; only failed or cancelled tasks can be retried",
+        )
+
+    from controller.services.task_handlers import TASK_HANDLERS
+
+    handler = TASK_HANDLERS.get(task.type)
+    if handler is None:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Task type '{task.type}' has no re-runnable handler and cannot be retried",
+        )
+
+    # Copy the input details but drop command_uuid -- that's an output the
+    # failed attempt wrote (correlates a webhook to a specific device command)
+    # and must not leak into the new task's row before the handler issues its
+    # own command.
+    retry_details = dict(task.details or {})
+    retry_details.pop("command_uuid", None)
+
+    new_task = await task_manager.create_task(
+        tenant=tenant,
+        task_type=task.type,
+        description=f"Retry: {task.description}",
+        device=task.device,
+        user=principal.email,
+        details=retry_details,
+    )
+
+    from controller.services.reconciler import _spawn
+
+    # _spawn keeps a strong reference; a bare asyncio.create_task can be
+    # garbage-collected mid-flight, silently dropping the retry.
+    _spawn(task_manager.execute_task(new_task, handler))
+
+    return {"task_id": str(new_task.id), "message": "Task retry started"}
 
 
 # Reports and Statistics

@@ -41,3 +41,15 @@ def load_groups(tenant_id: str) -> List[Dict[str, Any]]:
     """The ``groups`` list from a tenant's groups.yaml (empty if absent)."""
     groups = _load(tenant_id, "groups.yaml").get("groups", [])
     return groups if isinstance(groups, list) else []
+
+
+def load_apps(tenant_id: str) -> List[Dict[str, Any]]:
+    """The ``apps`` list from a tenant's apps.yaml (empty if absent)."""
+    apps = _load(tenant_id, "apps.yaml").get("apps", [])
+    return apps if isinstance(apps, list) else []
+
+
+def load_profiles(tenant_id: str) -> List[Dict[str, Any]]:
+    """The ``profiles`` list from a tenant's profiles.yaml (empty if absent)."""
+    profiles = _load(tenant_id, "profiles.yaml").get("profiles", [])
+    return profiles if isinstance(profiles, list) else []
