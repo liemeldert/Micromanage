@@ -122,32 +122,40 @@ export default function DashboardPage() {
       <Title order={2}>Dashboard</Title>
 
       <SimpleGrid cols={{ base: 1, sm: 2, lg: 4 }} spacing="md">
-        <StatCard
-          label="Total Devices"
-          value={stats?.devices.total ?? 0}
-          sub={`${stats?.devices.active_7d ?? 0} active in last 7 days`}
-          icon={IconDeviceLaptop}
-          color="blue"
-        />
-        <StatCard
-          label="App Deployments"
-          value={stats?.deployments.apps ?? 0}
-          icon={IconPackage}
-          color="grape"
-        />
-        <StatCard
-          label="Profile Deployments"
-          value={stats?.deployments.profiles ?? 0}
-          icon={IconCircleCheck}
-          color="teal"
-        />
-        <StatCard
-          label="Pending Tasks"
-          value={taskPending + taskRunning}
-          sub={taskFailed > 0 ? `${taskFailed} failed` : undefined}
-          icon={IconClock}
-          color={taskFailed > 0 ? "red" : "orange"}
-        />
+        <Box style={{ cursor: "pointer" }} onClick={() => router.push("/devices")}>
+          <StatCard
+            label="Total Devices"
+            value={stats?.devices.total ?? 0}
+            sub={`${stats?.devices.active_7d ?? 0} active in last 7 days`}
+            icon={IconDeviceLaptop}
+            color="blue"
+          />
+        </Box>
+        <Box style={{ cursor: "pointer" }} onClick={() => router.push("/apps")}>
+          <StatCard
+            label="App Deployments"
+            value={stats?.deployments.apps ?? 0}
+            icon={IconPackage}
+            color="grape"
+          />
+        </Box>
+        <Box style={{ cursor: "pointer" }} onClick={() => router.push("/profiles")}>
+          <StatCard
+            label="Profile Deployments"
+            value={stats?.deployments.profiles ?? 0}
+            icon={IconCircleCheck}
+            color="teal"
+          />
+        </Box>
+        <Box style={{ cursor: "pointer" }} onClick={() => router.push("/tasks")}>
+          <StatCard
+            label="Pending Tasks"
+            value={taskPending + taskRunning}
+            sub={taskFailed > 0 ? `${taskFailed} failed` : undefined}
+            icon={IconClock}
+            color={taskFailed > 0 ? "red" : "orange"}
+          />
+        </Box>
         <Box style={{ cursor: "pointer" }} onClick={() => router.push("/compliance")}>
           <StatCard
             label="Compliance Alerts"

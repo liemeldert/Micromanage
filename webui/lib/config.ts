@@ -4,6 +4,7 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { notifications } from "@mantine/notifications";
+import yaml from "js-yaml";
 import { api, ApiError, type Device } from "./api";
 import { useAuth } from "./auth-context";
 
@@ -599,7 +600,23 @@ export function useConfigResource<T>(type: ConfigType, empty: T) {
     [token, type],
   );
 
-  return { data, setData, loading, saving, reload, save };
+  // YAML text form of the live data, for the config editors' History drawer
+  // (ConfigHistoryDrawer diffs a historical version against this as the
+  // "current" baseline). The visual editors only ever hold parsed JSON
+  // (via api.getConfig), unlike the raw-YAML page -- this re-serializes it
+  // client-side rather than a second round-trip through api.getConfigRaw.
+  // Best-effort: on dump failure, fall back to an empty baseline so the
+  // drawer still renders (diff just against nothing) instead of throwing.
+  const currentDocText = useMemo(() => {
+    if (data == null) return "";
+    try {
+      return yaml.dump(data);
+    } catch {
+      return "";
+    }
+  }, [data]);
+
+  return { data, setData, loading, saving, reload, save, currentDocText };
 }
 
 // Load the advisory tag registry (tags.yaml) for pickers / autocomplete / chip

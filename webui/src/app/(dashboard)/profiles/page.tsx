@@ -22,6 +22,7 @@ import { FileButton } from "@mantine/core";
 import {
   IconDownload,
   IconFileCertificate,
+  IconHistory,
   IconPencil,
   IconPlus,
   IconTrash,
@@ -35,6 +36,7 @@ import {
 } from "../../../../lib/config";
 import { getManifest } from "../../../../lib/profile-manifests";
 import { parseMobileconfig, profileToMobileconfig } from "../../../../lib/plist";
+import { ConfigHistoryDrawer } from "../../../components/config/ConfigHistoryDrawer";
 import { IMPORT_KEY } from "../../../components/config/ProfileEditor";
 
 function slugify(s: string): string {
@@ -49,8 +51,12 @@ function slugify(s: string): string {
 
 export default function ProfilesPage() {
   const router = useRouter();
-  const { data, loading, save } = useConfigResource<ProfilesConfig>("profiles", { profiles: [] });
+  const { data, loading, save, reload, currentDocText } = useConfigResource<ProfilesConfig>(
+    "profiles",
+    { profiles: [] },
+  );
   const [importing, setImporting] = useState(false);
+  const [historyOpen, setHistoryOpen] = useState(false);
 
   const profiles = data?.profiles ?? [];
 
@@ -110,7 +116,8 @@ export default function ProfilesPage() {
       title: "Delete profile",
       children: (
         <Text size="sm">
-          Delete profile <b>{p.name}</b>? It will no longer be pushed to devices in its groups.
+          Delete profile <b>{p.name}</b>? It will be removed from devices in its groups on the
+          next sync -- unlike apps, profile removal is automatic.
         </Text>
       ),
       labels: { confirm: "Delete", cancel: "Cancel" },
@@ -130,6 +137,14 @@ export default function ProfilesPage() {
           </Text>
         </Stack>
         <Group gap="xs">
+          <Button
+            variant="light"
+            leftSection={<IconHistory size={14} />}
+            onClick={() => setHistoryOpen(true)}
+            disabled={loading}
+          >
+            History
+          </Button>
           <FileButton onChange={handleImport} accept=".mobileconfig,.plist,application/x-apple-aspen-config">
             {(props) => (
               <Button
@@ -253,6 +268,14 @@ export default function ProfilesPage() {
           })}
         </Stack>
       )}
+
+      <ConfigHistoryDrawer
+        opened={historyOpen}
+        onClose={() => setHistoryOpen(false)}
+        type="profiles"
+        currentDoc={currentDocText}
+        onRestored={reload}
+      />
     </Stack>
   );
 }

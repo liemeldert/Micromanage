@@ -21,6 +21,7 @@ import {
 import { modals } from "@mantine/modals";
 import {
   IconApps,
+  IconHistory,
   IconPencil,
   IconPlus,
   IconTrash,
@@ -36,10 +37,15 @@ import {
   type Group as GroupDef,
 } from "../../../../lib/config";
 import { AppWizard } from "../../../components/config/AppWizard";
+import { ConfigHistoryDrawer } from "../../../components/config/ConfigHistoryDrawer";
 
 export default function AppsPage() {
   const { token } = useAuth();
-  const { data, loading, saving, save } = useConfigResource<AppsConfig>("apps", { apps: [] });
+  const { data, loading, saving, save, reload, currentDocText } = useConfigResource<AppsConfig>(
+    "apps",
+    { apps: [] },
+  );
+  const [historyOpen, setHistoryOpen] = useState(false);
 
   const [groupNames, setGroupNames] = useState<string[]>([]);
   const [allGroups, setAllGroups] = useState<GroupDef[]>([]);
@@ -152,9 +158,19 @@ export default function AppsPage() {
             Managed app packages and the device groups each version installs on.
           </Text>
         </Stack>
-        <Button leftSection={<IconPlus size={16} />} onClick={openNewApp} disabled={loading}>
-          Add app
-        </Button>
+        <Group gap="xs">
+          <Button
+            variant="light"
+            leftSection={<IconHistory size={14} />}
+            onClick={() => setHistoryOpen(true)}
+            disabled={loading}
+          >
+            History
+          </Button>
+          <Button leftSection={<IconPlus size={16} />} onClick={openNewApp} disabled={loading}>
+            Add app
+          </Button>
+        </Group>
       </Group>
 
       {loading ? (
@@ -319,6 +335,14 @@ export default function AppsPage() {
           </Stack>
         )}
       </Modal>
+
+      <ConfigHistoryDrawer
+        opened={historyOpen}
+        onClose={() => setHistoryOpen(false)}
+        type="apps"
+        currentDoc={currentDocText}
+        onRestored={reload}
+      />
     </Stack>
   );
 }

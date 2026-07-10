@@ -26,6 +26,7 @@ import {
   IconAlertTriangle,
   IconChevronRight,
   IconDevices2,
+  IconHistory,
   IconPencil,
   IconPlus,
   IconStack2,
@@ -50,15 +51,18 @@ import {
   type GroupsConfig,
 } from "../../../../lib/config";
 import { ConditionBuilder } from "../../../components/config/ConditionBuilder";
+import { ConfigHistoryDrawer } from "../../../components/config/ConfigHistoryDrawer";
 import { DevicePicker } from "../../../components/config/DevicePicker";
 import { NameTemplateInput } from "../../../components/config/NameTemplateInput";
 
 export default function GroupsPage() {
   const { token } = useAuth();
-  const { data, loading, saving, save } = useConfigResource<GroupsConfig>("groups", {
-    groups: [],
-  });
+  const { data, loading, saving, save, reload, currentDocText } = useConfigResource<GroupsConfig>(
+    "groups",
+    { groups: [] },
+  );
   const [devices, setDevices] = useState<Device[]>([]);
+  const [historyOpen, setHistoryOpen] = useState(false);
 
   const [modalOpen, setModalOpen] = useState(false);
   const [editIndex, setEditIndex] = useState<number | null>(null);
@@ -210,9 +214,19 @@ export default function GroupsPage() {
             You can then target these groups in apps and profiles.
           </Text>
         </Stack>
-        <Button leftSection={<IconPlus size={16} />} onClick={openNew} disabled={loading}>
-          New group
-        </Button>
+        <Group gap="xs">
+          <Button
+            variant="light"
+            leftSection={<IconHistory size={14} />}
+            onClick={() => setHistoryOpen(true)}
+            disabled={loading}
+          >
+            History
+          </Button>
+          <Button leftSection={<IconPlus size={16} />} onClick={openNew} disabled={loading}>
+            New group
+          </Button>
+        </Group>
       </Group>
 
       {loading ? (
@@ -505,6 +519,14 @@ export default function GroupsPage() {
           </Group>
         </Stack>
       </Modal>
+
+      <ConfigHistoryDrawer
+        opened={historyOpen}
+        onClose={() => setHistoryOpen(false)}
+        type="groups"
+        currentDoc={currentDocText}
+        onRestored={reload}
+      />
     </Stack>
   );
 }
