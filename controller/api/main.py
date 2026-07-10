@@ -33,11 +33,13 @@ from controller.models.tenant import (
     FlowRun,
     Alert,
     EnrollmentAttempt,
+    AuditLog,
 )
 from controller.services.app_manager import AppManager
 from controller.services.mdm_connector import MDMConnector
 from controller.services.task_manager import TaskManager
 from controller.services import enrollment as enrollment_svc
+from controller.services.audit import record_audit
 
 app = FastAPI(title="MDM IAC API", version="1.0.0")
 logger = logging.getLogger(__name__)
@@ -407,6 +409,19 @@ async def create_user(payload: UserCreate, admin: Principal = Depends(require_ad
         external_id=payload.external_id,
         password_hash=hash_password(payload.password) if payload.password else None,
     )
+    await record_audit(
+        admin,
+        "user.create",
+        target_type="user",
+        target_id=str(user.id),
+        # Non-secret facts only: never the password itself.
+        detail={
+            "email": user.email,
+            "role": user.role,
+            "password_set": bool(payload.password),
+            "external_id_set": bool(payload.external_id),
+        },
+    )
     return {"id": str(user.id), "email": user.email, "role": user.role}
 
 
@@ -427,6 +442,19 @@ async def update_user(user_id: str, payload: UserUpdate, admin: Principal = Depe
             raise HTTPException(status_code=400, detail="Cannot deactivate your own account")
         user.is_active = payload.is_active
     await user.save()
+    # Record WHICH fields changed as booleans -- never the new password value.
+    changed = {
+        "role": payload.role is not None,
+        "password": payload.password is not None,
+        "is_active": payload.is_active is not None,
+    }
+    await record_audit(
+        admin,
+        "user.update",
+        target_type="user",
+        target_id=str(user.id),
+        detail={"email": user.email, "changed": changed},
+    )
     return {"message": "User updated"}
 
 
@@ -437,7 +465,16 @@ async def delete_user(user_id: str, admin: Principal = Depends(require_admin)):
         raise HTTPException(status_code=404, detail="User not found")
     if str(user.id) == str(admin.user.id):
         raise HTTPException(status_code=400, detail="Cannot delete your own account")
+    deleted_email = user.email  # captured before deletion for the audit log
+    deleted_role = user.role
     await user.delete()
+    await record_audit(
+        admin,
+        "user.delete",
+        target_type="user",
+        target_id=user_id,
+        detail={"email": deleted_email, "role": deleted_role},
+    )
     return {"message": "User deleted"}
 
 
@@ -1190,7 +1227,7 @@ async def forget_device(
             ),
         )
 
-    serial = device.serial_number  # captured for the audit log before deletion
+    serial = device.serial_number  # captured before deletion for the audit log
 
     # Remove child rows explicitly inside one transaction rather than relying on
     # DB-level ON DELETE CASCADE, so the cleanup is predictable regardless of how
@@ -1208,6 +1245,13 @@ async def forget_device(
     logger.info(
         "Forgot device %s (serial=%s) for tenant %s by %s",
         device_id, serial, tenant.id, admin.email,
+    )
+    await record_audit(
+        admin,
+        "device.forget",
+        target_type="device",
+        target_id=device_id,
+        detail={"serial_number": serial},
     )
     return {"message": "Device forgotten"}
 
@@ -2451,6 +2495,34 @@ async def list_enrollment_attempts(
     total = await query.count()
     attempts = await query.order_by("-created_at").offset(skip).limit(limit).all()
     return {"total": total, "attempts": [a.to_dict() for a in attempts]}
+
+
+@app.get("/api/v1/audit-log")
+async def list_audit_log(
+        skip: int = Query(0, ge=0),
+        limit: int = Query(100, ge=1, le=500),
+        action: Optional[str] = None,
+        actor: Optional[str] = None,
+        target_type: Optional[str] = None,
+        admin: Principal = Depends(require_admin),
+):
+    """Admin actions taken through the console (services.audit), newest-first.
+
+    Admin-only and tenant-scoped: an admin sees only their own tenant's rows.
+    Filters are exact matches -- ``action`` and ``target_type`` are
+    server-written enums and ``actor`` is a server-written email, never free
+    text. ``detail`` never carries a secret (see models.tenant.AuditLog).
+    """
+    query = AuditLog.filter(tenant=admin.tenant)
+    if action:
+        query = query.filter(action=action)
+    if actor:
+        query = query.filter(actor_email=actor)
+    if target_type:
+        query = query.filter(target_type=target_type)
+    total = await query.count()
+    entries = await query.order_by("-created_at").offset(skip).limit(limit).all()
+    return {"total": total, "entries": [e.to_dict() for e in entries]}
 
 
 @app.get("/api/v1/enroll/{tenant_id}/{token}")

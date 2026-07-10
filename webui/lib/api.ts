@@ -507,6 +507,28 @@ export const api = {
     );
   },
 
+  // Admin actions taken through the console (admin-only, tenant-scoped).
+  listAuditLog(
+    token: string,
+    params: {
+      skip?: number;
+      limit?: number;
+      action?: string;
+      actor?: string;
+      target_type?: string;
+    } = {},
+  ) {
+    const qs = new URLSearchParams(
+      Object.entries(params)
+        .filter(([, v]) => v !== undefined)
+        .map(([k, v]) => [k, String(v)]),
+    ).toString();
+    return request<{ total: number; entries: AuditLogEntry[] }>(
+      `/api/v1/audit-log${qs ? `?${qs}` : ""}`,
+      token,
+    );
+  },
+
   // Health
   health() {
     return request<{ status: string }>("/api/v1/health", undefined);
@@ -664,6 +686,20 @@ export interface EnrollmentAttempt {
   serial_number: string | null;
   topic: string | null;
   outcome: string; // "no_tenant" | "no_serial"
+  detail: Record<string, unknown>;
+  created_at: string | null;
+}
+
+// An admin action recorded through the console. Mirrors AuditLog.to_dict()
+// (controller/models/tenant.py). detail carries only non-secret context.
+export interface AuditLogEntry {
+  id: string;
+  tenant_id: string | null;
+  actor_email: string | null;
+  actor_role: string | null;
+  action: string; // e.g. "user.create" | "user.update" | "user.delete" | "device.forget"
+  target_type: string | null; // e.g. "user" | "device"
+  target_id: string | null;
   detail: Record<string, unknown>;
   created_at: string | null;
 }

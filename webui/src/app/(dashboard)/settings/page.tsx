@@ -25,11 +25,14 @@ import { notifications } from "@mantine/notifications";
 import {
   IconCalendarDue,
   IconCheck,
+  IconChevronRight,
   IconCloud,
   IconCode,
   IconDeviceFloppy,
+  IconHistory,
   IconInfoCircle,
 } from "@tabler/icons-react";
+import Link from "next/link";
 import { api, type TenantInfo } from "../../../../lib/api";
 import { useAuth } from "../../../../lib/auth-context";
 import { SHOW_YAML_STORAGE_KEY } from "../../../../lib/preferences";
@@ -443,6 +446,33 @@ export default function SettingsPage() {
 
       {/* Users (add / role / password reset / activate / delete) */}
       <UsersManager />
+
+      {/* Audit log (admin only): a read-only record of admin actions. */}
+      {isAdmin && (
+        <Card withBorder radius="md" p="md">
+          <Group justify="space-between" wrap="nowrap">
+            <Group gap="sm" wrap="nowrap">
+              <ThemeIcon variant="light" color="gray" size="lg">
+                <IconHistory size={18} />
+              </ThemeIcon>
+              <Box>
+                <Text fz="sm" fw={600}>Audit log</Text>
+                <Text fz="xs" c="dimmed">
+                  Recent admin actions (user &amp; device changes) for this tenant.
+                </Text>
+              </Box>
+            </Group>
+            <Button
+              component={Link}
+              href="/settings/audit-log"
+              variant="light"
+              rightSection={<IconChevronRight size={14} />}
+            >
+              View audit log
+            </Button>
+          </Group>
+        </Card>
+      )}
     </Stack>
   );
 }

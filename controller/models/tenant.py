@@ -196,6 +196,45 @@ class EnrollmentAttempt(Model):
         }
 
 
+class AuditLog(Model):
+    """An append-only record of an admin action taken through the console
+    (services.audit.record_audit), scoped to the acting principal's tenant.
+
+    Security: ``detail`` must NEVER carry a secret (a password, token, API
+    key, ...). The v1 call sites (user create/update/delete, device forget)
+    record only non-secret facts -- e.g. which fields changed as booleans,
+    never their values -- so that this log is safe to expose to any tenant
+    admin. Actions that touch secret-bearing fields (tenant/config/remediation
+    updates) are deliberately NOT instrumented here yet; they need a
+    secret-redaction pass first."""
+    id = fields.UUIDField(pk=True)
+    tenant = fields.ForeignKeyField("models.Tenant", related_name="audit_logs")
+    actor_email = fields.CharField(max_length=255, null=True)
+    actor_role = fields.CharField(max_length=30, null=True)
+    action = fields.CharField(max_length=50)  # e.g. user.create | user.update | user.delete | device.forget
+    target_type = fields.CharField(max_length=30, null=True)  # e.g. user | device
+    target_id = fields.CharField(max_length=255, null=True)
+    detail = fields.JSONField(default=dict)  # non-secret context only
+    created_at = fields.DatetimeField(auto_now_add=True)
+
+    class Meta:
+        table = "audit_logs"
+        ordering = ["-created_at"]
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "id": str(self.id),
+            "tenant_id": str(self.tenant_id) if self.tenant_id else None,
+            "actor_email": self.actor_email,
+            "actor_role": self.actor_role,
+            "action": self.action,
+            "target_type": self.target_type,
+            "target_id": self.target_id,
+            "detail": self.detail or {},
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+        }
+
+
 class Task(Model):
     id = fields.UUIDField(pk=True)
     tenant = fields.ForeignKeyField("models.Tenant", related_name="tasks")
