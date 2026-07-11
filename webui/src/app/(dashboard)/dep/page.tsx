@@ -131,7 +131,11 @@ export default function DepPage() {
             )}
             <DepWizard
               key={addingNew ? "new" : detail?.id ?? "loading"}
-              existing={!addingNew && detail?.status === "awaiting_token" ? detail : null}
+              existing={
+                !addingNew && detail && detail.status !== "linked" && detail.has_public_cert
+                  ? detail
+                  : null
+              }
               onLinked={async (s) => {
                 setAddingNew(false);
                 setSelectedId(s.id);

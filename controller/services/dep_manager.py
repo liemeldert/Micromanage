@@ -136,6 +136,9 @@ def _safe_account(account: Dict[str, Any]) -> Dict[str, Any]:
 
 
 async def _mark_error(dep_server: DepServer, message: str) -> None:
+    # Log the specific reason (decrypt/algorithm/key-mismatch, Apple rejection) — the
+    # API only returns a generic code to the client, so this is where operators see it.
+    logger.warning("DEP: link failed for %s (%s): %s", dep_server.name, dep_server.id, message)
     dep_server.status = "error"
     dep_server.last_error = message[:500]
     try:

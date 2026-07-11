@@ -42,8 +42,12 @@ export function DepWizard({
   onLinked: (server: DepServerDetail) => void;
 }) {
   const { token } = useAuth();
-  // Resume at the token step if a keypair was already generated.
-  const [active, setActive] = useState(existing?.status === "awaiting_token" ? 1 : 0);
+  // Resume at the token step if a keypair was already generated (whether the last
+  // token upload is still pending or errored — the keypair is unchanged, so the fix
+  // is to retry the token, not regenerate).
+  const [active, setActive] = useState(
+    existing && existing.status !== "linked" && existing.has_public_cert ? 1 : 0,
+  );
   const [name, setName] = useState(existing?.name ?? "");
   const [server, setServer] = useState<DepServerDetail | null>(existing ?? null);
   const [busy, setBusy] = useState(false);
@@ -105,6 +109,14 @@ export function DepWizard({
         message: e instanceof ApiError ? e.message : String(e),
         autoClose: 8000,
       });
+      // Refresh so the detailed reason (server.last_error) shows inline; the upload
+      // sets status="error" server-side with a specific message.
+      try {
+        const detail = await api.getDepServer(token, server.id);
+        setServer(detail);
+      } catch {
+        /* keep the notification; nothing more to show */
+      }
     } finally {
       setBusy(false);
     }
