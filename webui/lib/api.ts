@@ -542,9 +542,6 @@ export const api = {
       body: JSON.stringify({ name }),
     });
   },
-  depPublicKeyPath(id: string) {
-    return `/api/proxy/api/v1/dep/servers/${encodeURIComponent(id)}/public-key`;
-  },
   async uploadDepToken(token: string, id: string, file: File) {
     const fd = new FormData();
     fd.append("file", file);

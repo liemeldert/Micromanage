@@ -34,6 +34,7 @@ import {
   IconUpload,
 } from "@tabler/icons-react";
 import { api, ApiError, type DepDevice, type DepServerDetail } from "../../../lib/api";
+import { saveTextFile } from "../../../lib/download";
 import type { Profile } from "../../../lib/config";
 import { useAuth } from "../../../lib/auth-context";
 
@@ -346,9 +347,16 @@ export function DepServerPanel({
               </Menu.Target>
               <Menu.Dropdown>
                 <Menu.Item
-                  component="a"
-                  href={api.depPublicKeyPath(server.id)}
                   leftSection={<IconCloudDownload size={14} />}
+                  disabled={!server.public_cert_pem}
+                  onClick={() =>
+                    server.public_cert_pem &&
+                    saveTextFile(
+                      `${server.name}-public-key.pem`,
+                      server.public_cert_pem,
+                      "application/x-pem-file",
+                    )
+                  }
                 >
                   Download public key
                 </Menu.Item>

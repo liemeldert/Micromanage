@@ -26,6 +26,7 @@ import {
   IconUpload,
 } from "@tabler/icons-react";
 import { api, ApiError, type DepServerDetail } from "../../../lib/api";
+import { saveTextFile } from "../../../lib/download";
 import { useAuth } from "../../../lib/auth-context";
 
 // Guided ABM/ASM link flow. Three steps, mirroring the real Apple workflow:
@@ -68,6 +69,17 @@ export function DepWizard({
     } finally {
       setBusy(false);
     }
+  }
+
+  function downloadPublicKey() {
+    // The public cert is non-secret and already loaded with the server detail, so
+    // save it client-side rather than hitting the admin-gated download endpoint
+    // (a plain link navigation would carry no auth token and be rejected).
+    if (!server?.public_cert_pem) {
+      notifications.show({ color: "red", message: "No public key available yet." });
+      return;
+    }
+    saveTextFile(`${server.name}-public-key.pem`, server.public_cert_pem, "application/x-pem-file");
   }
 
   async function uploadToken(file: File | null) {
@@ -136,8 +148,8 @@ export function DepWizard({
             {server && (
               <Group>
                 <Button
-                  component="a"
-                  href={api.depPublicKeyPath(server.id)}
+                  onClick={() => downloadPublicKey()}
+                  disabled={!server.public_cert_pem}
                   leftSection={<IconCloudDownload size={16} />}
                   variant="light"
                 >
@@ -187,8 +199,8 @@ export function DepWizard({
             <Group>
               {server && (
                 <Button
-                  component="a"
-                  href={api.depPublicKeyPath(server.id)}
+                  onClick={() => downloadPublicKey()}
+                  disabled={!server.public_cert_pem}
                   leftSection={<IconCloudDownload size={16} />}
                   variant="subtle"
                   size="xs"

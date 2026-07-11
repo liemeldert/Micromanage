@@ -52,13 +52,16 @@ export default function DepPage() {
     else setLoading(false);
   }, [isAdmin, load]);
 
-  // Load the full detail for the selected server.
+  // Load the full detail for the selected server. Clear any stale detail first so
+  // the wizard/panel never renders the previously-selected server's data (and so
+  // the wizard remounts with the right resume state once the new detail arrives).
   useEffect(() => {
     if (!token || !selectedId) {
       setDetail(null);
       return;
     }
     let alive = true;
+    setDetail(null);
     api
       .getDepServer(token, selectedId)
       .then((d) => alive && setDetail(d))
@@ -127,6 +130,7 @@ export default function DepPage() {
               </Button>
             )}
             <DepWizard
+              key={addingNew ? "new" : detail?.id ?? "loading"}
               existing={!addingNew && detail?.status === "awaiting_token" ? detail : null}
               onLinked={async (s) => {
                 setAddingNew(false);
