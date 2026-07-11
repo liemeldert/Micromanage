@@ -142,6 +142,8 @@ export function nodeSummary(node: FlowNode): string {
     }
     case "wait_for":
       return `${p.signal ?? "?"} (${p.timeout_minutes ?? "?"}m)`;
+    case "release_device":
+      return "DeviceConfigured";
     default:
       return "";
   }

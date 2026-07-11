@@ -243,6 +243,18 @@ class WebhookHandler:
             device.os_version = info["OSVersion"]
         if info.get("DeviceName"):
             device.hostname = info["DeviceName"]
+        # Reliable ADE-origin signal: a placeholder that carries a dep_server_id
+        # was synced from ABM/ASM, so this enrollment came in via Automated Device
+        # Enrollment. Stamp enrollment_source + an idempotent `dep` tag BEFORE the
+        # group match so a tag-scoped "DEP devices" group and DEP-scoped ATC flows
+        # see it on this very check-in. (The device-facing ADE endpoint does not
+        # need to parse machine-info for this to work -- see enrollment.py.)
+        if getattr(device, "dep_server_id", None):
+            attrs = dict(device.attributes or {})
+            attrs["enrollment_source"] = "ade"
+            device.attributes = attrs
+            if "dep" not in (device.tags or []):
+                device.tags = list(device.tags or []) + ["dep"]
         # Match groups on every check-in so membership tracks the device's
         # current facts (model/os/hostname just refreshed above). Also feeds the
         # group-scoped naming template below. Best-effort: never gate the save.

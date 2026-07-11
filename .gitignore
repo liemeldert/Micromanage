@@ -40,3 +40,6 @@ webui/.next/
 .mmmdm/
 .claude/
 yaml-configs/
+
+# Internal design specs are kept outside the repo (implementation detail)
+docs/specs/

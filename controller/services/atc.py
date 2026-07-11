@@ -371,6 +371,9 @@ async def _execute_node(run: FlowRun, device: Device, node: Dict[str, Any]) -> O
     if ntype == "send_command":
         await _send_command(run, device, params.get("command"), params.get("params") or {})
         return node.get("next")
+    if ntype == "release_device":
+        await _release_device(run, device)
+        return node.get("next")
     if ntype == "branch":
         cond = params.get("condition") or {}
         result = evaluate_condition(device, cond, list(device.groups or []))
@@ -585,6 +588,48 @@ async def _send_command(run: FlowRun, device: Device, command: Any, params: Dict
         # wait_for(command_ack) then has an empty expectation and is skipped.
         _timeline(run, run.current_node, f"send_command {command} rejected: {exc}")
         logger.warning("ATC: send_command %s rejected in run %s: %s", command, run.id, exc)
+
+
+async def _release_device(run: FlowRun, device: Device) -> None:
+    """Send DeviceConfigured to release an ADE device from Setup Assistant.
+
+    Fire-and-forget (like set_name): the MDM round-trip must not block _advance on
+    the enroll/webhook hot path, and nothing downstream in the flow depends on the
+    ack. A no-op for a device that never enrolled or has no udid."""
+    if device.enrollment_state != "enrolled" or not device.udid:
+        _timeline(run, run.current_node, "release_device: device not enrolled; skipped")
+        return
+    from controller.services.reconciler import _spawn
+    _spawn(_push_device_configured(device, run.flow_id))
+    _timeline(run, run.current_node, "release_device: DeviceConfigured queued")
+
+
+async def _push_device_configured(device: Device, flow_id: str) -> None:
+    """Background DeviceConfigured push + audit task (spawned by _release_device)."""
+    from controller.services.mdm_connector import MDMConnector
+    from controller.services.task_manager import TaskManager
+
+    tenant = await Tenant.get_or_none(id=device.tenant_id)
+    if tenant is None:
+        return
+    task = await TaskManager().create_task(
+        tenant=tenant, task_type="device_configured",
+        description=f"ATC release {device.serial_number} from Setup Assistant",
+        device=device, user=f"atc:{flow_id}", details={},
+    )
+    connector = MDMConnector()
+    try:
+        result = await connector.device_configured(device.udid)
+        task.details["command_uuid"] = result.get("command_uuid")
+        task.status = "running"
+        await task.save()
+    except Exception as exc:
+        task.status = "failed"
+        task.error = str(exc)
+        await task.save()
+        logger.warning("ATC: DeviceConfigured push failed for %s: %s", device.udid, exc)
+    finally:
+        await connector.close()
 
 
 async def _wait_already_satisfied(run: FlowRun, device: Device, node: Dict[str, Any]) -> bool:

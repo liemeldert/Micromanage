@@ -28,6 +28,13 @@ _AUX_DDL = [
     # controller can't read the live cert or a DEP token; see models.tenant).
     'ALTER TABLE "tenants" ADD COLUMN IF NOT EXISTS "apns_cert_expires_at" TIMESTAMPTZ NULL',
     'ALTER TABLE "tenants" ADD COLUMN IF NOT EXISTS "dep_token_expires_at" TIMESTAMPTZ NULL',
+    # Automated Device Enrollment (ADE/DEP) device linkage (services.dep_manager).
+    # Populated for devices synced from Apple Business/School Manager; null for
+    # OTA/manual. See models.DepServer / docs/specs/dep-ade-spec.md.
+    'ALTER TABLE "devices" ADD COLUMN IF NOT EXISTS "dep_server_id" UUID NULL',
+    'ALTER TABLE "devices" ADD COLUMN IF NOT EXISTS "dep_profile_uuid" VARCHAR(64) NULL',
+    'ALTER TABLE "devices" ADD COLUMN IF NOT EXISTS "dep_profile_status" VARCHAR(30) NULL',
+    'ALTER TABLE "devices" ADD COLUMN IF NOT EXISTS "dep_last_synced_at" TIMESTAMPTZ NULL',
 ]
 
 

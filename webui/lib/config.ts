@@ -18,7 +18,8 @@ export type ConditionType =
   | "enrollment_date"
   | "group"
   | "platform"
-  | "tag";
+  | "tag"
+  | "enrollment_source";
 
 export interface Condition {
   type: ConditionType;
@@ -122,7 +123,15 @@ export function profilePayloads(p: Profile): Record<string, unknown>[] {
 
 // ── Condition metadata (drives the visual builder) ───────────────────────────
 
-export type ValueKind = "text" | "version" | "date" | "list" | "group" | "platform" | "tag";
+export type ValueKind =
+  | "text" | "version" | "date" | "list" | "group" | "platform" | "tag" | "enrollment_source";
+
+// How a device enrolled -- mirrors scoping.py's enrollment_source condition and
+// the values stamped in webhook_handler (dep = ABM/ASM ADE, ota = manual/user).
+export const ENROLLMENT_SOURCE_OPTIONS = [
+  { value: "ade", label: "Automated (ABM/ASM)" },
+  { value: "ota", label: "Manual / OTA" },
+];
 
 // Device families for the "platform" condition -- premade options so an
 // "all Macs" group is one click. Mirrors scoping.PLATFORM_CATEGORIES.
@@ -203,6 +212,14 @@ export const CONDITION_TYPES: ConditionTypeMeta[] = [
     operators: ["in"],
     valueKindFor: () => "tag",
   },
+  {
+    // How the device enrolled. "is not" expresses "NOT via ABM/ASM". Handy for
+    // scoping zero-touch flows to Automated Device Enrollment devices only.
+    value: "enrollment_source",
+    label: "Enrollment source",
+    operators: ["in"],
+    valueKindFor: () => "enrollment_source",
+  },
 ];
 
 // Operator labels, worded to read after an "is" / "is not" polarity dropdown
@@ -230,6 +247,11 @@ export function describeCondition(c: Condition): string {
   if (c.type === "group") return `device ${pol} in group ${v}`;
   if (c.type === "platform") return `platform ${pol} ${v}`;
   if (c.type === "tag") return `device ${pol} tagged ${v}`;
+  if (c.type === "enrollment_source") {
+    const labels = (Array.isArray(c.value) ? c.value : [c.value])
+      .map((x) => ENROLLMENT_SOURCE_OPTIONS.find((o) => o.value === x)?.label ?? String(x));
+    return `enrollment ${pol} ${labels.join(", ")}`;
+  }
   const op = OPERATOR_LABELS[c.operator] ?? c.operator;
   return `${conditionTypeMeta(c.type).label} ${pol} ${op} ${v}`;
 }
@@ -311,6 +333,12 @@ function evalConditionBase(
       const want = (Array.isArray(c.value) ? c.value : [c.value]).filter(Boolean).map(String);
       const have = new Set((device.tags ?? []).map(String));
       return want.some((t) => have.has(t));
+    }
+    case "enrollment_source": {
+      // Mirror scoping._evaluate_base: absent attribute defaults to "ota".
+      const want = (Array.isArray(c.value) ? c.value : [c.value]).filter(Boolean).map(String);
+      const src = String((device.attributes as Record<string, unknown> | undefined)?.enrollment_source ?? "ota");
+      return want.includes(src);
     }
     case "device_model":
       return evalString(device.device_model ?? "", c.operator, c.value);

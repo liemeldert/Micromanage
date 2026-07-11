@@ -58,6 +58,16 @@ class MDMController:
             max_instances=1,
             coalesce=True,
         )
+        # Automated Device Enrollment (ADE/DEP) device sync from ABM/ASM. Pulls
+        # newly-assigned devices into pending placeholders + reflects profile
+        # assignment status. Slow tick (assignment changes are infrequent).
+        self.scheduler.add_job(
+            self.dep_sync_tick,
+            'interval',
+            minutes=int(os.getenv('DEP_SYNC_INTERVAL_MINUTES', '60')),
+            max_instances=1,
+            coalesce=True,
+        )
         self.scheduler.start()
 
         # Initial sync
@@ -74,6 +84,25 @@ class MDMController:
         """Dispatcher compliance evaluation across all tenants."""
         from controller.services.dispatcher import sweep_all_tenants
         await sweep_all_tenants()
+
+    async def dep_sync_tick(self):
+        """Sync assigned devices from ABM/ASM for every linked DEP server.
+
+        Best-effort per server: a failure on one is recorded on its row and never
+        stops the others (services.dep_manager.sync_devices already swallows +
+        records its own errors)."""
+        from controller.models.tenant import DepServer
+        try:
+            servers = await DepServer.filter(status="linked")
+        except Exception:
+            logger.exception("DEP: could not list linked servers for sync tick")
+            return
+        from controller.services import dep_manager
+        for server in servers:
+            try:
+                await dep_manager.sync_devices(server)
+            except Exception:
+                logger.exception("DEP: sync tick failed for server %s", server.id)
 
     async def _bootstrap_admin(self):
         """Create a first admin user from env vars, if configured.

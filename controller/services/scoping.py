@@ -140,6 +140,14 @@ def _evaluate_base(
         want = [str(n) for n in (value if isinstance(value, list) else [value]) if n]
         have = set(getattr(device, "tags", []) or [])
         return any(n in have for n in want)
+    if ctype == "enrollment_source":
+        # How the device enrolled: "ade" (Automated Device Enrollment via ABM/ASM)
+        # or "ota" (user-installed / manual). Set at adoption time from the device's
+        # DEP linkage (services.webhook_handler); absent ⇒ treated as "ota". Operator
+        # is ``in`` like ``platform``; combine with ``negate: true`` for "NOT ADE".
+        want = [str(n) for n in (value if isinstance(value, list) else [value]) if n]
+        source = (getattr(device, "attributes", {}) or {}).get("enrollment_source") or "ota"
+        return source in want
     return False
 
 

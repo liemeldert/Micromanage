@@ -16,6 +16,7 @@ import { IconPlus, IconTrash } from "@tabler/icons-react";
 import {
   CONDITION_TYPES,
   conditionTypeMeta,
+  ENROLLMENT_SOURCE_OPTIONS,
   OPERATOR_LABELS,
   PLATFORM_OPTIONS,
   type Condition,
@@ -23,7 +24,8 @@ import {
 } from "../../../lib/config";
 
 function defaultValueForKind(kind: string): string | string[] {
-  return kind === "list" || kind === "group" || kind === "platform" || kind === "tag"
+  return kind === "list" || kind === "group" || kind === "platform" ||
+    kind === "tag" || kind === "enrollment_source"
     ? []
     : "";
 }
@@ -113,7 +115,8 @@ export function ConditionBuilder({
         // The operator is fixed ("in") and implied by the label for group /
         // platform / tag, so its dropdown is hidden -- polarity + value are enough.
         const showOperator =
-          c.type !== "group" && c.type !== "platform" && c.type !== "tag";
+          c.type !== "group" && c.type !== "platform" && c.type !== "tag" &&
+          c.type !== "enrollment_source";
         return (
           <Group key={idx} gap="xs" align="flex-start" wrap="nowrap">
             <Select
@@ -153,6 +156,16 @@ export function ConditionBuilder({
                 style={{ flex: 1 }}
                 placeholder="Select platform(s)"
                 data={PLATFORM_OPTIONS}
+                value={asList(c.value)}
+                onChange={(v) => update(idx, { value: v })}
+                clearable
+                comboboxProps={{ withinPortal: true }}
+              />
+            ) : kind === "enrollment_source" ? (
+              <MultiSelect
+                style={{ flex: 1 }}
+                placeholder="Select enrollment source(s)"
+                data={ENROLLMENT_SOURCE_OPTIONS}
                 value={asList(c.value)}
                 onChange={(v) => update(idx, { value: v })}
                 clearable

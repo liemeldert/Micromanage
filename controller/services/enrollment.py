@@ -9,13 +9,18 @@ The public download URL is gated by a per-tenant token derived via HMAC of the
 JWT secret, so no schema change is needed and the link is unguessable.
 """
 
+import base64
 import hmac
+import logging
 import os
 import plistlib
+import re
 import uuid
 from datetime import datetime, timezone
 from hashlib import sha256
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Tuple
+
+logger = logging.getLogger(__name__)
 
 
 def enrollment_token(tenant_id: str) -> str:
@@ -105,6 +110,91 @@ def enrollment_details(tenant) -> Dict[str, Any]:
         "dep_token_expires_at": dep_expires,
         "dep_days_remaining": _days_remaining(dep_expires),
     }
+
+
+def ade_enroll_url(tenant_id: str) -> Optional[str]:
+    """The device-facing ADE enrollment URL that a DEP profile's ``url`` points at.
+
+    Setup Assistant POSTs its signed MachineInfo here; the endpoint returns the
+    enrollment .mobileconfig (which embeds the SCEP challenge). Like the OTA
+    download link, the URL carries the per-tenant enrollment token so the endpoint
+    can gate on it -- the URL only ever reaches devices Apple assigned to this MDM
+    server (it's stored at Apple and delivered during Setup Assistant), so the
+    token stays as private as the OTA link. Requires PUBLIC_API_URL (returns None
+    otherwise, so the DEP-profile push can refuse with a clear message)."""
+    public = (os.getenv("PUBLIC_API_URL") or "").rstrip("/")
+    if not public:
+        return None
+    return f"{public}/api/v1/dep/enroll/{tenant_id}/{enrollment_token(tenant_id)}"
+
+
+# The XML plist Setup Assistant embeds in its signed MachineInfo.
+_PLIST_XML_RE = re.compile(rb"<\?xml.*?</plist>", re.DOTALL)
+
+
+def _extract_plist(data: bytes) -> Optional[Dict[str, Any]]:
+    """Best-effort extraction of a plist embedded in raw CMS/DER bytes.
+
+    The MachineInfo is CMS-SignedData; rather than pull in an ASN.1 stack we locate
+    the embedded plist (XML, or binary ``bplist00``). Returns None if none is found.
+    This is observability only -- the enrollment does not depend on it (the device
+    identifies itself authoritatively later via SCEP + the Authenticate webhook)."""
+    m = _PLIST_XML_RE.search(data)
+    if m:
+        try:
+            obj = plistlib.loads(m.group(0))
+            return obj if isinstance(obj, dict) else None
+        except Exception:
+            pass
+    idx = data.find(b"bplist00")
+    if idx != -1:
+        try:
+            obj = plistlib.loads(data[idx:])
+            return obj if isinstance(obj, dict) else None
+        except Exception:
+            pass
+    return None
+
+
+def parse_machine_info(header_value: Optional[str]) -> Tuple[Dict[str, Any], bool]:
+    """Parse + verify the base64 ``x-apple-aspen-deviceinfo`` header (CMS-signed
+    MachineInfo).
+
+    Returns ``(machine_info, verified)``. ``verified`` is True only when the CMS
+    signature AND its chain to a bundled Apple anchor both check out
+    (services.dep_verify). Parsing is best-effort and never raises: a device is
+    still gated by the per-tenant enrollment token, so an unparseable/unverifiable
+    header degrades to ``verified=False`` (and, when possible, still yields the
+    MachineInfo) rather than a failed enrollment. The ADE endpoint decides whether
+    to require ``verified`` (see DEP_ADE_REQUIRE_APPLE_SIGNATURE)."""
+    if not header_value:
+        return {}, False
+    try:
+        raw = base64.b64decode(header_value, validate=False)
+    except Exception:
+        logger.warning("ADE: x-apple-aspen-deviceinfo header is not valid base64")
+        return {}, False
+
+    verified = False
+    info: Dict[str, Any] = {}
+    try:
+        from controller.services.dep_verify import verify_cms
+
+        content, verified, detail = verify_cms(raw)
+        if content:
+            info = _extract_plist(bytes(content)) or {}
+        logger.info("ADE: machine-info verification: %s", detail)
+    except Exception:
+        logger.exception("ADE: CMS verification path failed; falling back to extract")
+
+    # Fallback: extract the plist directly from the CMS bytes if verification could
+    # not surface the content (keeps observability even when unverifiable).
+    if not info:
+        info = _extract_plist(raw) or {}
+    if info:
+        logger.info("ADE: machine-info SERIAL=%s PRODUCT=%s VERSION=%s verified=%s",
+                    info.get("SERIAL"), info.get("PRODUCT"), info.get("OS_VERSION"), verified)
+    return info, verified
 
 
 def build_enrollment_profile(tenant) -> Dict[str, Any]:

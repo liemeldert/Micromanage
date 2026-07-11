@@ -159,6 +159,20 @@ FLOW_STEP_CATALOG: List[Dict[str, Any]] = [
         ],
     },
     {
+        "type": "release_device",
+        "label": "Release from Setup Assistant",
+        "description": "Send DeviceConfigured to let an Automated Enrollment (ADE) "
+                       "device leave Setup Assistant. Put this LAST, after your "
+                       "mandatory profiles/apps are installed, so the user only "
+                       "reaches the home screen once the device is fully provisioned. "
+                       "Requires the DEP profile's 'Await device configured' option; a "
+                       "no-op on non-ADE devices.",
+        "category": "Flow",
+        "waits": False,
+        "edges": ["next"],
+        "params": [],
+    },
+    {
         "type": "end",
         "label": "End",
         "description": "Terminal node: the run completes when it reaches an end.",

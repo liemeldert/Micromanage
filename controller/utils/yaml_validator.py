@@ -16,7 +16,8 @@ class Condition(BaseModel):
     @validator('type')
     def validate_type(cls, v):
         valid_types = ['device_model', 'serial_number', 'hostname', 'os_version',
-                       'enrollment_date', 'group', 'platform', 'tag']
+                       'enrollment_date', 'group', 'platform', 'tag',
+                       'enrollment_source']
         if v not in valid_types:
             raise ValueError(f"Invalid condition type: {v}. Must be one of {valid_types}")
         return v
@@ -36,6 +37,8 @@ class Condition(BaseModel):
             'platform': ['in'],
             # Membership in the device's imperative tag set (see models.Device).
             'tag': ['in'],
+            # How the device enrolled: "ade" (ABM/ASM) or "ota" (manual).
+            'enrollment_source': ['in'],
         }
 
         if condition_type and v not in valid_operators.get(condition_type, []):
@@ -52,6 +55,20 @@ class Condition(BaseModel):
         if unknown:
             raise ValueError(
                 f"Unknown platform(s) {unknown}. Valid: {PLATFORM_CATEGORIES}"
+            )
+        return v
+
+    @validator('value')
+    def validate_enrollment_source_value(cls, v, values):
+        if values.get('type') != 'enrollment_source':
+            return v
+        valid = {'ade', 'ota'}
+        vals = v if isinstance(v, list) else [v]
+        unknown = [x for x in vals if x not in valid]
+        if unknown:
+            raise ValueError(
+                f"Unknown enrollment_source {unknown}. Valid: {sorted(valid)} "
+                "(ade = ABM/ASM Automated Device Enrollment, ota = manual)"
             )
         return v
 

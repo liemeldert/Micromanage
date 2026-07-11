@@ -253,6 +253,19 @@ class MDMConnector:
         )
         return result
 
+    async def device_configured(self, device_udid: str) -> Dict[str, Any]:
+        """Release an ADE device from Setup Assistant (DeviceConfigured).
+
+        Only meaningful for a supervised ADE device whose DEP profile set
+        ``await_device_configured`` -- the device pauses at "Remote Management"
+        until this arrives, so the flow can finish provisioning first, THEN let the
+        user in. A no-op on any other device.
+        """
+        command_plist, command_uuid = self._create_command_plist('DeviceConfigured')
+        result = await self.enqueue_command(device_udid, command_plist, command_uuid=command_uuid)
+        logger.info(f"Queued DeviceConfigured (release from Setup Assistant) for {device_udid}: {result}")
+        return result
+
     async def get_installed_apps(self, device_udid: str) -> Dict[str, Any]:
         """Get list of installed applications"""
         command_plist, command_uuid = self._create_command_plist('InstalledApplicationList')

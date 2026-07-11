@@ -529,6 +529,85 @@ export const api = {
     );
   },
 
+  // ── Automated Device Enrollment (ADE/DEP) + ABM/ASM ──────────────────────
+  listDepServers(token: string) {
+    return request<{ servers: DepServer[] }>("/api/v1/dep/servers", token);
+  },
+  getDepServer(token: string, id: string) {
+    return request<DepServerDetail>(`/api/v1/dep/servers/${id}`, token);
+  },
+  createDepServer(token: string, name: string) {
+    return request<DepServerDetail>("/api/v1/dep/servers", token, {
+      method: "POST",
+      body: JSON.stringify({ name }),
+    });
+  },
+  depPublicKeyPath(id: string) {
+    return `/api/proxy/api/v1/dep/servers/${encodeURIComponent(id)}/public-key`;
+  },
+  async uploadDepToken(token: string, id: string, file: File) {
+    const fd = new FormData();
+    fd.append("file", file);
+    // Direct fetch so the browser sets the multipart boundary itself.
+    const res = await fetch(proxyPath(`/api/v1/dep/servers/${id}/token`), {
+      method: "POST",
+      headers: { Authorization: `Bearer ${token}` },
+      body: fd,
+    });
+    if (!res.ok) {
+      let detail = res.statusText;
+      try {
+        const body = await res.json();
+        detail = body.detail || JSON.stringify(body);
+      } catch {}
+      throw new ApiError(res.status, detail);
+    }
+    return res.json() as Promise<DepServer>;
+  },
+  unlinkDepServer(token: string, id: string) {
+    return request<{ status: string }>(`/api/v1/dep/servers/${id}`, token, { method: "DELETE" });
+  },
+  syncDepServer(token: string, id: string) {
+    return request<DepSyncSummary>(`/api/v1/dep/servers/${id}/sync`, token, { method: "POST" });
+  },
+  listDepDevices(token: string, id: string) {
+    return request<{ devices: DepDevice[] }>(`/api/v1/dep/servers/${id}/devices`, token);
+  },
+  setDepDefaultProfile(token: string, id: string, profileId: string | null) {
+    return request<DepServer>(`/api/v1/dep/servers/${id}/default-profile`, token, {
+      method: "POST",
+      body: JSON.stringify({ profile_id: profileId }),
+    });
+  },
+  pushDepProfile(token: string, id: string, profileId: string) {
+    return request<DepProfileMapping>(
+      `/api/v1/dep/servers/${id}/profiles/${encodeURIComponent(profileId)}/push`,
+      token,
+      { method: "POST" },
+    );
+  },
+  assignDepProfile(token: string, id: string, profileId: string, serials: string[]) {
+    return request<{ results: Record<string, string> }>(`/api/v1/dep/servers/${id}/assign`, token, {
+      method: "POST",
+      body: JSON.stringify({ profile_id: profileId, serials }),
+    });
+  },
+  unassignDepProfile(token: string, id: string, serials: string[]) {
+    return request<{ results: Record<string, string> }>(`/api/v1/dep/servers/${id}/unassign`, token, {
+      method: "POST",
+      body: JSON.stringify({ serials }),
+    });
+  },
+  disownDepDevices(token: string, id: string, serials: string[]) {
+    return request<{ results: Record<string, string> }>(`/api/v1/dep/servers/${id}/disown`, token, {
+      method: "POST",
+      body: JSON.stringify({ serials }),
+    });
+  },
+  getDepSkipKeys(token: string) {
+    return request<{ skip_keys: DepSkipKey[] }>("/api/v1/dep/skip-keys", token);
+  },
+
   // Health
   health() {
     return request<{ status: string }>("/api/v1/health", undefined);
@@ -689,6 +768,83 @@ export interface EnrollmentAttempt {
   outcome: string; // "no_tenant" | "no_serial"
   detail: Record<string, unknown>;
   created_at: string | null;
+}
+
+// ── ADE/DEP + ABM/ASM. Mirror DepServer.to_dict() (controller/models/tenant.py)
+// and controller/api/dep.py. Secret token/key material is NEVER present. ─────
+export type DepServerStatus = "unlinked" | "awaiting_token" | "linked" | "error";
+
+export interface DepServer {
+  id: string;
+  tenant_id: string;
+  name: string;
+  status: DepServerStatus;
+  has_public_cert: boolean;
+  has_token: boolean;
+  cert_expires_at: string | null;
+  token_expires_at: string | null;
+  account: {
+    org_name?: string | null;
+    server_name?: string | null;
+    org_id?: string | null;
+    org_email?: string | null;
+    admin_id?: string | null;
+    org_type?: string | null;
+  };
+  sync_cursor_at: string | null;
+  last_sync_at: string | null;
+  last_sync_status: string | null;
+  last_sync_error: string | null;
+  default_profile_id: string | null;
+  last_error: string | null;
+  created_at: string | null;
+  updated_at: string | null;
+}
+
+export interface DepProfileMapping {
+  id: string;
+  dep_server_id: string;
+  profile_id: string;
+  profile_uuid: string | null;
+  pushed_at: string | null;
+  last_error: string | null;
+  updated_at: string | null;
+}
+
+// getDepServer adds the public cert (for re-download), the enrollment URL, and
+// the pushed-profile mappings.
+export interface DepServerDetail extends DepServer {
+  public_cert_pem: string | null;
+  enroll_url: string | null;
+  profiles: DepProfileMapping[];
+}
+
+export interface DepDevice {
+  id: string;
+  serial_number: string;
+  device_model: string;
+  enrollment_state: EnrollmentState;
+  enrolled: boolean;
+  dep_profile_uuid: string | null;
+  dep_profile_status: string | null;
+  name: string | null;
+  dep_last_synced_at: string | null;
+}
+
+export interface DepSyncSummary {
+  ok: boolean;
+  added?: number;
+  modified?: number;
+  deleted?: number;
+  pages?: number;
+  error?: string;
+}
+
+export interface DepSkipKey {
+  name: string;
+  label: string;
+  platforms: string;
+  deprecated: boolean;
 }
 
 // An admin action recorded through the console. Mirrors AuditLog.to_dict()

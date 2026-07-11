@@ -101,6 +101,15 @@ class Device(Model):
     # are computed from state), tags are the one piece of device state a flow may
     # write; a "devices tagged X" group is expressed with a ``tag`` condition.
     tags = fields.JSONField(default=list)
+    # Automated Device Enrollment (ADE/DEP) linkage. Populated when a device is
+    # synced from Apple Business/School Manager (services.dep_manager): which
+    # DepServer owns it, the Apple profile assigned, and Apple's own
+    # profile_status (empty|assigned|pushed|removed). Null for OTA/manual devices.
+    # See models.DepServer / docs/specs/dep-ade-spec.md.
+    dep_server_id = fields.UUIDField(null=True)
+    dep_profile_uuid = fields.CharField(max_length=64, null=True)
+    dep_profile_status = fields.CharField(max_length=30, null=True)
+    dep_last_synced_at = fields.DatetimeField(null=True)
 
     class Meta:
         table = "devices"
@@ -406,5 +415,120 @@ class Alert(Model):
             "acknowledged_at": self.acknowledged_at.isoformat() if self.acknowledged_at else None,
             "acknowledged_by": self.acknowledged_by,
             "resolved_at": self.resolved_at.isoformat() if self.resolved_at else None,
+            "updated_at": self.updated_at.isoformat() if self.updated_at else None,
+        }
+
+
+class DepServer(Model):
+    """A linked Apple Business/School Manager MDM-server token (services.dep_manager).
+
+    One row per ABM/ASM server token an admin links. Holds the crown-jewel DEP
+    server token (OAuth1 creds) and the PKI private key used to decrypt it -- BOTH
+    encrypted at rest (services.crypto_secrets). These columns are secrets and are
+    NEVER serialized (``to_dict`` omits them), never logged, never written to a
+    config doc or history snapshot. The config dir is git-reviewable, so DEP
+    credentials deliberately live here in the DB instead. See docs/specs/dep-ade-spec.md.
+
+    Security: ``token_enc`` grants control over which devices land in which MDM for
+    the whole org -- treat like a root credential. ``private_key_enc`` can decrypt a
+    re-downloaded token, so it is guarded just as tightly.
+    """
+    id = fields.UUIDField(pk=True)
+    tenant = fields.ForeignKeyField("models.Tenant", related_name="dep_servers")
+    name = fields.CharField(max_length=100)  # admin slug label
+    # unlinked | awaiting_token | linked | error
+    status = fields.CharField(max_length=30, default="unlinked")
+    # PKI: private key encrypted; public cert is what the admin uploads to ABM.
+    private_key_enc = fields.TextField(null=True)
+    public_cert_pem = fields.TextField(null=True)
+    cert_expires_at = fields.DatetimeField(null=True)
+    # Decrypted server token JSON (OAuth1 creds), Fernet-encrypted at rest.
+    token_enc = fields.TextField(null=True)
+    token_expires_at = fields.DatetimeField(null=True)  # from access_token_expiry
+    # /account cache (non-secret): org_name, server_name, org_id, admin_id, ...
+    account_detail = fields.JSONField(default=dict)
+    # Delta-sync cursor (opaque, <7 days) + bookkeeping.
+    sync_cursor = fields.CharField(max_length=255, null=True)
+    cursor_fetched_at = fields.DatetimeField(null=True)
+    last_sync_at = fields.DatetimeField(null=True)
+    last_sync_status = fields.CharField(max_length=40, null=True)
+    last_sync_error = fields.TextField(null=True)
+    # Default DEP enrollment profile (profiles.yaml id) auto-assigned to new devices.
+    default_profile_id = fields.CharField(max_length=100, null=True)
+    last_error = fields.TextField(null=True)
+    created_at = fields.DatetimeField(auto_now_add=True)
+    updated_at = fields.DatetimeField(auto_now=True)
+
+    class Meta:
+        table = "dep_servers"
+        unique_together = (("tenant", "name"),)
+        ordering = ["name"]
+
+    @property
+    def is_linked(self) -> bool:
+        return self.status == "linked" and bool(self.token_enc)
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Non-secret projection for the API. NEVER includes token/key material."""
+        acct = self.account_detail or {}
+        return {
+            "id": str(self.id),
+            "tenant_id": str(self.tenant_id),
+            "name": self.name,
+            "status": self.status,
+            "has_public_cert": bool(self.public_cert_pem),
+            "has_token": bool(self.token_enc),
+            "cert_expires_at": self.cert_expires_at.isoformat() if self.cert_expires_at else None,
+            "token_expires_at": self.token_expires_at.isoformat() if self.token_expires_at else None,
+            "account": {
+                "org_name": acct.get("org_name"),
+                "server_name": acct.get("server_name"),
+                "org_id": acct.get("org_id"),
+                "org_email": acct.get("org_email"),
+                "admin_id": acct.get("admin_id"),
+                "org_type": acct.get("org_type"),
+            } if acct else {},
+            "sync_cursor_at": self.cursor_fetched_at.isoformat() if self.cursor_fetched_at else None,
+            "last_sync_at": self.last_sync_at.isoformat() if self.last_sync_at else None,
+            "last_sync_status": self.last_sync_status,
+            "last_sync_error": self.last_sync_error,
+            "default_profile_id": self.default_profile_id,
+            "last_error": self.last_error,
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+            "updated_at": self.updated_at.isoformat() if self.updated_at else None,
+        }
+
+
+class DepProfile(Model):
+    """Maps a locally-authored DEP enrollment profile (profiles.yaml id) to the
+    ``profile_uuid`` Apple returns from ``POST /profile`` (services.dep_manager).
+
+    This mapping is runtime state (per DepServer), not config -- so it lives in the
+    DB, not in the git-tracked config doc. ``payload_hash`` lets the manager detect an
+    edit to the authored profile and re-push it.
+    """
+    id = fields.UUIDField(pk=True)
+    tenant = fields.ForeignKeyField("models.Tenant", related_name="dep_profiles")
+    dep_server = fields.ForeignKeyField("models.DepServer", related_name="profiles")
+    profile_id = fields.CharField(max_length=100)   # profiles.yaml id
+    profile_uuid = fields.CharField(max_length=64, null=True)  # Apple's
+    payload_hash = fields.CharField(max_length=64, null=True)
+    pushed_at = fields.DatetimeField(null=True)
+    last_error = fields.TextField(null=True)
+    created_at = fields.DatetimeField(auto_now_add=True)
+    updated_at = fields.DatetimeField(auto_now=True)
+
+    class Meta:
+        table = "dep_profiles"
+        unique_together = (("dep_server", "profile_id"),)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "id": str(self.id),
+            "dep_server_id": str(self.dep_server_id),
+            "profile_id": self.profile_id,
+            "profile_uuid": self.profile_uuid,
+            "pushed_at": self.pushed_at.isoformat() if self.pushed_at else None,
+            "last_error": self.last_error,
             "updated_at": self.updated_at.isoformat() if self.updated_at else None,
         }

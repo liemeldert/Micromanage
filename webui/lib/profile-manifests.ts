@@ -124,10 +124,19 @@ export function blankPayload(m: PayloadManifest): Record<string, unknown> {
 
 // ── Enrollment (Automated Device Enrollment / DEP) manifest ───────────────────
 
+// Setup Assistant panes that can be skipped (skip_setup_items). Mirrors the
+// controller's skip-keys registry (controller/services/skip_keys.py, itself from
+// Apple's skipkeys.yaml). The controller drops any key it doesn't recognise, so an
+// out-of-date entry here is harmless; the DEP profile editor also offers the live
+// list from GET /api/v1/dep/skip-keys.
 export const SETUP_PANE_OPTIONS = [
-  "Passcode", "Biometric", "Payment", "Zoom", "Location", "Restore", "Siri",
-  "Diagnostics", "AppleID", "TOS", "Privacy", "ScreenTime", "SoftwareUpdate",
-  "Welcome", "Appearance", "FileVault", "iCloudStorage", "iCloudDiagnostics",
+  "Accessibility", "Android", "Appearance", "AppleID", "AppStore", "Biometric",
+  "DeviceToDeviceMigration", "Diagnostics", "FileVault", "iCloudDiagnostics",
+  "iCloudStorage", "iMessageAndFaceTime", "Intelligence", "Keyboard", "Location",
+  "Passcode", "Payment", "Privacy", "Restore", "RestoreCompleted", "Safety",
+  "ScreenTime", "SIMSetup", "Siri", "SoftwareUpdate", "TermsOfAddress", "Tips",
+  "TOS", "TVHomeScreenSync", "TVProviderSignIn", "UnlockWithWatch", "Wallpaper",
+  "WebContentFiltering", "Welcome", "Zoom",
 ];
 
 export const ENROLLMENT_MANIFEST: PayloadManifest = {
@@ -144,7 +153,7 @@ export const ENROLLMENT_MANIFEST: PayloadManifest = {
     { name: "is_mdm_removable", title: "MDM profile removable", type: "boolean", default: false,
       description: "Allow the user to remove the MDM profile later." },
     { name: "await_device_configured", title: "Await final configuration", type: "boolean", default: false,
-      description: "Hold Setup Assistant until the server releases the device." },
+      description: "Hold the device in Setup Assistant until the server releases it. Pair with an ATC flow ending in a “Release from Setup Assistant” step so the user only reaches the home screen once profiles/apps are installed (true zero-touch)." },
     { name: "allow_pairing", title: "Allow host pairing", type: "boolean", default: true },
     { name: "auto_advance_setup", title: "Auto-advance setup (tvOS)", type: "boolean", default: false },
     { name: "support_phone_number", title: "Support phone number", type: "string" },

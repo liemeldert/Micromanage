@@ -44,6 +44,11 @@ from controller.services.audit import record_audit
 app = FastAPI(title="MDM IAC API", version="1.0.0")
 logger = logging.getLogger(__name__)
 
+# Automated Device Enrollment (ADE/DEP) + ABM/ASM management + the device-facing
+# enrollment endpoint. See controller/api/dep.py, docs/specs/dep-ade-spec.md.
+from controller.api.dep import router as dep_router  # noqa: E402
+app.include_router(dep_router)
+
 # Base directory for per-tenant YAML config. Mirror the sync service
 # (controller/main.py), which honors YAML_CONFIG_PATH, so the API (writer) and the
 # sync loop (reader) always resolve to the same directory. Defaults to
