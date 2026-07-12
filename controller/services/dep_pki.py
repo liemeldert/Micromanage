@@ -14,7 +14,9 @@ jewel token (it can decrypt a re-downloaded token), so callers persist it encryp
 (services.crypto_secrets) and never log it.
 """
 
+import base64
 import datetime as _dt
+import email
 import json
 import logging
 import re
@@ -74,24 +76,38 @@ def decrypt_server_token(
 ) -> Dict[str, Any]:
     """Decrypt an ABM ``.p7m`` server token and parse the OAuth1 credentials.
 
-    Handles both the S/MIME (with MIME headers) and raw-DER forms of the enveloped
-    data, and both the ``-----BEGIN MESSAGE-----``-wrapped and bare-JSON inner
-    payloads. Raises ``DepTokenError`` on any failure.
+    ABM/ASM hands back the token as CMS EnvelopedData encrypted to our public key.
+    The file can arrive as S/MIME (with MIME headers -- Apple's usual form), a PEM
+    ``PKCS7`` block, a bare base64 blob, or raw DER. We normalise all of those to
+    DER ourselves (Python's ``email`` parser handles the MIME/base64 quirks that
+    trip cryptography's S/MIME reader), then decrypt. Raises ``DepTokenError`` on
+    any failure.
     """
     key = serialization.load_pem_private_key(private_key_pem.encode(), password=None)
     cert = x509.load_pem_x509_certificate(cert_pem.encode())
 
+    der = _extract_cms_der(p7m)
+
     plaintext: Optional[bytes] = None
     errors = []
-    # Try each decoder in turn -- Apple's download is S/MIME, but be liberal.
-    for name, fn in (
+    # Preferred: normalise to DER, then a self-contained CMS decrypt that supports
+    # any content cipher / RSA key-transport Apple uses. Fall back to cryptography's
+    # built-in readers (which handle inputs they themselves produced, e.g. tests).
+    attempts = []
+    if der is not None:
+        attempts.append(("cms", lambda: _decrypt_enveloped_der(der, key)))
+        attempts.append(("der", lambda: pkcs7.pkcs7_decrypt_der(der, cert, key, [])))
+    attempts.extend([
         ("smime", lambda: pkcs7.pkcs7_decrypt_smime(p7m, cert, key, [])),
-        ("der", lambda: pkcs7.pkcs7_decrypt_der(p7m, cert, key, [])),
+        ("raw-der", lambda: pkcs7.pkcs7_decrypt_der(p7m, cert, key, [])),
         ("pem", lambda: pkcs7.pkcs7_decrypt_pem(p7m, cert, key, [])),
-    ):
+    ])
+    for name, fn in attempts:
         try:
-            plaintext = fn()
-            break
+            result = fn()
+            if result:
+                plaintext = result
+                break
         except Exception as exc:  # noqa: BLE001 -- try the next form
             errors.append(f"{name}: {exc}")
     if plaintext is None:
@@ -101,6 +117,121 @@ def decrypt_server_token(
         )
 
     return parse_token(plaintext.decode("utf-8", errors="replace"))
+
+
+_PEM_PKCS7_RE = re.compile(
+    r"-----BEGIN (?:PKCS7|CMS)-----(.*?)-----END (?:PKCS7|CMS)-----", re.DOTALL
+)
+
+
+def _extract_cms_der(p7m: bytes) -> Optional[bytes]:
+    """Normalise an ABM token (S/MIME, PEM, base64, or raw DER) to CMS DER bytes."""
+    if not p7m:
+        return None
+    # Raw DER already? CMS ContentInfo is a SEQUENCE (tag 0x30).
+    if p7m[:1] == b"\x30":
+        return p7m
+
+    text = p7m.decode("latin-1", errors="ignore")
+    stripped = text.lstrip()
+
+    # PEM-wrapped PKCS7.
+    m = _PEM_PKCS7_RE.search(text)
+    if m:
+        try:
+            return base64.b64decode("".join(m.group(1).split()))
+        except Exception:
+            pass
+
+    # S/MIME: MIME headers + a base64 body. The email parser decodes the
+    # Content-Transfer-Encoding for us regardless of line-wrapping / CRLF quirks.
+    lowered = stripped.lower()
+    if lowered.startswith(("content-type:", "mime-version:")) or "pkcs7-mime" in lowered:
+        try:
+            msg = email.message_from_bytes(p7m)
+            payload = msg.get_payload(decode=True)
+            if payload and payload[:1] == b"\x30":
+                return payload
+        except Exception:
+            pass
+
+    # Bare base64 blob (no MIME headers, no PEM markers).
+    compact = "".join(stripped.split())
+    if compact and re.fullmatch(r"[A-Za-z0-9+/=]+", compact):
+        try:
+            decoded = base64.b64decode(compact)
+            if decoded[:1] == b"\x30":
+                return decoded
+        except Exception:
+            pass
+    return None
+
+
+def _decrypt_enveloped_der(der: bytes, key) -> Optional[bytes]:
+    """Decrypt CMS EnvelopedData (DER) with our RSA private key, using asn1crypto to
+    parse and cryptography primitives for the RSA/AES(3DES) work.
+
+    Self-contained so we don't depend on cryptography's S/MIME reader or its narrow
+    pkcs7 cipher support. Returns the plaintext, or None if this isn't EnvelopedData
+    / no recipient matches / the cipher is unsupported.
+    """
+    from asn1crypto import cms as _cms
+    from cryptography.hazmat.primitives import padding as sym_padding
+    from cryptography.hazmat.primitives.asymmetric import padding as asym_padding
+    from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+
+    info = _cms.ContentInfo.load(der)
+    if info["content_type"].native != "enveloped_data":
+        return None
+    enveloped = info["content"]
+    eci = enveloped["encrypted_content_info"]
+    enc_content = eci["encrypted_content"].native
+    if not enc_content:
+        return None
+
+    # Recover the content-encryption key from a key-transport recipient we can open.
+    cek: Optional[bytes] = None
+    for ri in enveloped["recipient_infos"]:
+        if ri.name != "ktri":
+            continue
+        ktri = ri.chosen
+        kea = ktri["key_encryption_algorithm"]["algorithm"].native
+        enc_key = ktri["encrypted_key"].native
+        try:
+            if kea in ("rsa", "rsaes_pkcs1v15"):
+                cek = key.decrypt(enc_key, asym_padding.PKCS1v15())
+            elif kea == "rsaes_oaep":
+                cek = key.decrypt(
+                    enc_key,
+                    asym_padding.OAEP(
+                        mgf=asym_padding.MGF1(hashes.SHA1()),
+                        algorithm=hashes.SHA1(),
+                        label=None,
+                    ),
+                )
+            else:
+                continue
+        except Exception:
+            continue
+        if cek:
+            break
+    if cek is None:
+        return None
+
+    enc_algo = eci["content_encryption_algorithm"]
+    algo_name = enc_algo["algorithm"].native
+    iv = enc_algo["parameters"].native
+    if algo_name in ("aes128_cbc", "aes192_cbc", "aes256_cbc"):
+        alg = algorithms.AES(cek)
+    elif algo_name in ("tripledes_3key", "des_ede3_cbc"):
+        alg = algorithms.TripleDES(cek)
+    else:
+        raise DepTokenError(f"unsupported content cipher {algo_name}")
+
+    decryptor = Cipher(alg, modes.CBC(iv)).decryptor()
+    padded = decryptor.update(enc_content) + decryptor.finalize()
+    unpadder = sym_padding.PKCS7(alg.block_size).unpadder()
+    return unpadder.update(padded) + unpadder.finalize()
 
 
 # The classic stoken sometimes wraps the JSON in a signed-message envelope.

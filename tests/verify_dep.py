@@ -140,6 +140,30 @@ def _envelope_token(cert_pem, token):
         Encoding.SMIME, [])
 
 
+def _envelope_token_der(cert_pem, token):
+    """The raw CMS EnvelopedData DER, before any MIME/PEM wrapping."""
+    cert = x509.load_pem_x509_certificate(cert_pem.encode())
+    inner = ("-----BEGIN MESSAGE-----\n" + json.dumps(token) +
+             "\n-----END MESSAGE-----\n").encode()
+    return pkcs7.PKCS7EnvelopeBuilder().set_data(inner).add_recipient(cert).encrypt(
+        Encoding.DER, [])
+
+
+def _apple_style_smime(der):
+    """Wrap CMS DER the way ABM actually delivers it: MIME headers (name= before
+    smime-type=, a Content-Description), CRLF line endings, 64-col base64 body."""
+    import base64 as _b64
+    body = _b64.encodebytes(der).decode().replace("\n", "\r\n")
+    headers = (
+        'Content-Type: application/pkcs7-mime; name="smime.p7m"; smime-type=enveloped-data\r\n'
+        'Content-Transfer-Encoding: base64\r\n'
+        'Content-Disposition: attachment; filename="smime.p7m"\r\n'
+        'Content-Description: S/MIME Encrypted Message\r\n'
+        '\r\n'
+    )
+    return (headers + body).encode()
+
+
 def _synthetic_apple_cms(serial, anchor_path, tamper=False, untrusted=False):
     """Build a base64 x-apple-aspen-deviceinfo header signed by a synthetic
     root->intermediate->device chain, and write the root as an anchor PEM (unless
@@ -269,6 +293,19 @@ async def main():
           json.loads(crypto_secrets.decrypt(server.token_enc))["consumer_key"] == "CK")
     check("account org captured", (server.account_detail or {}).get("org_name") == "Acme Inc")
     check("token expiry parsed", server.token_expires_at is not None)
+
+    # The real ABM download is S/MIME with MIME headers; also accept raw DER and a
+    # bare base64 blob. All must decrypt to the same OAuth creds.
+    _der = _envelope_token_der(server.public_cert_pem, token)
+    import base64 as _b64
+    for _label, _blob in (
+        ("apple-style S/MIME", _apple_style_smime(_der)),
+        ("raw DER", _der),
+        ("bare base64", _b64.encodebytes(_der)),
+    ):
+        _got = dep_pki.decrypt_server_token(_blob, crypto_secrets.decrypt(server.private_key_enc),
+                                            server.public_cert_pem)
+        check(f"token decrypts from {_label}", _got.get("consumer_key") == "CK")
     check("to_dict() NEVER leaks token/key", not any(
         k in server.to_dict() for k in ("token_enc", "private_key_enc", "public_cert_pem")))
 
