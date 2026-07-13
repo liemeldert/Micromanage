@@ -92,11 +92,39 @@ async def test_pairing():
           and cfg["secret_access_key"] == "SKOLD" and _REDACTED not in cfg.values())
 
 
+async def test_device_naming():
+    print("update_tenant device-naming template:")
+    tenant = await Tenant.create(id="t2", name="T2")
+    user = await User.create(tenant=tenant, email="a@t2", role="admin")
+    admin = Principal(tenant=tenant, user=user, email="a@t2", role="admin")
+
+    async def put(dn):
+        return await update_tenant(TenantUpdate(device_naming=dn), admin)
+
+    await put({"template": "IT-{serial}", "apply_on_enroll": True})
+    check("template + apply_on_enroll stored",
+          (await Tenant.get(id="t2")).device_naming == {"template": "IT-{serial}", "apply_on_enroll": True})
+
+    await put({"template": "  Lab-{model}  ", "apply_on_enroll": False})
+    dn = (await Tenant.get(id="t2")).device_naming
+    check("template trimmed + apply off", dn == {"template": "Lab-{model}", "apply_on_enroll": False})
+
+    await put({"template": "   "})
+    check("blank template clears to {}", (await Tenant.get(id="t2")).device_naming == {})
+
+    # Omitting device_naming leaves it untouched (only s3 sent here).
+    await put({"template": "Kiosk-{udid_short}", "apply_on_enroll": True})
+    await update_tenant(TenantUpdate(name="renamed"), admin)
+    check("omitted device_naming untouched",
+          (await Tenant.get(id="t2")).device_naming == {"template": "Kiosk-{udid_short}", "apply_on_enroll": True})
+
+
 async def main():
     await Tortoise.init(db_url="sqlite://:memory:", modules={"models": ["controller.models.tenant"]})
     await Tortoise.generate_schemas()
     test_restore_helper()
     await test_pairing()
+    await test_device_naming()
     await Tortoise.close_connections()
     print(f"\nRESULT: {'PASS' if not FAIL else 'FAIL'} ({len(PASS)} passed, {len(FAIL)} failed)")
     if FAIL:

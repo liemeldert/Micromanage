@@ -23,6 +23,7 @@ import {
 import { useLocalStorage } from "@mantine/hooks";
 import { notifications } from "@mantine/notifications";
 import {
+  IconBuildingStore,
   IconCalendarDue,
   IconCheck,
   IconChevronRight,
@@ -443,6 +444,34 @@ export default function SettingsPage() {
           </Stack>
         )}
       </Card>
+
+      {/* Automated Enrollment (ADE/DEP): link ABM/ASM. Admin-managed, so linked
+          from Settings rather than the main navigation. */}
+      {isAdmin && (
+        <Card withBorder radius="md" p="md">
+          <Group justify="space-between" wrap="nowrap">
+            <Group gap="sm" wrap="nowrap">
+              <ThemeIcon variant="light" color="blue" size="lg">
+                <IconBuildingStore size={18} />
+              </ThemeIcon>
+              <Box>
+                <Text fz="sm" fw={600}>Automated Enrollment</Text>
+                <Text fz="xs" c="dimmed">
+                  Connect Apple Business or School Manager and let devices provision out of the box.
+                </Text>
+              </Box>
+            </Group>
+            <Button
+              component={Link}
+              href="/dep"
+              variant="light"
+              rightSection={<IconChevronRight size={14} />}
+            >
+              Manage
+            </Button>
+          </Group>
+        </Card>
+      )}
 
       {/* Users (add / role / password reset / activate / delete) */}
       <UsersManager />

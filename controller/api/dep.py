@@ -145,8 +145,16 @@ async def upload_token(server_id: str,
 
 @router.delete("/servers/{server_id}")
 async def unlink_server(server_id: str,
+                        purge: bool = Query(False),
                         admin: Principal = Depends(require_admin)) -> Dict[str, Any]:
+    """Unlink (wipe secrets, keep the row + synced devices) or, with ``?purge=true``,
+    remove the connection entirely -- for one that was never finished or is retired."""
     server = await _get_server(server_id, admin)
+    if purge:
+        await dep_manager.remove(server)
+        await record_audit(admin, "dep.server.remove", target_type="dep_server",
+                           target_id=str(server_id), detail={"name": server.name})
+        return {"status": "removed"}
     await dep_manager.unlink(server)
     await record_audit(admin, "dep.server.unlink", target_type="dep_server",
                        target_id=str(server.id))

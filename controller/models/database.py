@@ -35,6 +35,13 @@ _AUX_DDL = [
     'ALTER TABLE "devices" ADD COLUMN IF NOT EXISTS "dep_profile_uuid" VARCHAR(64) NULL',
     'ALTER TABLE "devices" ADD COLUMN IF NOT EXISTS "dep_profile_status" VARCHAR(30) NULL',
     'ALTER TABLE "devices" ADD COLUMN IF NOT EXISTS "dep_last_synced_at" TIMESTAMPTZ NULL',
+    # ATC single-flow redesign: a run's entry (start) node + the event that fired
+    # it. Run identity is (device, start_node); the index backs the dedup/last-run
+    # queries on the enroll/checkin/schedule hot paths (services.atc).
+    'ALTER TABLE "flow_runs" ADD COLUMN IF NOT EXISTS "start_node" VARCHAR(100) NULL',
+    'ALTER TABLE "flow_runs" ADD COLUMN IF NOT EXISTS "event_kind" VARCHAR(20) NULL',
+    'CREATE INDEX IF NOT EXISTS "idx_flowruns_dev_start_event" '
+    'ON "flow_runs" (device_id, start_node, event_kind, started_at)',
 ]
 
 

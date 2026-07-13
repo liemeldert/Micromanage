@@ -158,6 +158,21 @@ async def unlink(dep_server: DepServer) -> None:
     await dep_server.save()
 
 
+async def remove(dep_server: DepServer) -> None:
+    """Fully delete a DepServer and its profile mappings.
+
+    Unlike :func:`unlink` (which keeps the row so a linked connection can be re-linked
+    with its synced devices intact), this discards the connection entirely -- for one
+    that was never finished or has been retired. Any Device still pointing at it keeps
+    its own live MDM channel but loses the (now meaningless) DEP linkage.
+    """
+    await DepProfile.filter(dep_server=dep_server).delete()
+    await Device.filter(
+        tenant_id=dep_server.tenant_id, dep_server_id=dep_server.id
+    ).update(dep_server_id=None, dep_profile_status="removed")
+    await dep_server.delete()
+
+
 # ── device sync ───────────────────────────────────────────────────────────────
 
 async def sync_devices(dep_server: DepServer, transport: Optional[Transport] = None) -> Dict[str, Any]:

@@ -18,11 +18,13 @@ import {
   Title,
 } from "@mantine/core";
 import { notifications } from "@mantine/notifications";
+import { modals } from "@mantine/modals";
 import {
   IconCheck,
   IconCloudDownload,
   IconExternalLink,
   IconKey,
+  IconTrash,
   IconUpload,
 } from "@tabler/icons-react";
 import { api, ApiError, type DepServerDetail } from "../../../lib/api";
@@ -37,9 +39,11 @@ import { useAuth } from "../../../lib/auth-context";
 export function DepWizard({
   existing,
   onLinked,
+  onRemoved,
 }: {
   existing?: DepServerDetail | null;
   onLinked: (server: DepServerDetail) => void;
+  onRemoved?: () => void;
 }) {
   const { token } = useAuth();
   // Resume at the token step if a keypair was already generated (whether the last
@@ -120,6 +124,36 @@ export function DepWizard({
     } finally {
       setBusy(false);
     }
+  }
+
+  function confirmRemove() {
+    if (!server) return;
+    modals.openConfirmModal({
+      title: `Remove "${server.name}"?`,
+      children: (
+        <Text size="sm">
+          This discards the connection and its generated keypair. Nothing is sent to Apple,
+          and no enrolled device is affected — use this to clear out a connection you never
+          finished setting up.
+        </Text>
+      ),
+      labels: { confirm: "Remove", cancel: "Cancel" },
+      confirmProps: { color: "red" },
+      onConfirm: async () => {
+        if (!token) return;
+        try {
+          await api.removeDepServer(token, server.id);
+          notifications.show({ color: "green", message: "Connection removed." });
+          onRemoved?.();
+        } catch (e) {
+          notifications.show({
+            color: "red",
+            title: "Could not remove connection",
+            message: e instanceof ApiError ? e.message : String(e),
+          });
+        }
+      },
+    });
   }
 
   return (
@@ -256,6 +290,21 @@ export function DepWizard({
           </Stack>
         </Stepper.Completed>
       </Stepper>
+
+      {/* Escape hatch: discard a connection that was started but never linked. */}
+      {server && server.status !== "linked" && onRemoved && (
+        <Group justify="flex-end" mt="lg">
+          <Button
+            variant="subtle"
+            color="red"
+            size="xs"
+            leftSection={<IconTrash size={14} />}
+            onClick={confirmRemove}
+          >
+            Remove this connection
+          </Button>
+        </Group>
+      )}
     </Card>
   );
 }

@@ -129,6 +129,11 @@ export default function FlowRunViewer() {
           </Title>
         </div>
         <Group gap={8}>
+          {run.event_kind && (
+            <Badge size="lg" variant="light" color="grape">
+              {run.event_kind}
+            </Badge>
+          )}
           <Badge size="lg" color={STATUS_COLOR[run.status] ?? "gray"} variant="light">
             {run.status}
           </Badge>

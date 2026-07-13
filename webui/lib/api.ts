@@ -356,11 +356,18 @@ export const api = {
   getFlowRun(token: string, runId: string) {
     return request<FlowRunDetail>(`/api/v1/flow-runs/${runId}`, token);
   },
-  // Manually start a flow against a device (testing / re-run).
-  startFlowRun(token: string, deviceId: string, flowId: string) {
+  // Manually start a run from a specific start node against a device.
+  startFlowRun(token: string, deviceId: string, startNodeId: string) {
     return request<FlowRunSummary>(`/api/v1/devices/${deviceId}/flow-runs`, token, {
       method: "POST",
-      body: JSON.stringify({ flow_id: flowId }),
+      body: JSON.stringify({ start_node_id: startNodeId }),
+    });
+  },
+  // Resume a run parked on a manual_gate down the chosen decision edge.
+  resumeFlowRun(token: string, runId: string, edge: string) {
+    return request<FlowRunSummary>(`/api/v1/flow-runs/${runId}/resume`, token, {
+      method: "POST",
+      body: JSON.stringify({ edge }),
     });
   },
 
@@ -388,6 +395,14 @@ export const api = {
   },
   resolveAlert(token: string, id: string) {
     return request<DispatcherAlert>(`/api/v1/alerts/${id}/resolve`, token, { method: "POST" });
+  },
+  // Take a typed action on an ATC alert (in-setup release / gate decision).
+  alertAction(token: string, id: string, actionKey: string) {
+    return request<{ message: string; alert?: DispatcherAlert; run?: FlowRunSummary }>(
+      `/api/v1/alerts/${id}/action`,
+      token,
+      { method: "POST", body: JSON.stringify({ action_key: actionKey }) },
+    );
   },
   // Admin-approve a queued destructive remediation.
   approveRemediation(token: string, id: string, actionKey: string) {
@@ -440,6 +455,9 @@ export const api = {
       // way to clear a date via this endpoint today).
       apns_cert_expires_at?: string;
       dep_token_expires_at?: string;
+      // Tenant-default device-naming template (services.naming). Empty template
+      // ({ template: "" }) clears it; omitted leaves it unchanged.
+      device_naming?: { template: string; apply_on_enroll?: boolean };
     },
   ) {
     return request<{ message: string }>("/api/v1/tenant", token, {
@@ -563,6 +581,12 @@ export const api = {
   },
   unlinkDepServer(token: string, id: string) {
     return request<{ status: string }>(`/api/v1/dep/servers/${id}`, token, { method: "DELETE" });
+  },
+  // Fully remove a connection (never-finished or retired), rather than unlinking it.
+  removeDepServer(token: string, id: string) {
+    return request<{ status: string }>(`/api/v1/dep/servers/${id}?purge=true`, token, {
+      method: "DELETE",
+    });
   },
   syncDepServer(token: string, id: string) {
     return request<DepSyncSummary>(`/api/v1/dep/servers/${id}/sync`, token, { method: "POST" });
@@ -870,6 +894,8 @@ export interface TenantInfo {
   // Admin-entered renewal reminders (manual-entry MVP).
   apns_cert_expires_at: string | null;
   dep_token_expires_at: string | null;
+  // Tenant-default device-naming template (services.naming).
+  device_naming?: { template?: string; apply_on_enroll?: boolean };
 }
 
 // Console user (tenant-scoped admin/member account). Mirrors the shape
@@ -903,7 +929,7 @@ export interface FlowNodeSpec {
   category: string;
   waits: boolean;
   // Output handles this node type wires from, in UI order.
-  edges: ("next" | "on_true" | "on_false" | "on_timeout")[];
+  edges: ("next" | "on_true" | "on_false" | "on_timeout" | "on_release" | "on_cancel" | "on_wait")[];
   params: FlowNodeParamSpec[];
 }
 
@@ -913,9 +939,17 @@ export interface WaitSignal {
   description: string;
 }
 
+export interface StartKind {
+  value: string; // enroll_dep | enroll_profile | checkin | schedule
+  label: string;
+  description?: string;
+}
+
 export interface FlowStepCatalog {
   nodes: FlowNodeSpec[];
   wait_signals: WaitSignal[];
+  start_kinds: StartKind[];
+  gate_edges: string[];
 }
 
 export interface FlowRunSummary {
@@ -923,6 +957,8 @@ export interface FlowRunSummary {
   tenant_id: string;
   device_id: string | null;
   flow_id: string;
+  start_node?: string | null;
+  event_kind?: string | null;
   flow_hash: string;
   status: string; // running | waiting | completed | failed | cancelled
   current_node: string | null;
@@ -953,26 +989,24 @@ export interface FlowNode {
   on_true?: string;
   on_false?: string;
   on_timeout?: string;
+  // manual_gate decision handles (fixed enum, wired from params.options[].edge).
+  on_release?: string;
+  on_cancel?: string;
+  on_wait?: string;
   ui?: { x: number; y: number };
 }
 
-export interface FlowTrigger {
-  on: string; // "enroll"
-  match?: Record<string, unknown>;
-}
-
+// The single ATC flow. Entry points are `start` nodes inside `nodes` (there is
+// no per-flow trigger); each start carries its own kind + match scope.
 export interface FlowDoc {
   id: string;
   name: string;
   enabled?: boolean;
-  priority?: number;
-  trigger: FlowTrigger;
-  start: string;
   nodes: FlowNode[];
 }
 
 export interface FlowsConfig {
-  flows: FlowDoc[];
+  flow: FlowDoc;
 }
 
 // ── Dispatcher (compliance) types ──────────────────────────────────────────

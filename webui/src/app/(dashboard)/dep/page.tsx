@@ -142,6 +142,12 @@ export default function DepPage() {
                 setDetail(s);
                 await load();
               }}
+              onRemoved={async () => {
+                setSelectedId(null);
+                setDetail(null);
+                setAddingNew(false);
+                await load();
+              }}
             />
           </Stack>
         ) : (

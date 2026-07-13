@@ -300,27 +300,12 @@ class TagRegistry(BaseModel):
     tags: List[Tag] = []
 
 
-class FlowTrigger(BaseModel):
-    """When a flow starts. v1 supports ``on: enroll`` only; ``match`` is a scope
-    dict (same shape as a profile/app scope) selecting which devices it fires
-    for. See services.atc / services.scoping."""
-    on: str
-    match: Optional[Dict[str, Any]] = None
-
-    @validator('on')
-    def validate_on(cls, v):
-        if v not in ('enroll',):
-            raise ValueError(
-                f"Unsupported flow trigger 'on': {v!r} (v1 supports: enroll)"
-            )
-        return v
-
-
 class FlowNode(BaseModel):
     """One node in a flow graph. ``params`` and the edge targets are validated
     per-node-type imperatively (see YAMLValidator._check_flow_node_params /
     _check_flow_graph) against the step catalog, so the structural model stays
-    permissive."""
+    permissive. Entry points are ``start`` nodes (kind + match scope); a
+    ``manual_gate`` wires its edges dynamically from params.options."""
     id: str
     type: str
     params: Optional[Dict[str, Any]] = {}
@@ -328,6 +313,10 @@ class FlowNode(BaseModel):
     on_true: Optional[str] = None
     on_false: Optional[str] = None
     on_timeout: Optional[str] = None
+    # manual_gate decision handles (fixed enum; wired from params.options[].edge).
+    on_release: Optional[str] = None
+    on_cancel: Optional[str] = None
+    on_wait: Optional[str] = None
     # Canvas position -- kept separate from logic so the YAML stays diff-friendly.
     ui: Optional[Dict[str, Any]] = None
 
@@ -342,13 +331,11 @@ class FlowNode(BaseModel):
 
 
 class Flow(BaseModel):
+    """A single ATC flow. Entry points are ``start`` nodes inside ``nodes`` (there
+    is no per-flow trigger); see services.flow_step_catalog."""
     id: str
     name: str
     enabled: Optional[bool] = True
-    # Higher priority wins when multiple flows match an enroll; ties broken by id.
-    priority: Optional[int] = 0
-    trigger: FlowTrigger
-    start: str
     nodes: List[FlowNode]
 
     @validator('id')
@@ -794,14 +781,16 @@ class YAMLValidator:
                         apps: Optional[List[App]],
                         profiles: Optional[List[Profile]],
                         known_tags: Optional[set]) -> Optional[set]:
-        """Validate the optional flows.yaml (ATC enrollment flows).
+        """Validate the optional flows.yaml (the single ATC flow).
 
-        Returns the set of flow ids, or None when there is no flows document.
-        Checks (per spec 1.5): unique flow ids; a valid trigger; ``start`` and
-        every edge target exist; the graph is a DAG with a reachable ``end``;
-        per-node params are well-formed and cross-reference real profile/app/tag
-        ids and non-destructive commands.
-        """
+        Returns ``{flow_id}`` (or None when there is no flow). Checks: the flow
+        has at least one ``start`` node with a valid kind + scope; every edge
+        target exists; the graph is a DAG with an ``end`` reachable from every
+        start; per-node params are well-formed and cross-reference real
+        profile/app/tag ids and non-destructive commands. A legacy multi-flow
+        document is migrated to a single flow first (with a warning)."""
+        from controller.services.flow_step_catalog import normalize_flow_document
+
         path = self.tenant_path / 'flows.yaml'
         if not path.exists():
             return None
@@ -809,47 +798,45 @@ class YAMLValidator:
         if not data:
             return None
 
+        fdata, warns = normalize_flow_document(data)
+        for w in warns:
+            self.warnings.append(w)
+        if not fdata:
+            return None
+
         group_names = {g.name for g in groups} if groups else set()
         profile_ids = {p.id for p in profiles} if profiles else set()
         app_ids = {a.id for a in apps} if apps else set()
 
-        flow_ids: set = set()
-        for idx, fdata in enumerate(data.get('flows', []) or []):
-            try:
-                flow = Flow(**fdata)
-            except Exception as e:
-                self.errors.append(f"Invalid flow at index {idx}: {e}")
-                continue
+        try:
+            flow = Flow(**fdata)
+        except Exception as e:
+            self.errors.append(f"Invalid flow: {e}")
+            return None
 
-            owner = f"flow '{flow.id}'"
-            if flow.id in flow_ids:
-                self.errors.append(f"Duplicate flow id: {flow.id}")
-            flow_ids.add(flow.id)
+        owner = f"flow '{flow.id}'"
 
-            nodes_by_id: Dict[str, FlowNode] = {}
-            for node in flow.nodes:
-                if node.id in nodes_by_id:
-                    self.errors.append(f"{owner} has a duplicate node id: {node.id}")
-                    continue  # keep the first definition for graph/edge analysis
-                nodes_by_id[node.id] = node
+        nodes_by_id: Dict[str, FlowNode] = {}
+        for node in flow.nodes:
+            if node.id in nodes_by_id:
+                self.errors.append(f"{owner} has a duplicate node id: {node.id}")
+                continue  # keep the first definition for graph/edge analysis
+            nodes_by_id[node.id] = node
 
-            if flow.start not in nodes_by_id:
-                self.errors.append(f"{owner} start node '{flow.start}' does not exist")
+        starts = [n for n in nodes_by_id.values() if n.type == "start"]
+        if not starts:
+            self.errors.append(f"{owner} has no 'start' node (add an entry point)")
 
-            # Trigger scope (which devices the flow fires for).
-            self._check_flow_scope(f"{owner} trigger", flow.trigger.match or {},
-                                   group_names, known_tags)
+        edges = self._flow_edges(owner, flow, nodes_by_id)
 
-            edges = self._flow_edges(owner, flow, nodes_by_id)
+        for node in flow.nodes:
+            self._check_flow_node_params(
+                owner, node, group_names, profile_ids, app_ids, known_tags
+            )
 
-            for node in flow.nodes:
-                self._check_flow_node_params(
-                    owner, node, group_names, profile_ids, app_ids, known_tags
-                )
+        self._check_flow_graph(owner, edges, nodes_by_id, [s.id for s in starts])
 
-            self._check_flow_graph(owner, edges, nodes_by_id, flow.start)
-
-        return flow_ids
+        return {flow.id}
 
     def _check_flow_scope(self, owner: str, scope: Dict[str, Any],
                          group_names: set, known_tags: Optional[set]) -> None:
@@ -887,7 +874,9 @@ class YAMLValidator:
                    nodes_by_id: Dict[str, "FlowNode"]) -> Dict[str, List[str]]:
         """Validate each node's edges against the step catalog and return the
         adjacency map (node id -> [target node ids])."""
-        from controller.services.flow_step_catalog import VALID_NODE_TYPES, node_edges
+        from controller.services.flow_step_catalog import (
+            GATE_EDGE_HANDLES, VALID_NODE_TYPES, node_edges,
+        )
 
         edges: Dict[str, List[str]] = {}
         for node in flow.nodes:
@@ -897,18 +886,28 @@ class YAMLValidator:
                 )
                 edges[node.id] = []
                 continue
-            handles = node_edges(node.type)
             handle_field = {
                 "next": node.next, "on_true": node.on_true,
                 "on_false": node.on_false, "on_timeout": node.on_timeout,
+                "on_release": node.on_release, "on_cancel": node.on_cancel,
+                "on_wait": node.on_wait,
             }
+            # A manual_gate only requires the handles its options name; other gate
+            # handles are optional. Everything else uses the static catalog edges
+            # (wait_for's on_timeout is optional -> defaults to failing the run).
+            allowed = node_edges(node.type)
+            if node.type == "manual_gate":
+                opts = (node.params or {}).get("options") or []
+                required = {o.get("edge") for o in opts
+                            if isinstance(o, dict) and o.get("edge") in GATE_EDGE_HANDLES}
+            else:
+                required = {h for h in allowed
+                            if not (node.type == "wait_for" and h == "on_timeout")}
             targets: List[str] = []
-            for h in handles:
+            for h in allowed:
                 val = handle_field.get(h)
-                # on_timeout is optional (defaults to failing the run on timeout).
-                optional = node.type == "wait_for" and h == "on_timeout"
                 if val is None:
-                    if not optional:
+                    if h in required:
                         self.errors.append(
                             f"{owner} node '{node.id}' ({node.type}) is missing its "
                             f"'{h}' edge"
@@ -923,7 +922,7 @@ class YAMLValidator:
                     targets.append(val)
             # Reject edges the node type does not have (e.g. a 'next' on a branch).
             for h, val in handle_field.items():
-                if val is not None and h not in handles:
+                if val is not None and h not in allowed:
                     self.errors.append(
                         f"{owner} node '{node.id}' ({node.type}) must not define a "
                         f"'{h}' edge"
@@ -936,7 +935,9 @@ class YAMLValidator:
                                known_tags: Optional[set]) -> None:
         from controller.auth import DESTRUCTIVE_COMMANDS
         from controller.services.command_catalog import VALID_COMMAND_TYPES
-        from controller.services.flow_step_catalog import is_wait_signal
+        from controller.services.flow_step_catalog import (
+            GATE_EDGE_HANDLES, is_start_kind, is_wait_signal,
+        )
         from controller.services.variables import is_self_referential, unknown_variables
 
         p = node.params or {}
@@ -947,7 +948,48 @@ class YAMLValidator:
             items = value if isinstance(value, list) else ([value] if value else [])
             return [str(x) for x in items if x]
 
-        if t in ("assign_tag", "remove_tag"):
+        if t == "start":
+            kind = p.get("kind")
+            if not is_start_kind(kind):
+                self.errors.append(
+                    f"{where} (start) has an unknown trigger kind: {kind!r}"
+                )
+            if kind == "schedule":
+                iv = p.get("interval_minutes")
+                if isinstance(iv, bool) or not isinstance(iv, int) or iv <= 0:
+                    self.errors.append(
+                        f"{where} (start) scheduled trigger requires a positive integer "
+                        "'interval_minutes'"
+                    )
+                elif iv < 5:
+                    self.warnings.append(
+                        f"{where} (start) interval_minutes={iv} is very short; a schedule "
+                        "start effectively runs every poll tick below ~5 minutes"
+                    )
+            self._check_flow_scope(f"{where} match", p.get("match") or {},
+                                   group_names, known_tags)
+        elif t == "manual_gate":
+            if not str(p.get("summary") or "").strip():
+                self.errors.append(f"{where} (manual_gate) requires a 'summary'")
+            if p.get("severity") not in VALID_SEVERITIES:
+                self.errors.append(
+                    f"{where} (manual_gate) severity must be one of {VALID_SEVERITIES}"
+                )
+            opts = p.get("options")
+            if not isinstance(opts, list) or not opts:
+                self.errors.append(
+                    f"{where} (manual_gate) requires a non-empty 'options' list"
+                )
+            else:
+                for o in opts:
+                    if not isinstance(o, dict) or not str(o.get("label") or "").strip():
+                        self.errors.append(f"{where} (manual_gate) option needs a 'label'")
+                    elif o.get("edge") not in GATE_EDGE_HANDLES:
+                        self.errors.append(
+                            f"{where} (manual_gate) option '{o.get('label')}' has an "
+                            f"invalid edge {o.get('edge')!r} (one of {GATE_EDGE_HANDLES})"
+                        )
+        elif t in ("assign_tag", "remove_tag"):
             tags = _str_list(p.get("tags"))
             if not tags:
                 self.errors.append(f"{where} ({t}) requires a non-empty 'tags' list")
@@ -1043,28 +1085,34 @@ class YAMLValidator:
         # end: no params.
 
     def _check_flow_graph(self, owner: str, edges: Dict[str, List[str]],
-                         nodes_by_id: Dict[str, "FlowNode"], start: str) -> None:
-        """Reject reachable cycles (a flow must be a DAG) and require a reachable
-        ``end``; warn on unreachable nodes.
+                         nodes_by_id: Dict[str, "FlowNode"],
+                         starts: List[str]) -> None:
+        """Reject reachable cycles (a flow must be a DAG), require every start to
+        reach an ``end``, and warn on nodes unreachable from any start.
 
-        Reachability is computed FIRST, and cycle detection runs over only the
-        reachable subgraph, so a cycle in dead (unreachable) nodes cannot mask a
-        genuine 'no reachable end' failure in the live portion -- and only the
-        graph a device would actually execute is validated as a DAG."""
-        if start not in nodes_by_id:
-            return  # start-missing already reported by the caller
+        Union reachability (from all start nodes) is computed FIRST, and cycle
+        detection runs over only that reachable subgraph, so a cycle in dead
+        nodes cannot mask a genuine 'no reachable end' failure in the live
+        portion -- and only the graph a device would actually execute is
+        validated as a DAG."""
+        starts = [s for s in starts if s in nodes_by_id]
+        if not starts:
+            return  # no-start already reported by the caller
 
-        reachable: set = set()
-        stack = [start]
-        while stack:
-            n = stack.pop()
-            if n in reachable:
-                continue
-            reachable.add(n)
-            for tgt in edges.get(n, []):
-                if tgt not in reachable:
-                    stack.append(tgt)
+        def _reach(roots: List[str]) -> set:
+            seen: set = set()
+            stack = list(roots)
+            while stack:
+                n = stack.pop()
+                if n in seen:
+                    continue
+                seen.add(n)
+                for tgt in edges.get(n, []):
+                    if tgt not in seen:
+                        stack.append(tgt)
+            return seen
 
+        reachable = _reach(starts)
         reachable_edges = {
             n: [t for t in edges.get(n, []) if t in reachable] for n in reachable
         }
@@ -1075,16 +1123,16 @@ class YAMLValidator:
                 "(a flow must be acyclic)"
             )
 
-        reached_end = any(
-            nodes_by_id[n].type == "end" for n in reachable if n in nodes_by_id
-        )
-        if not reached_end and not cycles:
-            self.errors.append(
-                f"{owner} has no reachable 'end' node from start '{start}'"
-            )
+        if not cycles:
+            for s in starts:
+                if not any(nodes_by_id[n].type == "end"
+                           for n in _reach([s]) if n in nodes_by_id):
+                    self.errors.append(
+                        f"{owner} has no reachable 'end' node from start '{s}'"
+                    )
         for nid in nodes_by_id:
             if nid not in reachable:
-                self.warnings.append(f"{owner} node '{nid}' is unreachable from start")
+                self.warnings.append(f"{owner} node '{nid}' is unreachable from any start")
 
     # ── Dispatcher rules (dispatcher.yaml) ────────────────────────────────────
     def _validate_dispatcher(self, groups: Optional[List[Group]],

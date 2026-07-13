@@ -157,6 +157,7 @@ export function AlertBoard() {
                   notifications.show({ color: "teal", message: r.outcome });
                 }, a.id)
               }
+              onAction={(key) => act(() => api.alertAction(token!, a.id, key), a.id)}
             />
           ))}
         </Stack>
@@ -175,6 +176,7 @@ function AlertRow({
   onAck,
   onResolve,
   onApprove,
+  onAction,
 }: {
   alert: DispatcherAlert;
   isAdmin: boolean;
@@ -185,11 +187,16 @@ function AlertRow({
   onAck: () => void;
   onResolve: () => void;
   onApprove: (actionKey: string) => void;
+  onAction: (actionKey: string) => void;
 }) {
   const detail = alert.detail || {};
   const pending = (detail.pending_approvals as { action_key: string; command: string }[]) || [];
   const remediations = (detail.remediations as { action: string; at: string; outcome: string; dry_run?: boolean }[]) || [];
   const color = SEVERITY_COLOR[alert.severity] ?? "gray";
+  // ATC alerts carry typed actions in detail: an in-setup release, or a set of
+  // manual_gate decision options (each resumes the run down its edge).
+  const kind = detail.kind as string | undefined;
+  const gateOptions = (detail.options as { label: string; edge: string }[]) || [];
 
   return (
     <Card withBorder radius="md" p="sm" style={{ borderLeft: `4px solid var(--mantine-color-${color}-6)` }}>
@@ -235,6 +242,24 @@ function AlertRow({
         </Group>
         {alert.status !== "resolved" && (
           <Group gap={4} wrap="nowrap">
+            {kind === "atc_in_setup" && (
+              <Button size="compact-xs" variant="light" color="green" loading={busy} onClick={() => onAction("release")}>
+                Release from setup
+              </Button>
+            )}
+            {kind === "atc_gate" &&
+              gateOptions.map((o) => (
+                <Button
+                  key={o.edge}
+                  size="compact-xs"
+                  variant="light"
+                  color={o.edge === "on_release" ? "green" : o.edge === "on_cancel" ? "red" : "blue"}
+                  loading={busy}
+                  onClick={() => onAction(o.edge)}
+                >
+                  {o.label}
+                </Button>
+              ))}
             {alert.status !== "acknowledged" && (
               <Tooltip label="Acknowledge">
                 <ActionIcon variant="light" color="blue" loading={busy} onClick={onAck}>

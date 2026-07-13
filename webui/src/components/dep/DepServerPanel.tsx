@@ -37,6 +37,7 @@ import { api, ApiError, type DepDevice, type DepServerDetail } from "../../../li
 import { saveTextFile } from "../../../lib/download";
 import type { Profile } from "../../../lib/config";
 import { useAuth } from "../../../lib/auth-context";
+import { SimpleEnrollmentProfileForm } from "./SimpleEnrollmentProfileForm";
 
 // Renewal-reminder severity for the token expiry (mirrors the Enrollment page).
 function expirySeverity(days: number | null): "red" | "orange" | null {
@@ -78,6 +79,7 @@ export function DepServerPanel({
   const [busy, setBusy] = useState(false);
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [assignProfileId, setAssignProfileId] = useState<string | null>(null);
+  const [simpleFormOpen, setSimpleFormOpen] = useState(false);
 
   useEffect(() => setServer(initial), [initial]);
 
@@ -407,9 +409,14 @@ export function DepServerPanel({
       <Card withBorder radius="md" p="lg">
         <Group justify="space-between" mb="sm">
           <Title order={5}>Enrollment profiles</Title>
-          <Button component="a" href="/profiles" variant="subtle" size="xs">
-            Author profiles →
-          </Button>
+          <Group gap="xs">
+            <Button size="xs" variant="light" onClick={() => setSimpleFormOpen(true)}>
+              Create simple profile
+            </Button>
+            <Button component="a" href="/profiles" variant="subtle" size="xs">
+              Author profiles →
+            </Button>
+          </Group>
         </Group>
         {!server.enroll_url && (
           <Alert
@@ -425,8 +432,16 @@ export function DepServerPanel({
         )}
         {depProfiles.length === 0 ? (
           <Alert color="blue" variant="light">
-            No enrollment (DEP) profiles yet. Create one under <b>Profiles</b> (kind
-            “Enrollment (DEP)”), then push it here to define how devices set up.
+            <Stack gap="xs" align="flex-start">
+              <Text size="sm">
+                No enrollment (DEP) profiles yet. Create a simple one here to get going, or
+                author a full profile under <b>Profiles</b>. Then push it to define how devices
+                set up.
+              </Text>
+              <Button size="xs" onClick={() => setSimpleFormOpen(true)}>
+                Create a simple enrollment profile
+              </Button>
+            </Stack>
           </Alert>
         ) : (
           <Table verticalSpacing="sm">
@@ -599,6 +614,12 @@ export function DepServerPanel({
           </Table.ScrollContainer>
         )}
       </Card>
+
+      <SimpleEnrollmentProfileForm
+        opened={simpleFormOpen}
+        onClose={() => setSimpleFormOpen(false)}
+        onCreated={() => reload()}
+      />
     </Stack>
   );
 }

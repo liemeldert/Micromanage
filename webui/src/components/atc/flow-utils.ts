@@ -5,14 +5,32 @@
 import type { Edge, Node } from "@xyflow/react";
 import type { FlowDoc, FlowNode, FlowNodeSpec } from "../../../lib/api";
 
-export type EdgeHandle = "next" | "on_true" | "on_false" | "on_timeout";
-export const EDGE_HANDLES: EdgeHandle[] = ["next", "on_true", "on_false", "on_timeout"];
+export type EdgeHandle =
+  | "next"
+  | "on_true"
+  | "on_false"
+  | "on_timeout"
+  | "on_release"
+  | "on_cancel"
+  | "on_wait";
+export const EDGE_HANDLES: EdgeHandle[] = [
+  "next",
+  "on_true",
+  "on_false",
+  "on_timeout",
+  "on_release",
+  "on_cancel",
+  "on_wait",
+];
 
 export const EDGE_LABEL: Record<EdgeHandle, string> = {
   next: "",
   on_true: "true",
   on_false: "false",
   on_timeout: "timeout",
+  on_release: "release",
+  on_cancel: "cancel",
+  on_wait: "wait",
 };
 
 export const EDGE_COLOR: Record<EdgeHandle, string> = {
@@ -20,6 +38,9 @@ export const EDGE_COLOR: Record<EdgeHandle, string> = {
   on_true: "#2f9e44",
   on_false: "#e03131",
   on_timeout: "#f08c00",
+  on_release: "#2f9e44",
+  on_cancel: "#e03131",
+  on_wait: "#4c6ef5",
 };
 
 // Mantine colour per palette category (chip / node accent).
@@ -114,17 +135,38 @@ export function emptyFlow(id: string): FlowDoc {
     id,
     name: id,
     enabled: true,
-    priority: 100,
-    trigger: { on: "enroll", match: {} },
-    start: "",
     nodes: [],
   };
 }
 
+// True when a start node's match scope narrows which devices it applies to.
+function scopeIsSet(match: unknown): boolean {
+  if (!match || typeof match !== "object") return false;
+  const m = match as Record<string, unknown>;
+  return ["conditions", "groups", "include_devices", "exclude_devices"].some(
+    (k) => Array.isArray(m[k]) && (m[k] as unknown[]).length > 0,
+  );
+}
+
 // A short human summary of a node's params, shown on the canvas card.
+const START_KIND_LABEL: Record<string, string> = {
+  enroll_dep: "on DEP/ADE enroll",
+  enroll_profile: "on OTA/manual enroll",
+  checkin: "on check-in",
+  schedule: "on schedule",
+};
+
 export function nodeSummary(node: FlowNode): string {
   const p = node.params ?? {};
   switch (node.type) {
+    case "start": {
+      const kind = String(p.kind ?? "");
+      const label = START_KIND_LABEL[kind] ?? kind ?? "?";
+      const iv = kind === "schedule" && p.interval_minutes ? ` every ${p.interval_minutes}m` : "";
+      return `${label}${iv}${scopeIsSet(p.match) ? " · scoped" : ""}`;
+    }
+    case "manual_gate":
+      return String(p.summary ?? "");
     case "assign_tag":
     case "remove_tag":
       return arr(p.tags).join(", ");
@@ -155,6 +197,9 @@ function arr(v: unknown): string[] {
 
 // Client-side structural validation (fast feedback before the server validates
 // on save). Mirrors the important flows.yaml checks; the server is authoritative.
+const START_KINDS = new Set(["enroll_dep", "enroll_profile", "checkin", "schedule"]);
+const GATE_EDGES = new Set(["on_release", "on_cancel", "on_wait"]);
+
 export function validateFlowClient(flow: FlowDoc, catalog: FlowNodeSpec[]): string[] {
   const errors: string[] = [];
   const specs = specByType(catalog);
@@ -165,21 +210,49 @@ export function validateFlowClient(flow: FlowDoc, catalog: FlowNodeSpec[]): stri
     errors.push("Add at least one node.");
     return errors;
   }
-  if (!flow.start || !byId.has(flow.start))
-    errors.push("Set a start node (right-click a node → Set as start).");
+
+  const starts = flow.nodes.filter((n) => n.type === "start");
+  if (!starts.length)
+    errors.push("Add at least one start node (an entry point: enrollment, check-in or schedule).");
 
   for (const n of flow.nodes) {
     const spec = specs[n.type];
-    const handles = spec?.edges ?? [];
-    for (const h of handles) {
-      if (h === "on_timeout") continue; // optional
+    const p = n.params ?? {};
+
+    // Required edges. A manual_gate only requires the handles its options name.
+    let required: EdgeHandle[];
+    if (n.type === "manual_gate") {
+      const opts = Array.isArray(p.options) ? (p.options as { edge?: string }[]) : [];
+      required = opts
+        .map((o) => o?.edge)
+        .filter((e): e is EdgeHandle => typeof e === "string" && GATE_EDGES.has(e));
+    } else {
+      required = (spec?.edges ?? []).filter((h) => h !== "on_timeout") as EdgeHandle[];
+    }
+    for (const h of required) {
       const t = n[h];
       if (!t) errors.push(`Node "${n.id}" (${n.type}) needs its "${h}" edge wired.`);
       else if (!byId.has(String(t)))
         errors.push(`Node "${n.id}" "${h}" points to a missing node.`);
     }
+
     // per-type required params (light -- the server is authoritative)
-    const p = n.params ?? {};
+    if (n.type === "start") {
+      if (!START_KINDS.has(String(p.kind)))
+        errors.push(`Start node "${n.id}" needs a trigger kind.`);
+      if (p.kind === "schedule") {
+        const iv = p.interval_minutes;
+        if (typeof iv !== "number" || iv <= 0)
+          errors.push(`Scheduled start "${n.id}" needs a positive interval (minutes).`);
+      }
+    }
+    if (n.type === "manual_gate") {
+      if (!String(p.summary ?? "").trim())
+        errors.push(`Gate "${n.id}" needs an alert summary.`);
+      const opts = Array.isArray(p.options) ? (p.options as { label?: string; edge?: string }[]) : [];
+      if (!opts.some((o) => o?.label && GATE_EDGES.has(String(o?.edge))))
+        errors.push(`Gate "${n.id}" needs at least one decision option.`);
+    }
     if ((n.type === "assign_tag" || n.type === "remove_tag") && !arr(p.tags).length)
       errors.push(`Node "${n.id}" needs at least one tag.`);
     if (n.type === "set_name" && !String(p.template ?? "").trim())
@@ -196,13 +269,13 @@ export function validateFlowClient(flow: FlowDoc, catalog: FlowNodeSpec[]): stri
 
   // reachable end + cycle check (best-effort; mirrors the server's
   // controller/utils/yaml_validator.py _check_flow_graph / _find_cycle_edges:
-  // reachability is computed first, then cycle detection runs ONLY over the
-  // reachable subgraph, and "no reachable end" is suppressed when a cycle is
-  // found -- a cycle explains the missing end on its own).
-  if (flow.start && byId.has(flow.start)) {
+  // union reachability from ALL start nodes is computed first, then cycle
+  // detection runs ONLY over the reachable subgraph, and "no reachable end" is
+  // suppressed when a cycle is found -- a cycle explains the missing end).
+  if (starts.length) {
     const edges = new Map<string, string[]>();
     const seen = new Set<string>();
-    const stack = [flow.start];
+    const stack = starts.map((s) => s.id);
     let reachedEnd = false;
     while (stack.length) {
       const id = stack.pop()!;
@@ -225,7 +298,7 @@ export function validateFlowClient(flow: FlowDoc, catalog: FlowNodeSpec[]): stri
     for (const [node, ref] of cycles) {
       errors.push(`Flow has a cycle involving '${node}' and '${ref}' — flows must be acyclic.`);
     }
-    if (!reachedEnd && cycles.length === 0) errors.push("No reachable end node from the start.");
+    if (!reachedEnd && cycles.length === 0) errors.push("No reachable end node from a start.");
   }
   return errors;
 }

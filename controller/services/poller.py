@@ -113,13 +113,15 @@ async def on_device_enrolled(device: Device) -> None:
         await refresh_groups(device, groups_config)
     except Exception:
         logger.exception("enroll-time group match failed for %s", device.serial_number)
-    # ATC: run the matching enrollment flow now that groups are fresh. Best-effort
-    # -- a flow error must never gate enrollment.
+    # ATC: fire the enrollment start(s) now that groups are fresh. DEP/ADE devices
+    # (dep_profile_uuid populated) trigger enroll_dep starts; OTA/manual devices
+    # trigger enroll_profile. Best-effort -- a flow error must never gate enroll.
     try:
         from controller.services import atc
-        await atc.start_flows_for_enroll(device)
+        kind = "enroll_dep" if device.dep_profile_uuid else "enroll_profile"
+        await atc.start_flows_for_event(device, kind)
     except Exception:
-        logger.exception("ATC: start_flows_for_enroll failed for %s", device.serial_number)
+        logger.exception("ATC: start_flows_for_event failed for %s", device.serial_number)
     if not device.udid:
         return
     connector = MDMConnector()
@@ -194,6 +196,14 @@ async def poll_tenant(tenant: Tenant) -> Dict[str, int]:
         await atc.sweep_timeouts(tenant)
     except Exception:
         logger.exception("ATC: timeout sweep failed for tenant %s", tenant.id)
+
+    # ATC: launch scheduled-interval starts for due, in-scope devices (reuses the
+    # devices already loaded this tick). Best-effort; capped per tick internally.
+    try:
+        from controller.services import atc
+        await atc.sweep_scheduled_starts(tenant, devices)
+    except Exception:
+        logger.exception("ATC: scheduled-start sweep failed for tenant %s", tenant.id)
 
     await _prune_scheduled_tasks(tenant, now)
     if summary["polled"] or summary["groups_changed"]:

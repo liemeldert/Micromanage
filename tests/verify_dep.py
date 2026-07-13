@@ -235,16 +235,16 @@ def _write_profiles(base):
              "support_phone_number": "+1-555", "department": "IT",
              "skip_setup_items": ["AppleID", "Passcode", "NotARealKey"]}},
     ]}))
-    (tdir / "flows.yaml").write_text(yaml.safe_dump({"flows": [
-        {"id": "zt", "name": "ZT", "enabled": True, "priority": 100,
-         "trigger": {"on": "enroll", "match": {"conditions": [
-             {"type": "enrollment_source", "operator": "in", "value": ["ade"]}]}},
-         "start": "tag", "nodes": [
-             {"id": "tag", "type": "assign_tag", "params": {"tags": ["corp"]}, "next": "rel"},
-             {"id": "rel", "type": "release_device", "next": "done"},
-             {"id": "done", "type": "end"},
-         ]},
-    ]}))
+    (tdir / "flows.yaml").write_text(yaml.safe_dump({"flow": {
+        "id": "zt", "name": "ZT", "enabled": True, "nodes": [
+            {"id": "start", "type": "start",
+             "params": {"kind": "enroll_dep", "match": {"conditions": [
+                 {"type": "enrollment_source", "operator": "in", "value": ["ade"]}]}},
+             "next": "tag"},
+            {"id": "tag", "type": "assign_tag", "params": {"tags": ["corp"]}, "next": "rel"},
+            {"id": "rel", "type": "release_device", "next": "done"},
+            {"id": "done", "type": "end"},
+        ]}}))
     for f in ("groups.yaml", "apps.yaml", "tags.yaml"):
         (tdir / f).write_text(yaml.safe_dump({}))
 
@@ -397,7 +397,8 @@ async def main():
                                    enrollment_state="enrolled",
                                    attributes={"enrollment_source": "ade"}, groups=[], tags=[])
     # Adopt the placeholder row -> single device: reuse the enrolled one.
-    run = await atc.start_flows_for_enroll(enrolled)
+    runs = await atc.start_flows_for_event(enrolled, "enroll_dep")
+    run = runs[0] if runs else None
     await asyncio.sleep(0.1)  # let the fire-and-forget DeviceConfigured push run
     check("zero-touch flow ran + completed", run is not None and run.status == "completed")
     check("corp tag applied", "corp" in (await Device.get(id=enrolled.id)).tags)
@@ -486,6 +487,25 @@ async def main():
     check("unlink clears token + key + status",
           server.token_enc is None and server.private_key_enc is None
           and server.status == "unlinked")
+
+    # ── 9) remove fully deletes an unfinished connection ─────────────────────
+    print("9) remove deletes the row, its profiles, and clears device linkage")
+    scratch = await dep_manager.begin_link(tenant, "scratch")
+    await DepProfile.create(tenant=tenant, dep_server=scratch, profile_id="p1")
+    orphan = await Device.create(
+        tenant=tenant, udid="U-KEEP", serial_number="SER-KEEP",
+        device_model="Mac14,2", os_version="",
+        enrollment_state="enrolled", management_type="apple_mdm", groups=[],
+        dep_server_id=scratch.id, dep_profile_status="assigned",
+    )
+    await dep_manager.remove(scratch)
+    check("DepServer row deleted", await DepServer.get_or_none(id=scratch.id) is None)
+    check("DepProfile mappings deleted",
+          await DepProfile.filter(dep_server_id=scratch.id).count() == 0)
+    await orphan.refresh_from_db()
+    check("enrolled device kept, DEP linkage cleared",
+          orphan.udid == "U-KEEP" and orphan.dep_server_id is None
+          and orphan.dep_profile_status == "removed")
 
     await Tortoise.close_connections()
     print()

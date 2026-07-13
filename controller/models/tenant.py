@@ -314,6 +314,12 @@ class FlowRun(Model):
     tenant = fields.ForeignKeyField("models.Tenant", related_name="flow_runs")
     device = fields.ForeignKeyField("models.Device", related_name="flow_runs")
     flow_id = fields.CharField(max_length=100)
+    # The start node this run entered from and the event that fired it
+    # (enroll_dep | enroll_profile | checkin | schedule). Run identity is
+    # (device, start_node): supersede/dedup key off these so concurrent runs from
+    # different starts on one device are legitimate. Nullable for legacy rows.
+    start_node = fields.CharField(max_length=100, null=True)
+    event_kind = fields.CharField(max_length=20, null=True)
     # sha256 of the flow document at start -- pins the definition for the run's
     # lifetime (the full snapshot lives in context['flow']).
     flow_hash = fields.CharField(max_length=64)
@@ -348,6 +354,8 @@ class FlowRun(Model):
             "tenant_id": str(self.tenant_id),
             "device_id": str(self.device_id) if self.device_id else None,
             "flow_id": self.flow_id,
+            "start_node": self.start_node,
+            "event_kind": self.event_kind,
             "flow_hash": self.flow_hash,
             "status": self.status,
             "current_node": self.current_node,

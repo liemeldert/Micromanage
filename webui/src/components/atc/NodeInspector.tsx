@@ -1,8 +1,10 @@
 "use client";
 
 import {
+  ActionIcon,
   Alert,
   Badge,
+  Button,
   Divider,
   Group,
   MultiSelect,
@@ -13,11 +15,25 @@ import {
   Text,
   TextInput,
 } from "@mantine/core";
-import { IconInfoCircle } from "@tabler/icons-react";
-import type { CatalogCommand, FlowNode, FlowNodeSpec, WaitSignal } from "../../../lib/api";
-import type { Condition } from "../../../lib/config";
+import { IconInfoCircle, IconPlus, IconTrash } from "@tabler/icons-react";
+import type {
+  CatalogCommand,
+  Device,
+  FlowNode,
+  FlowNodeSpec,
+  StartKind,
+  WaitSignal,
+} from "../../../lib/api";
+import type { Condition, Group as GroupDef, Scope } from "../../../lib/config";
 import { ConditionBuilder } from "../config/ConditionBuilder";
 import { NameTemplateInput } from "../config/NameTemplateInput";
+import { ScopeEditor } from "../config/ScopeEditor";
+
+const GATE_EDGES = [
+  { value: "on_release", label: "on_release" },
+  { value: "on_cancel", label: "on_cancel" },
+  { value: "on_wait", label: "on_wait" },
+];
 
 /** Per-node parameter editor for the ATC flow canvas. Reuses the existing
  * condition / naming builders and renders type-appropriate controls, so a node's
@@ -31,6 +47,9 @@ export function NodeInspector({
   appIds,
   commands,
   groupNames,
+  devices,
+  allGroups,
+  startKinds,
 }: {
   node: FlowNode;
   spec?: FlowNodeSpec;
@@ -40,6 +59,9 @@ export function NodeInspector({
   appIds: string[];
   commands: CatalogCommand[];
   groupNames: string[];
+  devices: Device[];
+  allGroups: GroupDef[];
+  startKinds: StartKind[];
 }) {
   const p = node.params ?? {};
   const patch = (next: Record<string, unknown>) => onChange({ ...p, ...next });
@@ -60,6 +82,45 @@ export function NodeInspector({
         <Text fz="xs" c="dimmed">
           {spec.description}
         </Text>
+      )}
+
+      {node.type === "start" && (
+        <Stack gap="xs">
+          <Select
+            label="Trigger"
+            data={startKinds.map((k) => ({ value: k.value, label: k.label }))}
+            value={typeof p.kind === "string" ? p.kind : null}
+            onChange={(v) => patch({ kind: v ?? undefined })}
+          />
+          {typeof p.kind === "string" && p.kind ? (
+            <Text fz="xs" c="dimmed">
+              {startKinds.find((k) => k.value === p.kind)?.description}
+            </Text>
+          ) : null}
+          {p.kind === "schedule" && (
+            <NumberInput
+              label="Interval (minutes)"
+              description="How often this start fires for in-scope devices."
+              min={1}
+              value={typeof p.interval_minutes === "number" ? p.interval_minutes : 1440}
+              onChange={(v) => patch({ interval_minutes: typeof v === "number" ? v : 1440 })}
+            />
+          )}
+          <Divider my={4} label="Applies to" labelPosition="left" />
+          <ScopeEditor
+            scope={(p.match ?? {}) as Scope}
+            onChange={(m) => patch({ match: m as Record<string, unknown> })}
+            devices={devices}
+            allGroups={allGroups}
+            groupsLabel="Applies to groups"
+            groupsDescription="Empty applies to every device of this trigger kind."
+            emptyMatchesAll
+          />
+        </Stack>
+      )}
+
+      {node.type === "manual_gate" && (
+        <GateInspector p={p} patch={patch} />
       )}
 
       {(node.type === "assign_tag" || node.type === "remove_tag") && (
@@ -183,6 +244,89 @@ export function NodeInspector({
           {node.id}
         </Badge>
       </Group>
+    </Stack>
+  );
+}
+
+interface GateOption {
+  label: string;
+  edge: string;
+}
+
+function GateInspector({
+  p,
+  patch,
+}: {
+  p: Record<string, unknown>;
+  patch: (next: Record<string, unknown>) => void;
+}) {
+  const options: GateOption[] = Array.isArray(p.options)
+    ? (p.options as GateOption[]).map((o) => ({ label: String(o?.label ?? ""), edge: String(o?.edge ?? "on_release") }))
+    : [];
+
+  const setOptions = (next: GateOption[]) => patch({ options: next });
+  const updateOption = (i: number, next: Partial<GateOption>) =>
+    setOptions(options.map((o, idx) => (idx === i ? { ...o, ...next } : o)));
+
+  return (
+    <Stack gap="xs">
+      <TextInput
+        label="Alert summary"
+        placeholder="Device stuck in setup > 30m"
+        value={String(p.summary ?? "")}
+        onChange={(e) => patch({ summary: e.currentTarget.value })}
+      />
+      <Select
+        label="Severity"
+        data={["green", "yellow", "red", "black"]}
+        value={typeof p.severity === "string" ? p.severity : "yellow"}
+        onChange={(v) => patch({ severity: v ?? "yellow" })}
+      />
+      <Text fz="sm" fw={500} mt={4}>
+        Decision options
+      </Text>
+      <Text fz="xs" c="dimmed">
+        Each option is a button on the alert; picking it resumes the run down that edge.
+      </Text>
+      {options.map((o, i) => (
+        <Group key={i} gap={6} wrap="nowrap" align="flex-end">
+          <TextInput
+            style={{ flex: 1 }}
+            size="xs"
+            label={i === 0 ? "Label" : undefined}
+            placeholder="Release device from setup"
+            value={o.label}
+            onChange={(e) => updateOption(i, { label: e.currentTarget.value })}
+          />
+          <Select
+            w={130}
+            size="xs"
+            label={i === 0 ? "Edge" : undefined}
+            data={GATE_EDGES}
+            value={o.edge}
+            onChange={(v) => updateOption(i, { edge: v ?? "on_release" })}
+          />
+          <ActionIcon
+            variant="subtle"
+            color="red"
+            onClick={() => setOptions(options.filter((_, idx) => idx !== i))}
+          >
+            <IconTrash size={16} />
+          </ActionIcon>
+        </Group>
+      ))}
+      <Button
+        size="compact-xs"
+        variant="light"
+        leftSection={<IconPlus size={14} />}
+        onClick={() => setOptions([...options, { label: "", edge: "on_wait" }])}
+        w="fit-content"
+      >
+        Add option
+      </Button>
+      <Alert variant="light" color="gray" p="xs" icon={<IconInfoCircle size={14} />}>
+        The run pauses here until an admin picks an option on the alert board.
+      </Alert>
     </Stack>
   );
 }

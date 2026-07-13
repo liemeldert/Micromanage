@@ -26,7 +26,7 @@ import os
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
-from controller.models.tenant import Device, FlowRun, Tenant
+from controller.models.tenant import Alert, Device, FlowRun, Tenant
 from controller.services import tenant_config
 from controller.services.scoping import evaluate_condition, evaluate_scope
 
@@ -42,6 +42,18 @@ MAX_NODES_PER_ADVANCE = 100
 # sweep fails such runs so they can't sit invisible forever.
 STALE_RUNNING_MINUTES = int(os.getenv("ATC_STALE_RUNNING_MINUTES", "30"))
 
+# Per-tenant cap on how many scheduled-start runs one sweep may launch, so a
+# large fleet all matching a schedule can't launch thousands of runs at once
+# (the most-overdue go first; the rest catch up on later ticks).
+SCHEDULE_MAX_LAUNCH_PER_TICK = int(os.getenv("ATC_SCHEDULE_MAX_LAUNCH_PER_TICK", "200"))
+
+# Run states that count as "active" for supersede/dedup.
+_ACTIVE_STATES = ["running", "waiting"]
+
+# Events that supersede a device's prior run from the same start (a fresh enroll
+# re-runs onboarding); other events dedup instead (skip while one is active).
+_SUPERSEDE_EVENTS = frozenset({"enroll_dep", "enroll_profile"})
+
 # Signals a wait_for node resumes on that need no reference (any occurrence for
 # the device satisfies them). The rest (profile_installed / app_installed /
 # command_ack) match against what the run itself queued (context['expected']).
@@ -50,10 +62,20 @@ _REFLESS_SIGNALS = frozenset({"device_info", "checkin"})
 
 # ── Loading + hashing ────────────────────────────────────────────────────────
 
-def _load_flows(tenant_id: str) -> List[Dict[str, Any]]:
-    """The ``flows`` list from a tenant's flows.yaml (empty if absent/malformed)."""
-    flows = tenant_config._load(tenant_id, "flows.yaml").get("flows", [])
-    return flows if isinstance(flows, list) else []
+def _load_flow(tenant_id: str) -> Optional[Dict[str, Any]]:
+    """The single flow from a tenant's flows.yaml (None if absent/malformed),
+    normalized from the legacy multi-flow shape when needed. Defensive: never
+    raises (runs on the enroll/checkin/poll hot paths)."""
+    from controller.services.flow_step_catalog import normalize_flow_document
+    try:
+        data = tenant_config._load(tenant_id, "flows.yaml")
+    except Exception:
+        logger.exception("ATC: loading flows.yaml failed for tenant %s", tenant_id)
+        return None
+    flow, warns = normalize_flow_document(data)
+    for w in warns:
+        logger.info("ATC: %s", w)
+    return flow
 
 
 def _flow_hash(flow: Dict[str, Any]) -> str:
@@ -98,99 +120,109 @@ def _int(value: Any, default: int = 0) -> int:
 
 # ── Entry points ─────────────────────────────────────────────────────────────
 
-async def start_flows_for_enroll(device: Device) -> Optional[FlowRun]:
-    """Start the single best-matching enroll flow for a freshly (re)enrolled
-    device. Best-effort: never raises into the enroll path."""
+async def _has_active_run(device_id: Any, start_id: str) -> bool:
+    """Is a run from this (device, start) already running/waiting? Guards
+    checkin/schedule starts from piling up a new run every event."""
     try:
-        flows = _load_flows(str(device.tenant_id))
+        return await FlowRun.filter(
+            device_id=device_id, start_node=start_id, status__in=_ACTIVE_STATES
+        ).exists()
     except Exception:
-        logger.exception("ATC: loading flows failed for tenant %s", device.tenant_id)
-        return None
+        logger.exception("ATC: active-run check failed for start %s", start_id)
+        return False
 
-    device_groups = list(device.groups or [])
-    matches: List[Dict[str, Any]] = []
-    for flow in flows:
-        try:
-            if not isinstance(flow, dict) or not flow.get("enabled", True):
-                continue
-            trigger = flow.get("trigger") or {}
-            if trigger.get("on") != "enroll":
-                continue
-            if _scope_matches(device, device_groups, trigger.get("match")):
-                matches.append(flow)
-        except Exception:
-            logger.exception("ATC: trigger evaluation failed for flow %r",
-                             (flow or {}).get("id"))
-            continue
 
-    if not matches:
-        return None
-
+async def _supersede(device_id: Any, start_id: str) -> None:
+    """Cancel active runs from the SAME start on this device (a fresh enroll
+    re-runs onboarding). Scoped to the start, so concurrent runs from other
+    starts (e.g. a schedule run) are left alone."""
     try:
-        # Highest priority wins; ties broken by id (stable, matches the spec).
-        flow = sorted(matches, key=lambda f: (-_int(f.get("priority")), str(f.get("id"))))[0]
-        flow_id = str(flow.get("id"))
-        start = flow.get("start")
-        nodes = _nodes_by_id(flow)
-        if start not in nodes:
-            logger.error("ATC: flow %r start node %r missing; not starting", flow_id, start)
-            return None
+        await FlowRun.filter(
+            device_id=device_id, start_node=start_id, status__in=_ACTIVE_STATES
+        ).update(status="cancelled", current_node=None, waiting_signal=None,
+                 waiting_ref=None, wait_deadline=None, completed_at=_now())
+    except Exception:
+        logger.exception("ATC: superseding prior runs failed for start %s", start_id)
 
-        # A re-enroll supersedes ALL still-active runs on this device: only one
-        # flow runs per enroll, and the winning flow can differ from a prior
-        # enroll's (leaving the old one waiting would run two flows at once).
-        try:
-            await FlowRun.filter(
-                device_id=device.id, status__in=["running", "waiting"]
-            ).update(status="cancelled", current_node=None, waiting_signal=None,
-                     waiting_ref=None, wait_deadline=None, completed_at=_now())
-        except Exception:
-            logger.exception("ATC: superseding prior runs failed for device %s", device.id)
 
+async def _start_run(device: Device, flow: Dict[str, Any], start_node: Dict[str, Any],
+                     event_kind: str) -> Optional[FlowRun]:
+    """Create a FlowRun entering at ``start_node`` and advance it once."""
+    try:
         run = await FlowRun.create(
             tenant_id=device.tenant_id,
             device_id=device.id,
-            flow_id=flow_id,
+            flow_id=str(flow.get("id") or "flow"),
+            start_node=str(start_node.get("id")),
+            event_kind=event_kind,
             flow_hash=_flow_hash(flow),
             status="running",
-            current_node=start,
+            current_node=str(start_node.get("id")),
             context={"flow": flow, "timeline": [], "visited": [], "expected": {}},
         )
-        logger.info("ATC: started flow %s for %s (run %s)", flow_id, device.serial_number, run.id)
+        _timeline(run, str(start_node.get("id")), f"started ({event_kind})")
+        logger.info("ATC: started run %s for %s (start=%s, event=%s)",
+                    run.id, device.serial_number, start_node.get("id"), event_kind)
         await _advance(run, device)
         return run
     except Exception:
-        logger.exception("ATC: starting enroll flow failed for device %s", device.id)
+        logger.exception("ATC: starting run failed for device %s", device.id)
         return None
 
 
-async def start_flow_by_id(device: Device, flow_id: str) -> Optional[FlowRun]:
-    """Manually start a specific flow against a device (testing / API).
+async def start_flows_for_event(device: Device, event_kind: str) -> List[FlowRun]:
+    """Start runs for every ``start`` node in the single flow that fires on
+    ``event_kind`` and whose match scopes this device.
 
-    Ignores the trigger match (an operator asked for this flow explicitly) but
-    still supersedes an active run of the same flow. Returns None if the flow
-    doesn't exist, is malformed, or the start fails."""
+    Enroll events supersede a prior run from the same start; checkin/schedule
+    events dedup (skip while a run from that start is still active). Best-effort:
+    never raises into the enroll / checkin / schedule hot paths."""
+    runs: List[FlowRun] = []
+    flow = _load_flow(str(device.tenant_id))
+    if not flow or not flow.get("enabled", True):
+        return runs
+    device_groups = list(device.groups or [])
+    for node in (flow.get("nodes") or []):
+        try:
+            if not isinstance(node, dict) or node.get("type") != "start" or not node.get("id"):
+                continue
+            params = node.get("params") or {}
+            if params.get("kind") != event_kind:
+                continue
+            if not _scope_matches(device, device_groups, params.get("match")):
+                continue
+            start_id = str(node["id"])
+            if event_kind in _SUPERSEDE_EVENTS:
+                await _supersede(device.id, start_id)
+            elif await _has_active_run(device.id, start_id):
+                continue  # dedup: a run from this start is already in flight
+            run = await _start_run(device, flow, node, event_kind)
+            if run is not None:
+                runs.append(run)
+        except Exception:
+            logger.exception("ATC: start node %r failed for device %s",
+                             (node or {}).get("id"), device.id)
+    return runs
+
+
+async def start_run_from_start(device: Device, start_node_id: str) -> Optional[FlowRun]:
+    """Manually start a run from a specific ``start`` node (testing / API).
+
+    Supersedes an active run from the same start. Returns None if the node
+    doesn't exist, isn't a start node, the flow is malformed, or the start fails."""
     try:
-        flows = _load_flows(str(device.tenant_id))
-        flow = next((f for f in flows if isinstance(f, dict) and str(f.get("id")) == flow_id), None)
-        if flow is None:
+        flow = _load_flow(str(device.tenant_id))
+        if not flow:
             return None
-        start = flow.get("start")
-        if start not in _nodes_by_id(flow):
+        node = _nodes_by_id(flow).get(start_node_id)
+        if not node or node.get("type") != "start":
             return None
-        await FlowRun.filter(
-            device_id=device.id, flow_id=flow_id, status__in=["running", "waiting"]
-        ).update(status="cancelled", current_node=None, waiting_signal=None,
-                 waiting_ref=None, wait_deadline=None, completed_at=_now())
-        run = await FlowRun.create(
-            tenant_id=device.tenant_id, device_id=device.id, flow_id=flow_id,
-            flow_hash=_flow_hash(flow), status="running", current_node=start,
-            context={"flow": flow, "timeline": [], "visited": [], "expected": {}, "manual": True},
-        )
-        await _advance(run, device)
-        return run
+        await _supersede(device.id, start_node_id)
+        kind = (node.get("params") or {}).get("kind") or "manual"
+        return await _start_run(device, flow, node, str(kind))
     except Exception:
-        logger.exception("ATC: manual start of flow %s failed for device %s", flow_id, device.id)
+        logger.exception("ATC: manual start of node %s failed for device %s",
+                         start_node_id, device.id)
         return None
 
 
@@ -233,6 +265,15 @@ async def advance_on_signal(device_id: str, signal: str, ref: Optional[str] = No
                 await _advance(run, device)
             except Exception:
                 logger.exception("ATC: advancing run %s on signal %s failed", run.id, signal)
+
+        # A check-in can also START a checkin-triggered run. Do this AFTER resuming
+        # existing waits so the just-resumed run counts as active and the dedup
+        # guard doesn't launch a duplicate for the same start.
+        if signal == "checkin":
+            try:
+                await start_flows_for_event(device, "checkin")
+            except Exception:
+                logger.exception("ATC: checkin start dispatch failed for %s", device_id)
     except Exception:
         logger.exception("ATC: advance_on_signal(%s, %s) failed", device_id, signal)
 
@@ -244,7 +285,7 @@ async def sweep_timeouts(tenant: Tenant) -> int:
     try:
         runs = await FlowRun.filter(
             tenant_id=tenant.id, status="waiting", wait_deadline__lte=_now()
-        ).all()
+        ).exclude(waiting_signal="manual").all()
     except Exception:
         logger.exception("ATC: timeout sweep query failed for tenant %s", tenant.id)
         return 0
@@ -273,6 +314,10 @@ async def sweep_timeouts(tenant: Tenant) -> int:
         except Exception:
             logger.exception("ATC: sweeping run %s failed", run.id)
 
+    # Manual gates park with waiting_signal='manual' and no deadline, so the
+    # deadline query above never returns them; an admin decision (not the sweep)
+    # resumes them. (Guard kept explicit above via the query shape.)
+
     # Recover runs orphaned in 'running' (e.g. a process died mid-advance): they
     # carry no deadline and no waiting row, so only this sweep can free them.
     try:
@@ -290,6 +335,79 @@ async def sweep_timeouts(tenant: Tenant) -> int:
     except Exception:
         logger.exception("ATC: stale-running recovery failed for tenant %s", tenant.id)
     return swept
+
+
+async def sweep_scheduled_starts(tenant: Tenant,
+                                 devices: Optional[List[Device]] = None) -> int:
+    """Launch runs for ``schedule`` start nodes whose interval has elapsed for an
+    in-scope device. Called each poll tick; the interval (not the tick) throttles.
+    Capped per tenant per sweep so a large fleet can't launch en masse -- the
+    most-overdue devices go first; the rest catch up on later ticks."""
+    launched = 0
+    flow = _load_flow(str(tenant.id))
+    if not flow or not flow.get("enabled", True):
+        return 0
+    schedule_starts = [
+        n for n in (flow.get("nodes") or [])
+        if isinstance(n, dict) and n.get("type") == "start" and n.get("id")
+        and (n.get("params") or {}).get("kind") == "schedule"
+    ]
+    if not schedule_starts:
+        return 0
+    try:
+        if devices is None:
+            devices = await Device.filter(
+                tenant_id=tenant.id, enrollment_state="enrolled"
+            ).all()
+    except Exception:
+        logger.exception("ATC: schedule sweep device query failed for tenant %s", tenant.id)
+        return 0
+
+    now = _now()
+    never_run_key = now - timedelta(days=3650)  # sort never-run devices first
+    budget = SCHEDULE_MAX_LAUNCH_PER_TICK
+    for node in schedule_starts:
+        if budget <= 0:
+            logger.info("ATC: schedule sweep hit per-tick cap for tenant %s", tenant.id)
+            break
+        params = node.get("params") or {}
+        start_id = str(node["id"])
+        interval = _int(params.get("interval_minutes"), 0)
+        if interval <= 0:
+            continue
+        match = params.get("match")
+        due: List = []
+        for d in devices:
+            try:
+                if not _scope_matches(d, list(d.groups or []), match):
+                    continue
+                if await _has_active_run(d.id, start_id):
+                    continue
+                last = await FlowRun.filter(
+                    device_id=d.id, start_node=start_id, event_kind="schedule"
+                ).order_by("-started_at").first()
+                if last is None or last.started_at is None:
+                    due.append((never_run_key, d))
+                    continue
+                la = last.started_at
+                if la.tzinfo is None:
+                    la = la.replace(tzinfo=timezone.utc)
+                if (now - la) >= timedelta(minutes=interval):
+                    due.append((la, d))
+            except Exception:
+                logger.exception("ATC: schedule eval failed for %s", getattr(d, "serial_number", "?"))
+        due.sort(key=lambda t: t[0])
+        take = due[:budget]
+        for _, d in take:
+            run = await _start_run(d, flow, node, "schedule")
+            if run is not None:
+                launched += 1
+                budget -= 1
+        deferred = len(due) - len(take)
+        if deferred > 0:
+            logger.info("ATC: schedule start %s launched %d, deferred %d to next tick",
+                        start_id, len(take), deferred)
+    return launched
 
 
 # ── Execution ────────────────────────────────────────────────────────────────
@@ -331,6 +449,11 @@ async def _advance(run: FlowRun, device: Device) -> None:
                 continue
             await _park(run, node)
             return
+        if ntype == "manual_gate":
+            # Escalate to a human: raise a Dispatcher alert and park until an
+            # admin picks an option (never times out on its own).
+            await _park_manual(run, device, node)
+            return
 
         try:
             next_id = await _execute_node(run, device, node)
@@ -353,6 +476,10 @@ async def _execute_node(run: FlowRun, device: Device, node: Dict[str, Any]) -> O
     ntype = node.get("type")
     params = node.get("params") or {}
 
+    if ntype == "start":
+        # Entry point: pure passthrough into the graph (scoping/dedup happened at
+        # dispatch). No side effect.
+        return node.get("next")
     if ntype == "assign_tag":
         await _apply_tags(run, device, _str_list(params.get("tags")), add=True)
         return node.get("next")
@@ -600,12 +727,28 @@ async def _release_device(run: FlowRun, device: Device) -> None:
         _timeline(run, run.current_node, "release_device: device not enrolled; skipped")
         return
     from controller.services.reconciler import _spawn
-    _spawn(_push_device_configured(device, run.flow_id))
+    _spawn(_push_device_configured(device, f"atc:{run.flow_id}"))
     _timeline(run, run.current_node, "release_device: DeviceConfigured queued")
+    # The device is no longer held in Setup Assistant: clear the green in-setup
+    # alert (best-effort; a no-op if none is open).
+    await _resolve_in_setup_alert(device, "released by flow")
 
 
-async def _push_device_configured(device: Device, flow_id: str) -> None:
-    """Background DeviceConfigured push + audit task (spawned by _release_device)."""
+async def release_device_manual(device: Device, actor: str) -> bool:
+    """Admin-triggered release from Setup Assistant (from the green in-setup alert
+    on the board). Reuses the same audited DeviceConfigured push, and resolves the
+    in-setup alert. Returns False for a device that can't be released."""
+    if device.enrollment_state != "enrolled" or not device.udid:
+        return False
+    from controller.services.reconciler import _spawn
+    _spawn(_push_device_configured(device, f"admin:{actor}"))
+    await _resolve_in_setup_alert(device, f"released by {actor}")
+    return True
+
+
+async def _push_device_configured(device: Device, user: str) -> None:
+    """Background DeviceConfigured push + audit task (spawned by callers so the
+    MDM round-trip never blocks the hot path). ``user`` is the audit actor."""
     from controller.services.mdm_connector import MDMConnector
     from controller.services.task_manager import TaskManager
 
@@ -614,8 +757,8 @@ async def _push_device_configured(device: Device, flow_id: str) -> None:
         return
     task = await TaskManager().create_task(
         tenant=tenant, task_type="device_configured",
-        description=f"ATC release {device.serial_number} from Setup Assistant",
-        device=device, user=f"atc:{flow_id}", details={},
+        description=f"Release {device.serial_number} from Setup Assistant",
+        device=device, user=user, details={},
     )
     connector = MDMConnector()
     try:
@@ -630,6 +773,203 @@ async def _push_device_configured(device: Device, flow_id: str) -> None:
         logger.warning("ATC: DeviceConfigured push failed for %s: %s", device.udid, exc)
     finally:
         await connector.close()
+
+
+# ── Human decision gate + Dispatcher alerts ──────────────────────────────────
+
+def _gate_options(node: Dict[str, Any]) -> List[Dict[str, str]]:
+    """The validated decision options for a manual_gate: [{label, edge}], keeping
+    only options whose edge is a real gate handle and carries a label."""
+    from controller.services.flow_step_catalog import GATE_EDGE_HANDLES
+    out: List[Dict[str, str]] = []
+    for o in ((node.get("params") or {}).get("options") or []):
+        if isinstance(o, dict) and o.get("edge") in GATE_EDGE_HANDLES and o.get("label"):
+            out.append({"label": str(o["label"]), "edge": str(o["edge"])})
+    return out
+
+
+async def _raise_gate_alert(device: Device, run: FlowRun, node: Dict[str, Any],
+                            options: List[Dict[str, str]]) -> Optional[str]:
+    """Open a Dispatcher alert for a manual_gate. rule_id is unique per run so the
+    'one active per (device, rule)' invariant allows exactly one gate per run."""
+    params = node.get("params") or {}
+    severity = str(params.get("severity") or "yellow")
+    if severity not in ("black", "red", "yellow", "green"):
+        severity = "yellow"
+    summary = str(params.get("summary") or "Flow paused for a decision")[:255]
+    try:
+        tenant = await Tenant.get_or_none(id=device.tenant_id)
+        if tenant is None:
+            return None
+        alert = await Alert.create(
+            tenant=tenant, device=device, rule_id=f"atc:gate:{run.id}",
+            severity=severity, status="open", summary=summary,
+            detail={"kind": "atc_gate", "flow_run_id": str(run.id),
+                    "node_id": node.get("id"), "options": options},
+        )
+        return str(alert.id)
+    except Exception:
+        logger.exception("ATC: raising gate alert failed for run %s", run.id)
+        return None
+
+
+async def _park_manual(run: FlowRun, device: Device, node: Dict[str, Any]) -> None:
+    """Park a run on a manual_gate: raise the decision alert and wait (no
+    deadline) until an admin resumes it via resume_manual_gate."""
+    options = _gate_options(node)
+    if not options:
+        await _fail(run, f"manual_gate '{node.get('id')}' has no valid options")
+        return
+    alert_id = await _raise_gate_alert(device, run, node, options)
+    run.status = "waiting"
+    run.waiting_signal = "manual"
+    run.waiting_ref = alert_id
+    run.wait_deadline = None
+    _timeline(run, node.get("id"),
+              f"awaiting admin decision: {[o['label'] for o in options]}")
+    await _persist(run)
+    await _maybe_reconcile(run)
+
+
+async def resume_manual_gate(run_id: Any, edge_handle: str, actor: str) -> Optional[FlowRun]:
+    """Resume a manual_gate run down the chosen edge. Idempotent: a second call
+    (double-click) after the run already advanced is a benign no-op."""
+    try:
+        run = await FlowRun.get_or_none(id=run_id)
+        if run is None:
+            return None
+        if run.status != "waiting" or run.waiting_signal != "manual":
+            return run  # already decided / not a gate
+        node = _nodes_by_id((run.context or {}).get("flow") or {}).get(run.current_node) or {}
+        valid_edges = {o["edge"] for o in _gate_options(node)}
+        if edge_handle not in valid_edges:
+            logger.warning("ATC: invalid gate edge %r for run %s", edge_handle, run_id)
+            return run
+        target = node.get(edge_handle)
+        # Atomic claim so a concurrent decision / second click can't double-advance.
+        claimed = await FlowRun.filter(
+            id=run_id, status="waiting", waiting_signal="manual"
+        ).update(status="running", waiting_signal=None, waiting_ref=None,
+                 wait_deadline=None)
+        if not claimed:
+            return await FlowRun.get_or_none(id=run_id)
+        await _resolve_gate_alert(run, f"{actor} chose {edge_handle}")
+        run.status = "running"
+        run.waiting_signal = None
+        run.waiting_ref = None
+        run.wait_deadline = None
+        if not target:
+            await _fail(run, f"gate option '{edge_handle}' has no target node")
+            return run
+        run.current_node = str(target)
+        _timeline(run, run.current_node, f"gate: {actor} chose {edge_handle}")
+        device = await Device.get_or_none(id=run.device_id)
+        if device is None:
+            await _fail(run, "device no longer exists")
+        else:
+            await _advance(run, device)
+        return run
+    except Exception:
+        logger.exception("ATC: resume_manual_gate(%s) failed", run_id)
+        return None
+
+
+async def fail_gate_run(run_id: Any, reason: str) -> None:
+    """Fail a manual-gated run because its alert was dismissed without a decision
+    (a plain resolve of the gate alert). Never leaves the run stuck waiting."""
+    try:
+        run = await FlowRun.get_or_none(id=run_id)
+        if run is None or run.status != "waiting" or run.waiting_signal != "manual":
+            return
+        claimed = await FlowRun.filter(
+            id=run_id, status="waiting", waiting_signal="manual"
+        ).update(status="running", waiting_signal=None, waiting_ref=None,
+                 wait_deadline=None)
+        if not claimed:
+            return
+        run.status = "running"
+        run.waiting_signal = None
+        run.waiting_ref = None
+        run.wait_deadline = None
+        await _fail(run, reason)
+    except Exception:
+        logger.exception("ATC: fail_gate_run(%s) failed", run_id)
+
+
+async def _resolve_gate_alert(run: FlowRun, reason: str) -> None:
+    try:
+        alerts = await Alert.filter(rule_id=f"atc:gate:{run.id}").exclude(
+            status="resolved").all()
+        for a in alerts:
+            a.status = "resolved"
+            a.resolved_at = _now()
+            d = a.detail or {}
+            d["resolved_reason"] = reason
+            a.detail = d
+            await a.save(update_fields=["status", "resolved_at", "detail"])
+    except Exception:
+        logger.exception("ATC: resolving gate alert failed for run %s", run.id)
+
+
+def _flow_has_release_node(flow: Dict[str, Any]) -> bool:
+    return any(isinstance(n, dict) and n.get("type") == "release_device"
+               for n in (flow.get("nodes") or []))
+
+
+async def _ensure_in_setup_alert(device: Device, run: FlowRun) -> None:
+    """Open (once) the green 'held in Setup Assistant' alert for an ADE device
+    whose flow will release it. The board renders a 'Release from setup' action."""
+    if not getattr(device, "dep_profile_uuid", None):
+        return
+    if not _flow_has_release_node((run.context or {}).get("flow") or {}):
+        return
+    try:
+        from controller.services.dispatcher import _active_alert
+        existing = await _active_alert(device, "atc:in-setup")
+        if existing is None:
+            tenant = await Tenant.get_or_none(id=device.tenant_id)
+            if tenant is None:
+                return
+            await Alert.create(
+                tenant=tenant, device=device, rule_id="atc:in-setup",
+                severity="green", status="open",
+                summary=f"{device.serial_number} held in Setup Assistant"[:255],
+                detail={"kind": "atc_in_setup", "flow_run_id": str(run.id),
+                        "actions": [{"key": "release", "label": "Release from setup"}]},
+            )
+        # Flag the run so a terminal transition knows to resolve the alert.
+        ctx = run.context or {}
+        ctx["in_setup"] = True
+        run.context = ctx
+    except Exception:
+        logger.exception("ATC: ensuring in-setup alert failed for %s", device.serial_number)
+
+
+async def _resolve_in_setup_alert(device: Device, reason: str) -> None:
+    try:
+        alerts = await Alert.filter(
+            device_id=device.id, rule_id="atc:in-setup"
+        ).exclude(status="resolved").all()
+        for a in alerts:
+            a.status = "resolved"
+            a.resolved_at = _now()
+            d = a.detail or {}
+            d["resolved_reason"] = reason
+            a.detail = d
+            await a.save(update_fields=["status", "resolved_at", "detail"])
+    except Exception:
+        logger.exception("ATC: resolving in-setup alert failed for %s", device.serial_number)
+
+
+async def _resolve_in_setup_on_terminal(run: FlowRun) -> None:
+    """On a run reaching a terminal state, clear the green in-setup alert it
+    opened. If another active run is still holding the device it will reopen the
+    alert on its next park (self-healing)."""
+    if not (run.context or {}).get("in_setup"):
+        return
+    device = await Device.get_or_none(id=run.device_id)
+    if device is not None:
+        await _resolve_in_setup_alert(device, f"flow {run.status}")
 
 
 async def _wait_already_satisfied(run: FlowRun, device: Device, node: Dict[str, Any]) -> bool:
@@ -685,6 +1025,11 @@ async def _park(run: FlowRun, node: Dict[str, Any]) -> None:
     run.waiting_ref = (",".join(str(x) for x in expected)[:255] or None)
     run.wait_deadline = _now() + timedelta(minutes=minutes if minutes > 0 else 60)
     _timeline(run, node.get("id"), f"waiting for {signal} (timeout {minutes}m)")
+    # An ADE device parked mid-flow is being held in Setup Assistant (if the flow
+    # releases it later): surface a green board alert with a manual release.
+    device = await Device.get_or_none(id=run.device_id)
+    if device is not None:
+        await _ensure_in_setup_alert(device, run)
     await _persist(run)
     await _maybe_reconcile(run)
 
@@ -698,6 +1043,7 @@ async def _complete(run: FlowRun) -> None:
     run.completed_at = _now()
     _timeline(run, None, "completed")
     await _persist(run)
+    await _resolve_in_setup_on_terminal(run)
     await _maybe_reconcile(run)
 
 
@@ -711,6 +1057,7 @@ async def _fail(run: FlowRun, message: str) -> None:
     _timeline(run, run.current_node, f"failed: {message}")
     logger.info("ATC: run %s failed: %s", run.id, message)
     await _persist(run)
+    await _resolve_in_setup_on_terminal(run)
     await _maybe_reconcile(run)
 
 

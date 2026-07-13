@@ -30,8 +30,15 @@ import {
   Text,
   Tooltip,
 } from "@mantine/core";
-import { IconStar, IconStarFilled, IconTrash, IconX } from "@tabler/icons-react";
-import type { CatalogCommand, FlowNode as FlowNodeT, FlowNodeSpec } from "../../../lib/api";
+import { IconTrash, IconX } from "@tabler/icons-react";
+import type {
+  CatalogCommand,
+  Device,
+  FlowNode as FlowNodeT,
+  FlowNodeSpec,
+  StartKind,
+} from "../../../lib/api";
+import type { Group as GroupDef } from "../../../lib/config";
 import { NodeInspector } from "./NodeInspector";
 import {
   CATEGORY_COLOR,
@@ -60,7 +67,7 @@ export function FlowNodeCard({ data, selected }: NodeProps) {
   const d = data as FlowNodeData;
   const node = d.node;
   const spec = d.spec;
-  const isStart = Boolean(d.isStart);
+  const isStart = node.type === "start";
   const highlight = d.highlight as "visited" | "current" | undefined;
   const color = MANTINE_HEX[CATEGORY_COLOR[spec?.category ?? "Flow"] ?? "indigo"] ?? "#3b5bdb";
   const handles = nodeEdges(node, spec);
@@ -85,8 +92,9 @@ export function FlowNodeCard({ data, selected }: NodeProps) {
         boxShadow: highlight === "current" ? "0 0 0 4px rgba(240,140,0,0.2)" : undefined,
       }}
     >
-      {/* every node has a target (entry) except the entry point still shows one */}
-      <Handle type="target" position={Position.Top} style={{ background: color }} />
+      {/* every node has a target (entry) handle except a start node, which is
+          itself an entry point and is only ever wired FROM */}
+      {!isStart && <Handle type="target" position={Position.Top} style={{ background: color }} />}
       <Box px="sm" py={6} style={{ borderBottom: "1px solid var(--mantine-color-dark-4)" }}>
         <Group gap={6} justify="space-between" wrap="nowrap">
           <Group gap={6} wrap="nowrap">
@@ -154,15 +162,17 @@ export interface FlowEditorOptions {
   appIds: string[];
   commands: CatalogCommand[];
   groupNames: string[];
+  devices: Device[];
+  allGroups: GroupDef[];
+  startKinds: StartKind[];
 }
 
 export function FlowEditor(props: {
-  flowId: string; // re-init the canvas when the selected flow changes
+  flowId: string; // re-init the canvas when the flow id changes
   initialNodes: FlowNodeT[];
-  initialStart: string;
   catalog: FlowNodeSpec[];
   options: FlowEditorOptions;
-  onChange: (patch: { nodes: FlowNodeT[]; start: string }) => void;
+  onChange: (patch: { nodes: FlowNodeT[] }) => void;
 }) {
   return (
     <ReactFlowProvider>
@@ -174,60 +184,45 @@ export function FlowEditor(props: {
 function FlowEditorInner({
   flowId,
   initialNodes,
-  initialStart,
   catalog,
   options,
   onChange,
 }: {
   flowId: string;
   initialNodes: FlowNodeT[];
-  initialStart: string;
   catalog: FlowNodeSpec[];
   options: FlowEditorOptions;
-  onChange: (patch: { nodes: FlowNodeT[]; start: string }) => void;
+  onChange: (patch: { nodes: FlowNodeT[] }) => void;
 }) {
   const initial = useMemo(
-    () => flowToGraph({ id: flowId, name: flowId, trigger: { on: "enroll" }, start: initialStart, nodes: initialNodes }, catalog),
-    // rebuild only when the selected flow changes
+    () => flowToGraph({ id: flowId, name: flowId, nodes: initialNodes }, catalog),
+    // rebuild only when the flow id changes
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [flowId],
   );
 
   const [nodes, setNodes, onNodesChange] = useNodesState<RFNode>(initial.nodes);
   const [edges, setEdges, onEdgesChange] = useEdgesState<Edge>(initial.edges);
-  const [startId, setStartId] = useState(initialStart);
   const [selectedId, setSelectedId] = useState<string | null>(null);
 
-  // Re-initialise when switching to a different flow.
+  // Re-initialise when the flow id changes.
   const lastFlow = useRef(flowId);
   useEffect(() => {
     if (lastFlow.current === flowId) return;
     lastFlow.current = flowId;
-    const g = flowToGraph(
-      { id: flowId, name: flowId, trigger: { on: "enroll" }, start: initialStart, nodes: initialNodes },
-      catalog,
-    );
+    const g = flowToGraph({ id: flowId, name: flowId, nodes: initialNodes }, catalog);
     setNodes(g.nodes);
     setEdges(g.edges);
-    setStartId(initialStart);
     setSelectedId(null);
-  }, [flowId, initialNodes, initialStart, catalog, setNodes, setEdges]);
+  }, [flowId, initialNodes, catalog, setNodes, setEdges]);
 
-  // Emit changes upward (positions, wiring, params, start).
+  // Emit changes upward (positions, wiring, params).
   useEffect(() => {
-    onChange({ nodes: graphToNodes(nodes, edges), start: startId });
+    onChange({ nodes: graphToNodes(nodes, edges) });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [nodes, edges, startId]);
+  }, [nodes, edges]);
 
-  // Decorate nodes with start / selection so the card can render them.
-  const decorated = useMemo(
-    () =>
-      nodes.map((n) => ({
-        ...n,
-        data: { ...n.data, isStart: n.id === startId },
-      })),
-    [nodes, startId],
-  );
+  const decorated = nodes;
 
   const onConnect = useCallback(
     (c: Connection) => {
@@ -260,9 +255,8 @@ function FlowEditorInner({
       const rf: RFNode = { id, type: "atc", position: pos, data: { node, spec } };
       setNodes((ns) => [...ns, rf]);
       setSelectedId(id);
-      if (!startId && spec.type !== "end") setStartId(id);
     },
-    [nodes, setNodes, startId],
+    [nodes, setNodes],
   );
 
   const updateNodeParams = useCallback(
@@ -280,10 +274,9 @@ function FlowEditorInner({
     (id: string) => {
       setNodes((ns) => ns.filter((n) => n.id !== id));
       setEdges((es) => es.filter((e) => e.source !== id && e.target !== id));
-      if (startId === id) setStartId("");
       setSelectedId(null);
     },
-    [setNodes, setEdges, startId],
+    [setNodes, setEdges],
   );
 
   const selected = decorated.find((n) => n.id === selectedId);
@@ -356,16 +349,6 @@ function FlowEditorInner({
               {selected.data.spec?.label ?? selected.data.node.type}
             </Text>
             <Group gap={4}>
-              <Tooltip label={startId === selected.id ? "Start node" : "Set as start"}>
-                <ActionIcon
-                  variant="subtle"
-                  color="yellow"
-                  onClick={() => setStartId(selected.id)}
-                  disabled={selected.data.node.type === "end"}
-                >
-                  {startId === selected.id ? <IconStarFilled size={16} /> : <IconStar size={16} />}
-                </ActionIcon>
-              </Tooltip>
               <Tooltip label="Delete node">
                 <ActionIcon variant="subtle" color="red" onClick={() => deleteNode(selected.id)}>
                   <IconTrash size={16} />
@@ -386,6 +369,9 @@ function FlowEditorInner({
               appIds={options.appIds}
               commands={options.commands}
               groupNames={options.groupNames}
+              devices={options.devices}
+              allGroups={options.allGroups}
+              startKinds={options.startKinds}
             />
           </ScrollArea.Autosize>
         </Paper>
@@ -396,6 +382,14 @@ function FlowEditorInner({
 
 function defaultParams(type: string): Record<string, unknown> {
   switch (type) {
+    case "start":
+      return { kind: "enroll_dep", match: {} };
+    case "manual_gate":
+      return {
+        summary: "",
+        severity: "yellow",
+        options: [{ label: "Release device from setup", edge: "on_release" }],
+      };
     case "assign_tag":
     case "remove_tag":
       return { tags: [] };

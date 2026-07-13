@@ -248,6 +248,9 @@ class TenantUpdate(BaseModel):
     s3_config: Optional[Dict[str, Any]] = None
     dep_enabled: Optional[bool] = None
     is_active: Optional[bool] = None
+    # Tenant-default device-naming template applied at enrollment (services.naming):
+    # {"template": "IT-{serial}", "apply_on_enroll": bool}. An empty dict clears it.
+    device_naming: Optional[Dict[str, Any]] = None
     # Admin-entered renewal reminders (manual-entry MVP -- see models.tenant).
     # Omitted (None) leaves the stored value unchanged, matching every other
     # optional field on this model.
@@ -500,6 +503,7 @@ async def get_tenant_info(principal: Principal = Depends(get_current_principal))
         # Admin-entered renewal reminders (manual-entry MVP; see models.tenant).
         "apns_cert_expires_at": tenant.apns_cert_expires_at,
         "dep_token_expires_at": tenant.dep_token_expires_at,
+        "device_naming": tenant.device_naming or {},
     }
 
 
@@ -534,6 +538,21 @@ async def update_tenant(update: TenantUpdate, admin: Principal = Depends(require
         tenant.s3_config = _restore_tenant_s3_secrets(tenant.s3_config, update.s3_config)
     if update.dep_enabled is not None:
         tenant.dep_enabled = update.dep_enabled
+    if update.device_naming is not None:
+        # Normalise to {"template": str, "apply_on_enroll": bool}; an empty/blank
+        # template clears the tenant default (stored as {}). Group-level templates
+        # still take precedence (services.naming.select_naming_config).
+        dn = update.device_naming
+        if not isinstance(dn, dict):
+            raise HTTPException(status_code=400, detail="device_naming must be an object")
+        template = str(dn.get("template") or "").strip()[:200]
+        if template:
+            tenant.device_naming = {
+                "template": template,
+                "apply_on_enroll": bool(dn.get("apply_on_enroll")),
+            }
+        else:
+            tenant.device_naming = {}
     if update.apns_cert_expires_at is not None:
         tenant.apns_cert_expires_at = update.apns_cert_expires_at
     if update.dep_token_expires_at is not None:
@@ -563,6 +582,8 @@ async def update_tenant(update: TenantUpdate, admin: Principal = Depends(require
                 config["tenant"]["s3"] = tenant.s3_config
             config["tenant"].setdefault("dep", {})
             config["tenant"]["dep"]["enabled"] = tenant.dep_enabled
+            # Mirror the naming template (read back by the ConfigWatcher at main.py).
+            config["tenant"]["device_naming"] = tenant.device_naming or {}
 
             _atomic_write_yaml(yaml_path, config)
         except OSError as exc:
@@ -636,6 +657,13 @@ async def get_yaml_config(
         # forced a re-render.
         body = yaml.safe_dump(config, default_flow_style=False, sort_keys=False) if redacted else text
         return Response(content=body, media_type="text/plain; charset=utf-8")
+
+    # flows.yaml: the editor consumes a single flow. Present a legacy multi-flow
+    # document migrated to a single flow so the next save writes the new format.
+    if config_type == "flows":
+        from controller.services.flow_step_catalog import normalize_flow_document
+        flow, _warns = normalize_flow_document(config)
+        config = {"flow": flow}
 
     return config
 
@@ -1712,7 +1740,15 @@ async def update_device_tags(
 # ── ATC flow runs ────────────────────────────────────────────────────────────
 
 class FlowRunStart(BaseModel):
-    flow_id: str
+    start_node_id: str
+
+
+class GateDecision(BaseModel):
+    edge: str
+
+
+class AlertAction(BaseModel):
+    action_key: str
 
 
 @app.get("/api/v1/devices/{device_id}/flow-runs")
@@ -1749,8 +1785,8 @@ async def start_device_flow_run(
         body: FlowRunStart,
         principal: Principal = Depends(get_current_principal),
 ):
-    """Manually start a flow against a device (testing / re-run). Ignores the
-    trigger match (the operator asked for this flow explicitly)."""
+    """Manually start a run from a specific start node against a device (testing /
+    re-run). Ignores the start's scope (the operator asked for it explicitly)."""
     tenant = principal.tenant
     device = await Device.get_or_none(id=device_id, tenant=tenant)
     if not device:
@@ -1761,13 +1797,31 @@ async def start_device_flow_run(
             detail=f"Device is {device.enrollment_state}; flows run only on enrolled devices",
         )
     from controller.services import atc
-    run = await atc.start_flow_by_id(device, body.flow_id.strip())
+    run = await atc.start_run_from_start(device, body.start_node_id.strip())
     if run is None:
         raise HTTPException(
             status_code=400,
-            detail=f"Flow '{body.flow_id}' not found or has no valid start node",
+            detail=f"Start node '{body.start_node_id}' not found or is not a start node",
         )
     return run.to_dict()
+
+
+@app.post("/api/v1/flow-runs/{run_id}/resume")
+async def resume_flow_run(
+        run_id: str,
+        body: GateDecision,
+        principal: Principal = Depends(get_current_principal),
+):
+    """Resume a run parked on a manual_gate down the chosen decision edge. The
+    edge must be one of the gate's options; idempotent if already decided."""
+    run = await FlowRun.get_or_none(id=run_id, tenant=principal.tenant)
+    if not run:
+        raise HTTPException(status_code=404, detail="Flow run not found")
+    from controller.services import atc
+    result = await atc.resume_manual_gate(run_id, body.edge.strip(), principal.email)
+    if result is None:
+        raise HTTPException(status_code=400, detail="Could not resume run")
+    return result.to_dict()
 
 
 # ── Dispatcher alerts ────────────────────────────────────────────────────────
@@ -1857,6 +1911,13 @@ async def resolve_alert(alert_id: str, principal: Principal = Depends(get_curren
         raise HTTPException(status_code=404, detail="Alert not found")
     if alert.status == "resolved":
         return alert.to_dict()
+    # A manual_gate alert dismissed without a decision must not leave its run
+    # parked forever: fail the run (the run's own resume path resolves the alert
+    # on a real decision; a plain resolve here is a "dismissed" outcome).
+    detail = alert.detail or {}
+    if detail.get("kind") == "atc_gate" and detail.get("flow_run_id"):
+        from controller.services import atc
+        await atc.fail_gate_run(detail["flow_run_id"], f"gate dismissed by {principal.email}")
     from controller.services import dispatcher
     device = await Device.get_or_none(id=alert.device_id)
     if device is not None:
@@ -1866,6 +1927,44 @@ async def resolve_alert(alert_id: str, principal: Principal = Depends(get_curren
         alert.resolved_at = datetime.now(timezone.utc)
         await alert.save(update_fields=["status", "resolved_at"])
     return alert.to_dict()
+
+
+@app.post("/api/v1/alerts/{alert_id}/action")
+async def alert_action(
+        alert_id: str,
+        body: AlertAction,
+        principal: Principal = Depends(get_current_principal),
+):
+    """Take a typed action on an ATC alert from the board: release an ADE device
+    from Setup Assistant (in-setup alert), or pick a manual_gate decision (the
+    action_key is the gate edge)."""
+    alert = await Alert.get_or_none(id=alert_id, tenant=principal.tenant)
+    if not alert:
+        raise HTTPException(status_code=404, detail="Alert not found")
+    detail = alert.detail or {}
+    kind = detail.get("kind")
+    from controller.services import atc
+    if kind == "atc_in_setup":
+        if body.action_key != "release":
+            raise HTTPException(status_code=400, detail="Unsupported action for this alert")
+        device = await Device.get_or_none(id=alert.device_id, tenant=principal.tenant)
+        if device is None:
+            raise HTTPException(status_code=404, detail="Device not found")
+        ok = await atc.release_device_manual(device, principal.email)
+        if not ok:
+            raise HTTPException(status_code=409, detail="Device is not enrolled; cannot release")
+        refreshed = await Alert.get_or_none(id=alert_id, tenant=principal.tenant)
+        return {"message": "Release from Setup Assistant queued",
+                "alert": refreshed.to_dict() if refreshed else None}
+    if kind == "atc_gate":
+        run_id = detail.get("flow_run_id")
+        if not run_id:
+            raise HTTPException(status_code=400, detail="Gate alert has no linked run")
+        result = await atc.resume_manual_gate(run_id, body.action_key.strip(), principal.email)
+        if result is None:
+            raise HTTPException(status_code=400, detail="Could not resume run")
+        return {"message": "Decision recorded", "run": result.to_dict()}
+    raise HTTPException(status_code=400, detail="This alert has no typed actions")
 
 
 class RemediateRequest(BaseModel):
