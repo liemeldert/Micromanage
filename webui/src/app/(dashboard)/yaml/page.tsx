@@ -5,7 +5,8 @@
 // server-side against the full cross-file ruleset before committing, and a
 // save triggers reconciliation).
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { Suspense, useCallback, useEffect, useRef, useState } from "react";
+import { useSearchParams } from "next/navigation";
 import {
   Alert,
   Badge,
@@ -29,6 +30,7 @@ import {
   IconDownload,
   IconEdit,
   IconFileCertificate,
+  IconFileDescription,
   IconHistory,
   IconInfoCircle,
   IconRefresh,
@@ -40,21 +42,39 @@ import { api, ApiError } from "../../../../lib/api";
 import { useAuth } from "../../../../lib/auth-context";
 import { ConfigHistoryDrawer } from "../../../components/config/ConfigHistoryDrawer";
 
-type ConfigType = "profiles" | "groups" | "apps" | "config";
+type ConfigType = "profiles" | "groups" | "apps" | "declarations" | "config";
 type EditableType = Exclude<ConfigType, "config">;
 
 const TABS: { value: ConfigType; label: string; icon: React.FC<{ size?: number }> }[] = [
-  { value: "profiles", label: "profiles.yaml", icon: IconFileCertificate },
-  { value: "groups",   label: "groups.yaml",   icon: IconStack2 },
-  { value: "apps",     label: "apps.yaml",     icon: IconApps },
+  { value: "profiles",     label: "profiles.yaml",     icon: IconFileCertificate },
+  { value: "groups",       label: "groups.yaml",       icon: IconStack2 },
+  { value: "apps",         label: "apps.yaml",         icon: IconApps },
+  { value: "declarations", label: "declarations.yaml", icon: IconFileDescription },
   // { value: "config",   label: "config.yaml",   icon: IconSettings }, // I see no need at the moment for this to be user-accessible at the moment.
 ];
 
-const EDITABLE: ConfigType[] = ["profiles", "groups", "apps"];
+const EDITABLE: ConfigType[] = ["profiles", "groups", "apps", "declarations"];
+
+function isConfigType(v: string | null): v is ConfigType {
+  return !!v && TABS.some((t) => t.value === v);
+}
 
 export default function YamlPage() {
+  return (
+    // useSearchParams requires a Suspense boundary during prerender.
+    <Suspense fallback={null}>
+      <YamlPageInner />
+    </Suspense>
+  );
+}
+
+function YamlPageInner() {
   const { token } = useAuth();
-  const [active, setActive] = useState<ConfigType>("profiles");
+  const searchParams = useSearchParams();
+  const initialType = searchParams.get("type");
+  const [active, setActive] = useState<ConfigType>(
+    isConfigType(initialType) ? initialType : "profiles",
+  );
   const [docs, setDocs]     = useState<Partial<Record<ConfigType, string | null>>>({});
   const [loading, setLoading] = useState(false);
   const [editing, setEditing] = useState(false);

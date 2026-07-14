@@ -173,7 +173,7 @@ async def main():
     async def fv_alert():
         return await Alert.get_or_none(device_id=dev.id, rule_id="fv-alert")
 
-    # ── 1) grace: first eval -> pending (no actions), not open ────────────────
+    #  1) grace: first eval -> pending (no actions), not open 
     print("1) violation creates a pending alert during grace (no actions yet)")
     await dispatcher.evaluate_device(dev)
     a = await fv_alert()
@@ -182,7 +182,7 @@ async def main():
     await dev.refresh_from_db()
     check("no reversible tag applied during grace", "noncompliant-fv" not in dev.tags)
 
-    # ── 2) grace elapses -> open, fires webhook (signed) + tag ────────────────
+    #  2) grace elapses -> open, fires webhook (signed) + tag 
     print("2) after grace, alert opens and fires actions")
     a.first_detected_at = datetime.now(timezone.utc) - timedelta(minutes=11)
     await a.save()
@@ -200,14 +200,14 @@ async def main():
     expected = "sha256=" + hmac.new(b"topsecret", cap["content"], hashlib.sha256).hexdigest()
     check("webhook carries a valid HMAC signature", sig == expected)
 
-    # ── 3) dedup: repeated evals update ONE alert, never spam ─────────────────
+    #  3) dedup: repeated evals update ONE alert, never spam 
     print("3) repeated evaluations keep a single alert (no duplicates)")
     await dispatcher.evaluate_device(dev)
     await dispatcher.evaluate_device(dev)
     n = await Alert.filter(device_id=dev.id, rule_id="fv-alert").count()
     check("still exactly one fv-alert row", n == 1)
 
-    # ── 4) dry-run remediation records without acting ─────────────────────────
+    #  4) dry-run remediation records without acting 
     print("4) dry-run remediation records but sends no command")
     dry = await Alert.get_or_none(device_id=dev.id, rule_id="dry")
     ledger = (dry.detail or {}).get("remediations", []) if dry else []
@@ -215,13 +215,13 @@ async def main():
     refreshed = await Task.filter(device=dev, type="refresh_info").count()
     check("no refresh_info command task created by dry-run", refreshed == 0)
 
-    # ── 5) audited non-destructive remediation runs as dispatcher:<rule> ──────
+    #  5) audited non-destructive remediation runs as dispatcher:<rule> 
     print("5) real remediation runs through the audited path as dispatcher:<rule>")
     await asyncio.sleep(0.2)
     rem_tasks = await Task.filter(device=dev, type="profile_install", user="dispatcher:fv-remediate").all()
     check("profile_install task created by remediation", len(rem_tasks) >= 1)
 
-    # ── 6) loop protection: halts after N attempts and escalates ──────────────
+    #  6) loop protection: halts after N attempts and escalates 
     print("6) loop protection halts after N attempts and escalates")
     # cooldown=0, max=2. It already attempted once in step 2/5. Drive more evals.
     for _ in range(4):
@@ -232,7 +232,7 @@ async def main():
     check("remediation marked failed after max attempts", detail.get("remediation_failed") is True)
     check("severity escalated above yellow", dispatcher.SEVERITY_RANK.get(rem.severity, 0) > dispatcher.SEVERITY_RANK["yellow"])
 
-    # ── 7) destructive remediation is queued for approval, never auto-fired ───
+    #  7) destructive remediation is queued for approval, never auto-fired 
     print("7) destructive remediation is queued for approval, not auto-fired")
     dev.tags = ["risky"]
     await dev.save(update_fields=["tags"])
@@ -258,7 +258,7 @@ async def main():
           bool((rec.detail or {}).get("pending_approvals")) if rec else False)
     check("secret param NOT leaked into alert detail", "supersecret" not in detail_json)
 
-    # ── 8) auto-resolve: compliant device resolves alert + removes tag ────────
+    #  8) auto-resolve: compliant device resolves alert + removes tag 
     print("8) becoming compliant auto-resolves and removes the reversible tag")
     dev.attributes = {"SecurityInfo": {"FDE_Enabled": True}}  # FileVault ON now
     await dev.save(update_fields=["attributes"])
@@ -268,7 +268,7 @@ async def main():
     check("fv-alert auto-resolved", a.status == "resolved")
     check("noncompliant-fv tag removed on resolve", "noncompliant-fv" not in dev.tags)
 
-    # ── 9) webhook failure never blocks evaluation ────────────────────────────
+    #  9) webhook failure never blocks evaluation 
     print("9) a failing webhook does not block evaluation")
     WEBHOOK_CODE[0] = 500
     dev.attributes = {"SecurityInfo": {"FDE_Enabled": False}}  # violate again
@@ -284,7 +284,7 @@ async def main():
     await fresh.refresh_from_db()
     check("alert opens even though the webhook fails", fresh.status == "open")
 
-    # ── 10) webhook secret redaction (unit) ───────────────────────────────────
+    #  10) webhook secret redaction (unit) 
     print("10) webhook url/secret are redacted from API responses")
     import controller.api.main as apimain
     red = apimain._redact_dispatcher_config(
@@ -293,7 +293,7 @@ async def main():
     check("url redacted", red["webhooks"][0]["url"] == "***redacted***")
     check("secret redacted", red["webhooks"][0]["secret"] == "***redacted***")
 
-    # ── 11) REGRESSION: grace anchor resets across a compliant interlude ──────
+    #  11) REGRESSION: grace anchor resets across a compliant interlude 
     # Rule "flaky-tag" has grace_minutes=30 and auto_resolve=False (default).
     # Before the fix, a 'pending' alert that self-healed within grace was left
     # pending (only an OPEN alert respected auto_resolve, and this rule never

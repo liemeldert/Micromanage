@@ -159,7 +159,7 @@ export function DepWizard({
   return (
     <Card withBorder radius="md" p="lg">
       <Stepper active={active} onStepClick={setActive} allowNextStepsSelect={false} size="sm">
-        {/* ── Step 1: generate + download public key ─────────────────────── */}
+        {/*  Step 1: generate + download public key  */}
         <Stepper.Step
           label="Generate key"
           description="Create this server's identity"
@@ -209,7 +209,7 @@ export function DepWizard({
           </Stack>
         </Stepper.Step>
 
-        {/* ── Step 2: upload the encrypted server token ──────────────────── */}
+        {/*  Step 2: upload the encrypted server token  */}
         <Stepper.Step
           label="Link token"
           description="Upload the ABM/ASM server token"
@@ -270,7 +270,7 @@ export function DepWizard({
           </Stack>
         </Stepper.Step>
 
-        {/* ── Step 3: linked ─────────────────────────────────────────────── */}
+        {/*  Step 3: linked  */}
         <Stepper.Completed>
           <Stack gap="md" mt="md" align="center" py="lg">
             <ThemeIcon size={54} radius="xl" color="teal">

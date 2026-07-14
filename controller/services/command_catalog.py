@@ -18,7 +18,8 @@ Entry fields:
   type          our command identifier (CommandRequest.command_type)
   label         human label
   description   one-liner shown in the UI
-  category      UI grouping ("Queries", "Power", "Security", "Lost Mode", "Users")
+  category      UI grouping ("Queries", "Management", "Power", "Security",
+                "Lost Mode", "Users")
   common        surfaced as a Quick Action
   contextual    tab-backed refresh -- hidden from the commands menu; the UI
                 offers it on the tab it populates (profiles, apps, summary)
@@ -34,7 +35,7 @@ from typing import Any, Dict, List, Optional
 from controller.auth import DESTRUCTIVE_COMMANDS
 
 COMMAND_CATALOG: List[Dict[str, Any]] = [
-    # ── Tab-backed inventory refreshes (contextual: not in the commands menu) ──
+    #  Tab-backed inventory refreshes (contextual: not in the commands menu) 
     {
         "type": "refresh_info",
         "label": "Refresh device information",
@@ -72,7 +73,7 @@ COMMAND_CATALOG: List[Dict[str, Any]] = [
         "params": [],
     },
 
-    # ── Queries (results appear in the task's details) ────────────────────────
+    #  Queries (results appear in the task's details) 
     {
         "type": "restrictions",
         "label": "Restrictions in effect",
@@ -110,7 +111,18 @@ COMMAND_CATALOG: List[Dict[str, Any]] = [
         "params": [],
     },
 
-    # ── Power ─────────────────────────────────────────────────────────────────
+    #  Declarative Device Management 
+    {
+        "type": "ddm_sync",
+        "label": "DeclarativeManagement sync",
+        "description": "Tell the device to re-synchronize its DDM declarations now. "
+                       "Requires DDM enabled for the tenant and a supported OS.",
+        "category": "Management",
+        "common": False,
+        "params": [],
+    },
+
+    #  Power 
     {
         "type": "restart",
         "label": "Restart",
@@ -128,7 +140,7 @@ COMMAND_CATALOG: List[Dict[str, Any]] = [
         "params": [],
     },
 
-    # ── Security actions ──────────────────────────────────────────────────────
+    #  Security actions 
     {
         "type": "lock",
         "label": "Lock device",
@@ -266,7 +278,7 @@ COMMAND_CATALOG: List[Dict[str, Any]] = [
         ],
     },
 
-    # ── Lost Mode ─────────────────────────────────────────────────────────────
+    #  Lost Mode 
     {
         "type": "enable_lost_mode",
         "label": "Enable Lost Mode",
@@ -308,7 +320,7 @@ COMMAND_CATALOG: List[Dict[str, Any]] = [
         "params": [],
     },
 
-    # ── Users (macOS / Shared iPad) ───────────────────────────────────────────
+    #  Users (macOS / Shared iPad) 
     {
         "type": "user_list",
         "label": "User list",

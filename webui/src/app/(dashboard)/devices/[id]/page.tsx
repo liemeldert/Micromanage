@@ -5,14 +5,16 @@
 // check/cross security posture, key facts) with deeper data-driven sections
 // behind it. Commands come from the server's catalog (see DeviceCommandKit).
 
-import { useEffect, useRef, useState, use } from "react";
+import { Fragment, useEffect, useRef, useState, use } from "react";
 import { useRouter } from "next/navigation";
 import {
   ActionIcon,
   Alert,
   Badge,
   Box,
+  Button,
   Card,
+  Collapse,
   Grid,
   Group,
   Loader,
@@ -36,6 +38,8 @@ import {
   IconBattery3,
   IconBrandApple,
   IconCertificate,
+  IconChevronDown,
+  IconChevronRight,
   IconCheck,
   IconClock,
   IconCpu,
@@ -46,10 +50,12 @@ import {
   IconDeviceMobile,
   IconDeviceTv,
   IconDotsCircleHorizontal,
+  IconFileDescription,
   IconInfoCircle,
   IconLayoutDashboard,
   IconMapPin,
   IconPencil,
+  IconRefresh,
   IconServer,
   IconWand,
   IconSettings,
@@ -66,6 +72,8 @@ import {
   api,
   ApiError,
   type CatalogCommand,
+  type DdmDeclarationReported,
+  type DdmDeviceState,
   type DeviceDetail,
   type DispatcherAlert,
   type FlowRunSummary,
@@ -79,6 +87,7 @@ import { QuickActionsCard, CommandsPanel, RefreshButton } from "../../../../comp
 import { DeviceTagsCard } from "../../../../components/DeviceTagsCard";
 import { DeviceLocationMap, type DeviceLocation } from "../../../../components/DeviceLocationMap";
 import {
+  flattenToDotPaths,
   organizeAttributes,
   type AttrItem,
 } from "../../../../../lib/device-attributes";
@@ -140,7 +149,13 @@ function pick(obj: Record<string, unknown>, ...keys: string[]): string {
   return "--";
 }
 
-// ── Small display primitives (Jamf-style rows) ────────────────────────────────
+// "com.apple.configuration.legacy" -> "legacy" (mirrors the Declarations page).
+const DDM_TYPE_PREFIX = "com.apple.configuration.";
+function shortDeclarationType(type: string): string {
+  return type.startsWith(DDM_TYPE_PREFIX) ? type.slice(DDM_TYPE_PREFIX.length) : type;
+}
+
+//  Small display primitives (Jamf-style rows) 
 
 function FactRow({ label, children }: { label: string; children: React.ReactNode }) {
   return (
@@ -237,7 +252,209 @@ function ScopeGroupCard({
   );
 }
 
-// ── Page ──────────────────────────────────────────────────────────────────────
+// DDM validity -> badge colour. valid+active is the healthy state; invalid is
+// a real problem; unknown/pending (not yet reported, or reported inactive) is
+// neutral rather than alarming -- it just hasn't checked in with this token yet.
+function ddmStatusBadge(active: boolean, valid: DdmDeclarationReported["valid"] | undefined) {
+  if (valid === "invalid") return { color: "red", label: "invalid" };
+  if (valid === "valid" && active) return { color: "teal", label: "active" };
+  if (valid === "valid" && !active) return { color: "gray", label: "inactive" };
+  return { color: "gray", label: "pending" };
+}
+
+function DdmSection({
+  ddm,
+  loading,
+  error,
+  syncing,
+  isAdmin,
+  expandedRow,
+  onToggleRow,
+  onRefresh,
+  onSync,
+}: {
+  ddm: DdmDeviceState | null;
+  loading: boolean;
+  error: string | null;
+  syncing: boolean;
+  isAdmin: boolean;
+  expandedRow: string | null;
+  onToggleRow: (identifier: string) => void;
+  onRefresh: () => void;
+  onSync: () => void;
+}) {
+  if (loading) return <Box py={60} style={{ textAlign: "center" }}><Loader /></Box>;
+  if (error) {
+    return (
+      <Alert color="red" variant="light" icon={<IconAlertTriangle size={16} />}>
+        {error}
+      </Alert>
+    );
+  }
+  if (!ddm) return <Text fz="sm" c="dimmed">No declarative management data available.</Text>;
+
+  if (!ddm.supported) {
+    return (
+      <Card withBorder radius="md" p="md">
+        <Text fz="sm" c="dimmed">
+          This device doesn&apos;t support Declarative Device Management (requires a
+          sufficiently new OS / MDM channel). Configuration is delivered through profiles instead.
+        </Text>
+      </Card>
+    );
+  }
+  if (!ddm.tenant_enabled) {
+    return (
+      <Card withBorder radius="md" p="md">
+        <Text fz="sm" c="dimmed">
+          Declarative Device Management is turned off for this tenant. Turn it on in Settings to
+          start enforcing declarations on this device.
+        </Text>
+      </Card>
+    );
+  }
+
+  const driftSet = new Set(ddm.drift ?? []);
+  const statusFacts = flattenToDotPaths(ddm.status_items);
+
+  return (
+    <Stack gap="md">
+      <Card withBorder radius="md" p="md">
+        <Group justify="space-between" align="flex-start" wrap="wrap">
+          <Group gap="lg" wrap="wrap">
+            <Stack gap={2}>
+              <Text fz="xs" c="dimmed">Enabled</Text>
+              <Badge size="sm" variant="light" color="teal">
+                {ddm.enabled_at ? new Date(ddm.enabled_at).toLocaleString() : "yes"}
+              </Badge>
+            </Stack>
+            <Stack gap={2}>
+              <Text fz="xs" c="dimmed">Last sync</Text>
+              <Text fz="sm">{ddm.last_sync_at ? new Date(ddm.last_sync_at).toLocaleString() : "never"}</Text>
+            </Stack>
+            {driftSet.size > 0 && (
+              <Stack gap={2}>
+                <Text fz="xs" c="dimmed">Drift</Text>
+                <Badge size="sm" variant="light" color="orange">
+                  {driftSet.size} item{driftSet.size === 1 ? "" : "s"}
+                </Badge>
+              </Stack>
+            )}
+          </Group>
+          <Group gap="xs">
+            <Tooltip label="Reload declarative state">
+              <ActionIcon variant="subtle" color="gray" onClick={onRefresh}>
+                <IconRefresh size={16} />
+              </ActionIcon>
+            </Tooltip>
+            {isAdmin && (
+              <Button size="xs" variant="light" loading={syncing} onClick={onSync}>
+                Sync now
+              </Button>
+            )}
+          </Group>
+        </Group>
+      </Card>
+
+      <Card withBorder radius="md" p="md">
+        <Text fz="sm" fw={600} mb="md">Declarations ({ddm.desired.length})</Text>
+        {ddm.desired.length === 0 ? (
+          <Text fz="sm" c="dimmed">No declarations scoped to this device.</Text>
+        ) : (
+          <Box style={{ overflowX: "auto" }}>
+            <Table fz="sm" verticalSpacing="xs">
+              <Table.Thead>
+                <Table.Tr>
+                  <Table.Th style={{ width: 24 }} />
+                  <Table.Th>Name</Table.Th>
+                  <Table.Th>Type</Table.Th>
+                  <Table.Th>Status</Table.Th>
+                </Table.Tr>
+              </Table.Thead>
+              <Table.Tbody>
+                {ddm.desired.map((d) => {
+                  const rep = ddm.reported[d.identifier];
+                  const badge = ddmStatusBadge(rep?.active ?? false, rep?.valid);
+                  const drifted = driftSet.has(d.identifier);
+                  const reasons = rep?.reasons ?? [];
+                  const expanded = expandedRow === d.identifier;
+                  return (
+                    <Fragment key={d.identifier}>
+                      <Table.Tr
+                        style={{
+                          cursor: reasons.length ? "pointer" : undefined,
+                          background: drifted ? "var(--mantine-color-orange-light)" : undefined,
+                        }}
+                        onClick={() => reasons.length && onToggleRow(d.identifier)}
+                      >
+                        <Table.Td>
+                          {reasons.length > 0 &&
+                            (expanded ? <IconChevronDown size={14} /> : <IconChevronRight size={14} />)}
+                        </Table.Td>
+                        <Table.Td>
+                          <Text fz="sm">{d.name || d.identifier}</Text>
+                          <Text fz="xs" c="dimmed" style={{ fontFamily: "monospace" }}>{d.identifier}</Text>
+                        </Table.Td>
+                        <Table.Td>{shortDeclarationType(d.type)}</Table.Td>
+                        <Table.Td>
+                          <Group gap={6} wrap="nowrap">
+                            <Badge size="xs" color={badge.color} variant="light">{badge.label}</Badge>
+                            {drifted && <Badge size="xs" color="orange" variant="outline">drift</Badge>}
+                          </Group>
+                        </Table.Td>
+                      </Table.Tr>
+                      {reasons.length > 0 && (
+                        <Table.Tr>
+                          <Table.Td colSpan={4} p={0} style={{ border: expanded ? undefined : "none" }}>
+                            <Collapse in={expanded}>
+                              <Stack gap={4} p="sm" pl={36}>
+                                {reasons.map((r, i) => (
+                                  <Box key={i}>
+                                    {r.code && (
+                                      <Text fz="xs" fw={600} c="orange">{r.code}</Text>
+                                    )}
+                                    {r.description && <Text fz="xs" c="dimmed">{r.description}</Text>}
+                                  </Box>
+                                ))}
+                              </Stack>
+                            </Collapse>
+                          </Table.Td>
+                        </Table.Tr>
+                      )}
+                    </Fragment>
+                  );
+                })}
+              </Table.Tbody>
+            </Table>
+          </Box>
+        )}
+      </Card>
+
+      <Card withBorder radius="md" p="md">
+        <Text fz="sm" fw={600} mb="xs">Status items</Text>
+        {statusFacts.length === 0 ? (
+          <Text fz="sm" c="dimmed">No status facts reported yet.</Text>
+        ) : (
+          <SimpleGrid cols={{ base: 1, md: 2 }} spacing="xl" verticalSpacing={0}>
+            {statusFacts.map((f) => (
+              <FactRow key={f.path} label={f.path}>
+                {f.isBool ? (
+                  <Badge size="sm" variant="light" color={f.boolValue ? "teal" : "gray"}>
+                    {f.boolValue ? "Yes" : "No"}
+                  </Badge>
+                ) : (
+                  <Text fz="sm" style={{ wordBreak: "break-word" }}>{f.value}</Text>
+                )}
+              </FactRow>
+            ))}
+          </SimpleGrid>
+        )}
+      </Card>
+    </Stack>
+  );
+}
+
+//  Page 
 
 // Compliance triage colours (black > red > yellow > green).
 const SEVERITY_COLOR: Record<string, string> = {
@@ -269,6 +486,14 @@ export default function DeviceDetailPage({ params }: { params: Promise<{ id: str
   const [scope, setScope] = useState<ScopeExplain | null>(null);
   const [scopeLoading, setScopeLoading] = useState(false);
   const [scopeError, setScopeError] = useState<string | null>(null);
+
+  // Declarative Device Management (DDM) state -- fetched lazily, only once the
+  // Declarations section is opened, same pattern as Scope above.
+  const [ddm, setDdm] = useState<DdmDeviceState | null>(null);
+  const [ddmLoading, setDdmLoading] = useState(false);
+  const [ddmError, setDdmError] = useState<string | null>(null);
+  const [ddmSyncing, setDdmSyncing] = useState(false);
+  const [expandedDdmRow, setExpandedDdmRow] = useState<string | null>(null);
 
   const load = async (background = false) => {
     if (!token) return;
@@ -368,6 +593,44 @@ export default function DeviceDetailPage({ params }: { params: Promise<{ id: str
       setScopeError(e instanceof ApiError ? e.message : (e as Error).message);
     } finally {
       setScopeLoading(false);
+    }
+  };
+
+  // Loaded on first visit to the Declarations section; a manual Refresh button
+  // in the section lets the admin re-pull without leaving/re-entering.
+  const loadDdm = async (force = false) => {
+    if (!token) return;
+    if (!force && (ddm || ddmLoading)) return;
+    setDdmLoading(true);
+    setDdmError(null);
+    try {
+      const r = await api.getDeviceDdm(token, id);
+      setDdm(r);
+    } catch (e: unknown) {
+      setDdmError(e instanceof ApiError ? e.message : (e as Error).message);
+    } finally {
+      setDdmLoading(false);
+    }
+  };
+
+  const handleDdmSync = async () => {
+    if (!token) return;
+    setDdmSyncing(true);
+    try {
+      const res = await api.syncDeviceDdm(token, id);
+      notifications.show({
+        color: res.queued ? "teal" : "gray",
+        message: res.queued ? "Declarative sync queued." : "Nothing to sync.",
+      });
+      await loadDdm(true);
+    } catch (e: unknown) {
+      notifications.show({
+        color: "red",
+        title: "Sync failed",
+        message: e instanceof ApiError ? e.message : (e as Error).message,
+      });
+    } finally {
+      setDdmSyncing(false);
     }
   };
 
@@ -471,6 +734,7 @@ export default function DeviceDetailPage({ params }: { params: Promise<{ id: str
     { value: "summary", label: "Summary", icon: IconLayoutDashboard },
     ...groups.map((g) => ({ value: g.category, label: g.category, icon: SECTION_ICONS[g.category] ?? IconDotsCircleHorizontal })),
     { value: "profiles", label: `Profiles (${deviceProfiles.length || installed_profiles.length})`, icon: IconCertificate },
+    { value: "declarations", label: "Declarations", icon: IconFileDescription },
     { value: "apps", label: `Apps (${deviceApps.length || installed_apps.length})`, icon: IconApps },
     { value: "scope", label: "Scope", icon: IconTarget },
     { value: "tasks", label: `Activity (${recent_tasks.length})`, icon: IconClock },
@@ -611,7 +875,7 @@ export default function DeviceDetailPage({ params }: { params: Promise<{ id: str
       )}
 
       <Grid gutter="lg">
-        {/* ── Left rail: identity, sections, quick actions ─────────────────── */}
+        {/*  Left rail: identity, sections, quick actions  */}
         <Grid.Col span={{ base: 12, md: 3.5, lg: 3 }}>
           <Stack gap="md">
             <Card withBorder radius="md" p="md">
@@ -642,6 +906,7 @@ export default function DeviceDetailPage({ params }: { params: Promise<{ id: str
                   onClick={() => {
                     setSection(s.value);
                     if (s.value === "scope") loadScope();
+                    if (s.value === "declarations") loadDdm();
                   }}
                   style={{ borderRadius: 6 }}
                 />
@@ -659,7 +924,7 @@ export default function DeviceDetailPage({ params }: { params: Promise<{ id: str
           </Stack>
         </Grid.Col>
 
-        {/* ── Content ──────────────────────────────────────────────────────── */}
+        {/*  Content  */}
         <Grid.Col span={{ base: 12, md: 8.5, lg: 9 }}>
           {section === "summary" && (
             <Stack gap="md">
@@ -860,6 +1125,20 @@ export default function DeviceDetailPage({ params }: { params: Promise<{ id: str
                 )}
               </Card>
             </Stack>
+          )}
+
+          {section === "declarations" && (
+            <DdmSection
+              ddm={ddm}
+              loading={ddmLoading}
+              error={ddmError}
+              syncing={ddmSyncing}
+              isAdmin={isAdmin}
+              expandedRow={expandedDdmRow}
+              onToggleRow={(id2) => setExpandedDdmRow((cur) => (cur === id2 ? null : id2))}
+              onRefresh={() => loadDdm(true)}
+              onSync={handleDdmSync}
+            />
           )}
 
           {section === "apps" && (

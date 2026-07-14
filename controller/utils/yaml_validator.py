@@ -264,6 +264,78 @@ class Profile(BaseModel):
         return v
 
 
+class DeclarationItem(BaseModel):
+    """One DDM declaration in declarations.yaml (services.ddm_manager).
+
+    Authors write configuration declarations only -- the paired activation and
+    the status-subscriptions / org-info / device-properties declarations are
+    auto-managed. ``profile`` (legacy bridge) serves an existing profiles.yaml
+    profile via a signed ProfileURL instead of an inline ``payload``.
+    """
+    id: str
+    name: Optional[str] = None
+    type: str
+    platforms: Optional[List[str]] = None
+    groups: Optional[List[str]] = []
+    conditions: Optional[List[Condition]] = []
+    include_devices: Optional[List[str]] = []
+    exclude_devices: Optional[List[str]] = []
+    rollout: Optional[Rollout] = None
+    # Optional activation predicate, passed through verbatim (evaluated on the
+    # device against @property(...) from the properties declaration).
+    predicate: Optional[str] = None
+    payload: Optional[Dict[str, Any]] = None
+    profile: Optional[str] = None  # legacy bridge: a profiles.yaml id
+
+    @validator('id')
+    def validate_id(cls, v):
+        # Identifiers become "mm.cfg.<id>" and must stay short and stable.
+        if not re.match(r'^[a-z0-9][a-z0-9-_]{0,47}$', v or ''):
+            raise ValueError(
+                "Declaration id must be a slug (lowercase letters, digits, hyphens, "
+                "underscores) of at most 48 characters"
+            )
+        return v
+
+    @validator('type')
+    def validate_declaration_type(cls, v):
+        if v == 'com.apple.configuration.management.status-subscriptions':
+            raise ValueError(
+                "status subscriptions are auto-managed; add items to the top-level "
+                "'status_subscriptions' list instead"
+            )
+        if v.startswith(('com.apple.management.', 'com.apple.activation.', 'com.apple.asset.')):
+            raise ValueError(
+                f"'{v}' declarations are auto-managed and cannot be authored in "
+                "declarations.yaml"
+            )
+        if not v.startswith('com.apple.configuration.'):
+            raise ValueError("Declaration type must start with 'com.apple.configuration.'")
+        return v
+
+    @validator('platforms')
+    def validate_platforms(cls, v):
+        valid = ('iOS', 'macOS', 'tvOS')
+        unknown = [p for p in (v or []) if p not in valid]
+        if unknown:
+            raise ValueError(f"Unknown platform(s) {unknown}. Valid: {list(valid)}")
+        return v
+
+    @validator('profile', always=True)
+    def validate_payload_or_profile(cls, v, values):
+        if v and values.get('type') != 'com.apple.configuration.legacy':
+            raise ValueError(
+                "'profile' is only valid with type com.apple.configuration.legacy"
+            )
+        if v and values.get('payload') is not None:
+            raise ValueError("provide either 'payload' or 'profile', not both")
+        if not v and values.get('payload') is None:
+            raise ValueError(
+                "a declaration requires a 'payload' (or 'profile' for the legacy bridge)"
+            )
+        return v
+
+
 class TenantConfig(BaseModel):
     id: str
     name: str
@@ -347,7 +419,7 @@ class Flow(BaseModel):
         return v
 
 
-# ── Dispatcher (dispatcher.yaml) ─────────────────────────────────────────────
+#  Dispatcher (dispatcher.yaml) 
 
 VALID_SEVERITIES = ('black', 'red', 'yellow', 'green')
 
@@ -460,6 +532,7 @@ class YAMLValidator:
         # early if its file is absent. They cross-validate against the docs above.
         self._validate_flows(groups, apps, profiles, known_tags)
         self._validate_dispatcher(groups, apps, profiles, known_tags)
+        self._validate_declarations(groups, profiles, known_tags)
 
         return len(self.errors) == 0, self.errors, self.warnings
 
@@ -776,7 +849,7 @@ class YAMLValidator:
         for profile in profiles or []:
             scan(f"profile '{profile.id}'", profile.conditions)
 
-    # ── ATC flows (flows.yaml) ────────────────────────────────────────────────
+    #  ATC flows (flows.yaml) 
     def _validate_flows(self, groups: Optional[List[Group]],
                         apps: Optional[List[App]],
                         profiles: Optional[List[Profile]],
@@ -1134,7 +1207,7 @@ class YAMLValidator:
             if nid not in reachable:
                 self.warnings.append(f"{owner} node '{nid}' is unreachable from any start")
 
-    # ── Dispatcher rules (dispatcher.yaml) ────────────────────────────────────
+    #  Dispatcher rules (dispatcher.yaml) 
     def _validate_dispatcher(self, groups: Optional[List[Group]],
                             apps: Optional[List[App]],
                             profiles: Optional[List[Profile]],
@@ -1224,6 +1297,21 @@ class YAMLValidator:
                 self.errors.append(
                     f"{owner} check attribute has an invalid operator: {check.get('operator')}"
                 )
+        if ctype == 'declaration_drift':
+            ids = check.get('ids')
+            if ids is not None and not isinstance(ids, list):
+                self.errors.append(
+                    f"{owner} check declaration_drift 'ids' must be a list of declaration ids"
+                )
+        if ctype == 'ddm_status':
+            if not str(check.get('path') or '').strip():
+                self.errors.append(f"{owner} check ddm_status requires a 'path'")
+            if check.get('operator') not in (
+                'equals', 'not_equals', 'contains', 'gte', 'lte', 'exists', 'not_exists'
+            ):
+                self.errors.append(
+                    f"{owner} check ddm_status has an invalid operator: {check.get('operator')}"
+                )
 
     def _check_dispatcher_action(self, owner: str, action: "DispatcherAction",
                                 webhook_names: set, profile_ids: set, app_ids: set,
@@ -1295,3 +1383,85 @@ class YAMLValidator:
                                 f"{owner} send_command is missing required parameter "
                                 f"'{pd.get('label', pd['name'])}'"
                             )
+
+    #  DDM declarations (declarations.yaml) 
+    def _validate_declarations(self, groups: Optional[List[Group]],
+                              profiles: Optional[List[Profile]],
+                              known_tags: Optional[set]) -> None:
+        """Validate the optional declarations.yaml (DDM; services.ddm_manager).
+
+        Checks: unique slug ids; configuration-only types (the auto-managed
+        declaration families are rejected); payload XOR legacy-bridge profile
+        (which must exist in profiles.yaml); scope references; plus non-fatal
+        per-type sanity warnings.
+        """
+        path = self.tenant_path / 'declarations.yaml'
+        if not path.exists():
+            return
+        data = self._load_yaml('declarations.yaml')
+        if not data:
+            return
+
+        group_names = {g.name for g in groups} if groups else set()
+        profile_ids = {p.id for p in profiles} if profiles else set()
+
+        subs = data.get('status_subscriptions')
+        if subs is not None and (
+            not isinstance(subs, list) or any(not isinstance(s, str) for s in subs)
+        ):
+            self.errors.append(
+                "declarations.yaml status_subscriptions must be a list of status-item names"
+            )
+        org = data.get('organization_info')
+        if org is not None:
+            if not isinstance(org, dict):
+                self.errors.append("declarations.yaml organization_info must be a mapping")
+            else:
+                for key in ('name', 'email', 'url'):
+                    if org.get(key) is not None and not isinstance(org[key], str):
+                        self.errors.append(
+                            f"declarations.yaml organization_info.{key} must be a string"
+                        )
+
+        seen_ids: set = set()
+        for idx, ddata in enumerate(data.get('declarations', []) or []):
+            try:
+                item = DeclarationItem(**ddata)
+            except Exception as e:
+                self.errors.append(f"Invalid declaration at index {idx}: {e}")
+                continue
+            owner = f"declaration '{item.id}'"
+            if item.id in seen_ids:
+                self.errors.append(f"Duplicate declaration id: {item.id}")
+            seen_ids.add(item.id)
+
+            for group in item.groups or []:
+                if group not in group_names:
+                    self.errors.append(f"{owner} references unknown group: {group}")
+            self._check_conditions(owner, item.conditions or [], group_names)
+            if known_tags:
+                self._warn_tag_condition_refs(owner, item.conditions or [], known_tags)
+            if not (item.groups or []) and not (item.conditions or []) \
+                    and not (item.include_devices or []):
+                self.warnings.append(
+                    f"{owner} has no groups, conditions or included devices "
+                    "and will apply to no devices"
+                )
+
+            if item.profile and item.profile not in profile_ids:
+                self.errors.append(f"{owner} bridges unknown profile: {item.profile}")
+
+            # Per-type sanity (warnings, never blocks -- Apple's schemas evolve).
+            if item.type == 'com.apple.configuration.softwareupdate.enforcement.specific':
+                payload = item.payload or {}
+                for req in ('TargetOSVersion', 'TargetLocalDateTime'):
+                    if not payload.get(req):
+                        self.warnings.append(f"{owner} ({item.type}) requires '{req}'")
+                target = payload.get('TargetLocalDateTime')
+                if target and not re.match(
+                    r'^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}$', str(target)
+                ):
+                    self.warnings.append(
+                        f"{owner} TargetLocalDateTime must be local time formatted "
+                        "YYYY-MM-DDTHH:MM:SS with NO timezone suffix"
+                    )

@@ -42,6 +42,12 @@ class CommandSendError(CommandError):
     """The command was valid but the MDM transport failed. Maps to a 502."""
 
 
+async def _ddm_sync(device: Device, connector: MDMConnector) -> Dict[str, Any]:
+    """DeclarativeManagement sync via ddm_manager (keeps DDM bookkeeping)."""
+    from controller.services import ddm_manager
+    return await ddm_manager.enqueue_sync_command(device, connector)
+
+
 async def dispatch_catalog_command(
     device: Device,
     command_type: str,
@@ -96,6 +102,14 @@ async def dispatch_catalog_command(
             raise CommandError(
                 "Macs require a 6-digit PIN for this command (needed to unlock afterwards)"
             )
+    if command_type == "ddm_sync":
+        # Fail before the audit task exists: a disabled tenant / unsupported OS
+        # is a caller error (400), not a device send failure.
+        from controller.services import ddm_manager
+        if not tenant.ddm_enabled:
+            raise CommandError("Declarative Device Management is not enabled for this tenant")
+        if not ddm_manager.device_supports_ddm(device):
+            raise CommandError("This device's OS does not support Declarative Device Management")
 
     own_connector = mdm_connector is None
     connector = mdm_connector or MDMConnector()
@@ -123,6 +137,12 @@ async def dispatch_catalog_command(
                 phone_number=params.get("phone_number"), footnote=params.get("footnote"),
             ),
             "disable_lost_mode": lambda: connector.disable_lost_mode(device.udid),
+            # Routed through ddm_manager (not a bare DeclarativeManagement
+            # command) so the tokens are front-loaded and the device's
+            # ddm_enabled_at / ddm_last_published_token bookkeeping stays
+            # correct. The Task created below (type "ddm_sync") is completed/
+            # failed by the webhook like any other command.
+            "ddm_sync": lambda: _ddm_sync(device, connector),
         }
 
         handler = special_dispatch.get(command_type)

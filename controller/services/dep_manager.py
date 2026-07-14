@@ -31,7 +31,7 @@ def _now() -> datetime:
     return datetime.now(timezone.utc)
 
 
-# ── client construction ───────────────────────────────────────────────────────
+#  client construction 
 
 def build_client(dep_server: DepServer, transport: Optional[Transport] = None) -> Optional[DepClient]:
     """Decrypt the stored token and construct a DepClient, or None if unavailable.
@@ -52,7 +52,7 @@ def build_client(dep_server: DepServer, transport: Optional[Transport] = None) -
     return DepClient(token, base_url=base, user_agent=ua, transport=transport)
 
 
-# ── link lifecycle ────────────────────────────────────────────────────────────
+#  link lifecycle 
 
 async def begin_link(tenant: Tenant, name: str) -> DepServer:
     """Create (or reset) a DepServer and generate its PKI keypair. Returns the row
@@ -173,7 +173,7 @@ async def remove(dep_server: DepServer) -> None:
     await dep_server.delete()
 
 
-# ── device sync ───────────────────────────────────────────────────────────────
+#  device sync 
 
 async def sync_devices(dep_server: DepServer, transport: Optional[Transport] = None) -> Dict[str, Any]:
     """Delta-sync assigned devices from Apple into local placeholders.
@@ -356,7 +356,7 @@ async def _finish_sync(dep_server: DepServer, summary: Dict[str, Any],
     return summary
 
 
-# ── enrollment profiles ───────────────────────────────────────────────────────
+#  enrollment profiles 
 
 def _load_profile_yaml(tenant_id: str, profile_id: str) -> Optional[Dict[str, Any]]:
     profiles = tenant_config._load(str(tenant_id), "profiles.yaml").get("profiles", [])

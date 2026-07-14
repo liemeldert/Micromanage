@@ -39,7 +39,7 @@ async def main():
     admin_user = await User.create(tenant=tenant, email="admin@t1", role="admin")
     admin = Principal(tenant=tenant, user=admin_user, email="admin@t1", role="admin")
 
-    # ── 1. record_audit writes a tenant-scoped row with the actor stamped.
+    #  1. record_audit writes a tenant-scoped row with the actor stamped.
     await record_audit(
         admin,
         "user.create",
@@ -62,7 +62,7 @@ async def main():
             r.detail.get("password_set") is True and "password" not in r.detail,
         )
 
-    # ── 2. The list endpoint is admin-only + tenant-scoped.
+    #  2. The list endpoint is admin-only + tenant-scoped.
     other_tenant = await Tenant.create(id="t2", name="Tenant Two")
     other_admin_user = await User.create(tenant=other_tenant, email="admin@t2", role="admin")
     other_admin = Principal(tenant=other_tenant, user=other_admin_user, email="admin@t2", role="admin")
@@ -100,7 +100,7 @@ async def main():
     res_actor = await list_audit_log(skip=0, limit=100, action=None, actor="admin@t1", target_type=None, admin=admin)
     check("actor filter narrows to this actor's rows", res_actor["total"] == 3)
 
-    # ── 3. record_audit is best-effort: a write failure must NOT propagate.
+    #  3. record_audit is best-effort: a write failure must NOT propagate.
     before = await AuditLog.all().count()
 
     async def _boom(*a, **k):

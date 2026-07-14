@@ -42,6 +42,14 @@ _AUX_DDL = [
     'ALTER TABLE "flow_runs" ADD COLUMN IF NOT EXISTS "event_kind" VARCHAR(20) NULL',
     'CREATE INDEX IF NOT EXISTS "idx_flowruns_dev_start_event" '
     'ON "flow_runs" (device_id, start_node, event_kind, started_at)',
+    # Declarative Device Management (services.ddm_manager).
+    'ALTER TABLE "tenants" ADD COLUMN IF NOT EXISTS "ddm_enabled" BOOLEAN NOT NULL DEFAULT FALSE',
+    'ALTER TABLE "devices" ADD COLUMN IF NOT EXISTS "ddm_enabled_at" TIMESTAMPTZ NULL',
+    'ALTER TABLE "devices" ADD COLUMN IF NOT EXISTS "ddm_last_sync_at" TIMESTAMPTZ NULL',
+    'ALTER TABLE "devices" ADD COLUMN IF NOT EXISTS "ddm_last_published_token" VARCHAR(64) NULL',
+    'ALTER TABLE "devices" ADD COLUMN IF NOT EXISTS "ddm_status" JSONB NOT NULL DEFAULT \'{}\'::jsonb',
+    'ALTER TABLE "devices" ADD COLUMN IF NOT EXISTS "ddm_declaration_status" JSONB NOT NULL DEFAULT \'{}\'::jsonb',
+    'ALTER TABLE "devices" ADD COLUMN IF NOT EXISTS "ddm_client_capabilities" JSONB NOT NULL DEFAULT \'{}\'::jsonb',
 ]
 
 

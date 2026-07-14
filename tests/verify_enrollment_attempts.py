@@ -39,7 +39,7 @@ async def main():
 
     handler = WebhookHandler()
 
-    # ── 1. no_tenant drop: no tenant resolvable (unknown/absent ?tenant hint,
+    #  1. no_tenant drop: no tenant resolvable (unknown/absent ?tenant hint,
     # no single-tenant fallback, no "default" tenant) -- return None, log with
     # tenant=None, requested id (if any) only in detail.
     dev = await handler._upsert_device(
@@ -61,7 +61,7 @@ async def main():
             a.detail.get("requested_tenant") == "victim-tenant" and a.tenant_id is None,
         )
 
-    # ── 1b. Dedup: a device stuck in a drop state re-hits this on every
+    #  1b. Dedup: a device stuck in a drop state re-hits this on every
     # check-in; it must UPDATE the single row (latest values + count), never
     # flood the table (an unbounded, externally-driven table is a DoS vector).
     await handler._upsert_device(
@@ -74,7 +74,7 @@ async def main():
         check("repeated drop increments the detail count", no_tenant_after[0].detail.get("count") == 2)
         check("repeated drop refreshes topic to the latest", no_tenant_after[0].topic == "mdm.TokenUpdate")
 
-    # ── 2. no_serial drop: a real tenant resolves (single-tenant install), but
+    #  2. no_serial drop: a real tenant resolves (single-tenant install), but
     # the check-in has no SerialNumber and the udid is unknown -- no-op, but
     # log with the RESOLVED tenant FK set (safe: it was actually looked up).
     tenant = await Tenant.create(id="t1", name="Tenant One")
@@ -92,7 +92,7 @@ async def main():
         check("no_serial attempt records the udid", a.udid == "UDID-NO-SERIAL")
         check("no_serial attempt records the topic", a.topic == "mdm.TokenUpdate")
 
-    # ── 3. Successful enroll: a real device is created/upserted -- no spurious
+    #  3. Successful enroll: a real device is created/upserted -- no spurious
     # EnrollmentAttempt row (only drops are logged).
     before = await EnrollmentAttempt.all().count()
     dev = await handler._upsert_device(
@@ -114,7 +114,7 @@ async def main():
     check("repeat check-in for a known device still resolves", dev2 is not None)
     check("repeat check-in for a known device logs no attempt", after2 == before2)
 
-    # ── 4. GET /api/v1/enrollment-attempts is tenant-scoped.
+    #  4. GET /api/v1/enrollment-attempts is tenant-scoped.
     other_tenant = await Tenant.create(id="t2", name="Tenant Two")
     await EnrollmentAttempt.create(tenant=other_tenant, outcome="no_serial", udid="OTHER-UDID")
 

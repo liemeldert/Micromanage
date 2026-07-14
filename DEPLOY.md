@@ -103,6 +103,24 @@ docker compose -f docker-compose.prod.yml exec step-ca \
 
 The Enrollment page shows exactly which of these values are still missing.
 
+## Declarative Device Management (DDM)
+
+DDM lets supported devices (iOS/iPadOS/tvOS 16+, macOS 13+, watchOS 10+) apply
+and enforce configuration autonomously and stream status back, instead of
+polling with MDMv1 commands. NanoMDM proxies the device's DDM check-ins to the
+controller via the `-dm "http://controller:8000/ddm/"` flag (trailing slash
+required) with `-dm-send-hmac-key` set to `WEBHOOK_SECRET` so the controller
+can authenticate the calls (`DDM_HMAC_SECRET` overrides the key if you want
+them separate).
+
+DDM is off until a tenant admin enables the tenant toggle; declarations are
+authored in the tenant's `declarations.yaml` (see the commented example in
+`yaml-configs/tenants/default/declarations.yaml`).
+
+Related to DDM, MDMv1 software-update commands stop working on the 27.0-era OSes. the
+`com.apple.configuration.softwareupdate.enforcement.specific` declaration is
+Apple's replacement for enforcing updates. 
+
 ## Image tags
 
 The GitHub Action publishes:

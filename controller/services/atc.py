@@ -56,11 +56,12 @@ _SUPERSEDE_EVENTS = frozenset({"enroll_dep", "enroll_profile"})
 
 # Signals a wait_for node resumes on that need no reference (any occurrence for
 # the device satisfies them). The rest (profile_installed / app_installed /
-# command_ack) match against what the run itself queued (context['expected']).
-_REFLESS_SIGNALS = frozenset({"device_info", "checkin"})
+# command_ack / declaration_applied) match against what the run itself queued
+# (context['expected']).
+_REFLESS_SIGNALS = frozenset({"device_info", "checkin", "ddm_status"})
 
 
-# ── Loading + hashing ────────────────────────────────────────────────────────
+#  Loading + hashing 
 
 def _load_flow(tenant_id: str) -> Optional[Dict[str, Any]]:
     """The single flow from a tenant's flows.yaml (None if absent/malformed),
@@ -118,7 +119,7 @@ def _int(value: Any, default: int = 0) -> int:
         return default
 
 
-# ── Entry points ─────────────────────────────────────────────────────────────
+#  Entry points 
 
 async def _has_active_run(device_id: Any, start_id: str) -> bool:
     """Is a run from this (device, start) already running/waiting? Guards
@@ -410,7 +411,7 @@ async def sweep_scheduled_starts(tenant: Tenant,
     return launched
 
 
-# ── Execution ────────────────────────────────────────────────────────────────
+#  Execution 
 
 async def _advance(run: FlowRun, device: Device) -> None:
     """Execute forward from ``run.current_node`` until the run parks (wait_for),
@@ -501,6 +502,9 @@ async def _execute_node(run: FlowRun, device: Device, node: Dict[str, Any]) -> O
     if ntype == "release_device":
         await _release_device(run, device)
         return node.get("next")
+    if ntype == "sync_declarations":
+        await _sync_declarations(run, device)
+        return node.get("next")
     if ntype == "branch":
         cond = params.get("condition") or {}
         result = evaluate_condition(device, cond, list(device.groups or []))
@@ -511,7 +515,7 @@ async def _execute_node(run: FlowRun, device: Device, node: Dict[str, Any]) -> O
     raise ValueError(f"unknown node type: {ntype}")
 
 
-# ── Node side effects ────────────────────────────────────────────────────────
+#  Node side effects 
 
 async def _apply_tags(run: FlowRun, device: Device, tags: List[str], *, add: bool) -> None:
     """Additive/idempotent tag write (mirrors the manual tag endpoint), then
@@ -717,6 +721,47 @@ async def _send_command(run: FlowRun, device: Device, command: Any, params: Dict
         logger.warning("ATC: send_command %s rejected in run %s: %s", command, run.id, exc)
 
 
+async def _sync_declarations(run: FlowRun, device: Device) -> None:
+    """Queue a DDM DeclarativeManagement sync for the device.
+
+    A DDM-disabled tenant or an unsupported device is a skipped timeline note,
+    never a run failure -- a mixed fleet shares one flow. Like send_command, the
+    enqueue is awaited inline (it is a single NanoMDM call)."""
+    from controller.services import ddm_manager
+
+    tenant = await Tenant.get_or_none(id=device.tenant_id)
+    if tenant is None:
+        return
+    if not tenant.ddm_enabled or device.enrollment_state != "enrolled" \
+            or not device.udid or not ddm_manager.device_supports_ddm(device):
+        _timeline(run, run.current_node,
+                  "sync_declarations: DDM disabled or unsupported; skipped")
+        return
+    try:
+        queued = await ddm_manager.sync_device(device, reason="flow")
+    except Exception as exc:
+        _timeline(run, run.current_node,
+                  f"sync_declarations: sync failed ({exc}); continuing")
+        logger.warning("ATC: sync_declarations failed in run %s: %s", run.id, exc)
+        return
+    # Expect the yaml-authored declarations (bare ids) so a following
+    # wait_for(declaration_applied) resolves; with none scoped the expectation
+    # stays empty and such a wait is vacuously satisfied.
+    try:
+        declarations = await ddm_manager.compute_device_declarations(device, tenant)
+        refs = [d["Identifier"][len("mm.cfg."):] for d in declarations
+                if d["Identifier"].startswith("mm.cfg.")
+                and d["Identifier"] != "mm.cfg.status-subscriptions"]
+        if refs:
+            _expect(run, "declaration_applied", refs)
+    except Exception:
+        logger.exception("ATC: computing declaration refs failed for %s",
+                         device.serial_number)
+    _timeline(run, run.current_node,
+              "sync_declarations: sync queued" if queued
+              else "sync_declarations: already in sync")
+
+
 async def _release_device(run: FlowRun, device: Device) -> None:
     """Send DeviceConfigured to release an ADE device from Setup Assistant.
 
@@ -775,7 +820,7 @@ async def _push_device_configured(device: Device, user: str) -> None:
         await connector.close()
 
 
-# ── Human decision gate + Dispatcher alerts ──────────────────────────────────
+#  Human decision gate + Dispatcher alerts 
 
 def _gate_options(node: Dict[str, Any]) -> List[Dict[str, str]]:
     """The validated decision options for a manual_gate: [{label, edge}], keeping
@@ -1000,12 +1045,21 @@ async def _wait_already_satisfied(run: FlowRun, device: Device, node: Dict[str, 
             return await Task.filter(
                 id__in=expected, status__in=["completed", "failed"]
             ).exists()
+        if signal == "declaration_applied":
+            # The device may have reported the declaration active before the
+            # run parked (a fast sync); check the stored declaration status.
+            reported = getattr(device, "ddm_declaration_status", None) or {}
+            for ref in expected:
+                state = reported.get(f"mm.cfg.{ref}") or reported.get(str(ref)) or {}
+                if state.get("active") and state.get("valid") == "valid":
+                    return True
+            return False
     except Exception:
         logger.exception("ATC: wait pre-check failed for signal %s", signal)
     return False
 
 
-# ── State transitions ────────────────────────────────────────────────────────
+#  State transitions 
 
 async def _park(run: FlowRun, node: Dict[str, Any]) -> None:
     params = node.get("params") or {}
@@ -1092,7 +1146,7 @@ async def _maybe_reconcile(run: FlowRun) -> None:
         logger.exception("ATC: scheduling reconcile failed for run %s", run.id)
 
 
-# ── Context helpers ──────────────────────────────────────────────────────────
+#  Context helpers 
 
 def _signal_satisfies(run: FlowRun, signal: str, ref: Optional[str]) -> bool:
     if signal in _REFLESS_SIGNALS:

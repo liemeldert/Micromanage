@@ -203,7 +203,7 @@ async def main():
         dev.installed_profiles = [p["id"] for p in desired]
         await dev.save(update_fields=["installed_apps", "installed_profiles"])
 
-    # ── Dispatcher: raise real alerts by running the engine ──────────────────
+    #  Dispatcher: raise real alerts by running the engine 
     for serial, dev in by_serial.items():
         if dev.enrollment_state == "enrolled":
             await dispatcher_svc.evaluate_device(dev, reason="seed")
@@ -218,7 +218,7 @@ async def main():
         fw.acknowledged_by = "admin@localhost.dev"
         await fw.save(update_fields=["status", "acknowledged_at", "acknowledged_by"])
 
-    # ── Tasks: a realistic mix for the Tasks page ────────────────────────────
+    #  Tasks: a realistic mix for the Tasks page 
     d1 = by_serial["C02FL1ABML85"]
     d4 = by_serial["DX3JK4GHIJ10"]
     d5 = by_serial["DX3LM5KLMN11"]
@@ -252,7 +252,7 @@ async def main():
         await Task.filter(id=task.id).update(
             created_at=t["started"], started_at=t["started"], completed_at=t["completed"])
 
-    # ── ATC flow runs (for the run viewer) ───────────────────────────────────
+    #  ATC flow runs (for the run viewer) 
     flows = {f["id"]: f for f in load("flows.yaml").get("flows", [])}
     flow = flows.get("standard-onboarding")
     if flow:
@@ -320,7 +320,7 @@ async def main():
                          (base3 + timedelta(seconds=3), "await-info", "waiting for device_info (timeout 60m)"),
                      ])})
 
-    # ── Final timestamp pass (bypass auto_now so 'last seen' looks realistic) ─
+    #  Final timestamp pass (bypass auto_now so 'last seen' looks realistic) 
     for dev_id, (seen, polled, enrolled_at) in ts_updates.items():
         fields = {"last_polled_at": polled, "enrollment_date": enrolled_at}
         if seen is not None:
@@ -329,7 +329,7 @@ async def main():
 
     # Let the fire-and-forget (SSRF-blocked) lost-mode webhook settle, then report.
     await asyncio.sleep(0.3)
-    print("── seed complete ──")
+    print(" seed complete ")
     for M in (Device, AppDeployment, ProfileDeployment, Task, Alert, FlowRun):
         print(f"  {M.__name__:18} {await M.filter(tenant=tenant).count()}")
     print("  alerts by severity:")

@@ -266,6 +266,21 @@ class MDMConnector:
         logger.info(f"Queued DeviceConfigured (release from Setup Assistant) for {device_udid}: {result}")
         return result
 
+    async def declarative_management(self, device_udid: str,
+                                     tokens_json: Optional[bytes] = None) -> Dict[str, Any]:
+        """Enable / resynchronize Declarative Device Management on a device.
+
+        ``tokens_json`` (the tokens-endpoint JSON, front-loaded as plist <data>)
+        lets the device skip one round-trip; the actual sync happens against the
+        DDM check-in endpoints (controller/api/ddm.py via NanoMDM's -dm proxy).
+        """
+        command_dict = {'Data': tokens_json} if tokens_json else {}
+        command_plist, command_uuid = self._create_command_plist('DeclarativeManagement', command_dict)
+        result = await self.enqueue_command(device_udid, command_plist, command_uuid=command_uuid)
+
+        logger.info(f"Queued DeclarativeManagement for {device_udid}: {result}")
+        return result
+
     async def get_installed_apps(self, device_udid: str) -> Dict[str, Any]:
         """Get list of installed applications"""
         command_plist, command_uuid = self._create_command_plist('InstalledApplicationList')

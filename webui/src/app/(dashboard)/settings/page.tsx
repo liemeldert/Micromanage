@@ -80,6 +80,7 @@ export default function SettingsPage() {
   // (re)loaded and the admin has no unsaved edits in flight.
   const [nameDraft, setNameDraft] = useState("");
   const [depDraft, setDepDraft] = useState(false);
+  const [ddmDraft, setDdmDraft] = useState(false);
   const [s3Draft, setS3Draft] = useState<S3FormState>(EMPTY_S3_FORM);
   // Renewal reminders (manual-entry MVP): plain "YYYY-MM-DD", matching what a
   // native <input type="date"> reads/writes. Empty string = leave unchanged
@@ -103,6 +104,7 @@ export default function SettingsPage() {
       if (!tenantDirtyRef.current) {
         setNameDraft(t.name ?? "");
         setDepDraft(!!t.dep_enabled);
+        setDdmDraft(!!t.ddm_enabled);
         const cfg = (t.s3_config ?? {}) as Record<string, unknown>;
         setS3Draft({
           bucket: typeof cfg.bucket === "string" ? cfg.bucket : "",
@@ -159,6 +161,7 @@ export default function SettingsPage() {
       const body: Parameters<typeof api.updateTenant>[1] = {};
       if (nameDraft.trim() !== (tenant.name ?? "")) body.name = nameDraft.trim();
       if (depDraft !== !!tenant.dep_enabled) body.dep_enabled = depDraft;
+      if (ddmDraft !== !!tenant.ddm_enabled) body.ddm_enabled = ddmDraft;
       // Renewal reminder dates: only send when changed from the loaded value.
       // An emptied input is NOT sent -- the update endpoint has no way to
       // clear a date, so silently reverting to "unchanged" is the honest
@@ -282,6 +285,12 @@ export default function SettingsPage() {
                 {tenant?.dep_enabled ? "Yes" : "No"}
               </Badge>
             </Group>
+            <Group gap="xs">
+              <Text fz="sm" c="dimmed" w={120}>DDM enabled</Text>
+              <Badge size="sm" variant="light" color={tenant?.ddm_enabled ? "teal" : "gray"}>
+                {tenant?.ddm_enabled ? "Yes" : "No"}
+              </Badge>
+            </Group>
           </Stack>
         ) : (
           <Stack gap="md">
@@ -303,6 +312,21 @@ export default function SettingsPage() {
                 setTenantDirty(true);
               }}
             />
+
+            <Switch
+              label="Declarative Device Management (DDM) enabled"
+              description="Apple's declarative configuration channel -- devices evaluate and enforce declarations natively, even offline."
+              checked={ddmDraft}
+              onChange={(e) => {
+                setDdmDraft(e.currentTarget.checked);
+                setTenantDirty(true);
+              }}
+            />
+            {ddmDraft && !tenant?.ddm_enabled && (
+              <Alert color="orange" variant="light" icon={<IconInfoCircle size={16} />} py={6}>
+                Enabling queues a declarative sync to all supported devices.
+              </Alert>
+            )}
 
             <Divider
               label={

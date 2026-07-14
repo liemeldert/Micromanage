@@ -115,7 +115,7 @@ export default function GroupsPage() {
     [devices],
   );
 
-  // ── Naming template (optional per-group) ──
+  //  Naming template (optional per-group) 
   const namingTemplate = draft.device_naming?.template ?? "";
   const applyOnEnroll = draft.device_naming?.apply_on_enroll ?? false;
   const setNaming = (patch: Partial<{ template: string; apply_on_enroll: boolean }>) =>

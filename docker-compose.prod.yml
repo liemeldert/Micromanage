@@ -106,6 +106,8 @@ services:
       -intermediate /stepca/certs/intermediate_ca.crt
       -api "${NANOMDM_API_KEY}"
       -webhook-url "http://controller:8000/webhook/mdm?secret=${WEBHOOK_SECRET:?set WEBHOOK_SECRET}"
+      -dm "http://controller:8000/ddm/"
+      -dm-send-hmac-key "${WEBHOOK_SECRET:?set WEBHOOK_SECRET}"
       -debug="${NANOMDM_DEBUG:-false}"
     restart: unless-stopped
 

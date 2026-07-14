@@ -71,7 +71,7 @@ async function request<T>(
 // Config documents editable via the validated PUT (+ version history). "config"
 // is readable but not editable (it embeds secrets). Kept in sync with the
 // controller allow-list (controller/api/main.py).
-export type EditableConfigType = "groups" | "apps" | "profiles" | "tags" | "flows" | "dispatcher";
+export type EditableConfigType = "groups" | "apps" | "profiles" | "tags" | "flows" | "dispatcher" | "declarations";
 export type ReadableConfigType = EditableConfigType | "config";
 
 export const api = {
@@ -340,7 +340,7 @@ export const api = {
     return request<{ commands: CatalogCommand[] }>("/api/v1/commands/catalog", token);
   },
 
-  // ── ATC flows ──────────────────────────────────────────────────────────────
+  //  ATC flows 
   // Node palette + wait-signal registry -- drives the visual editor data-driven.
   getFlowStepCatalog(token: string) {
     return request<FlowStepCatalog>("/api/v1/flows/step-catalog", token);
@@ -371,7 +371,7 @@ export const api = {
     });
   },
 
-  // ── Dispatcher (compliance) ─────────────────────────────────────────────────
+  //  Dispatcher (compliance) 
   getDispatcherCheckCatalog(token: string) {
     return request<{ checks: DispatcherCheckSpec[] }>("/api/v1/dispatcher/check-catalog", token);
   },
@@ -449,6 +449,9 @@ export const api = {
       allowed_users?: string[];
       s3_config?: Record<string, unknown>;
       dep_enabled?: boolean;
+      // Declarative Device Management (DDM). Enabling queues a declarative
+      // sync to every supported device on the next reconcile.
+      ddm_enabled?: boolean;
       is_active?: boolean;
       // Renewal reminders (manual-entry MVP). "YYYY-MM-DD" or a full ISO
       // datetime; omitted leaves the stored value unchanged (there is no
@@ -547,7 +550,7 @@ export const api = {
     );
   },
 
-  // ── Automated Device Enrollment (ADE/DEP) + ABM/ASM ──────────────────────
+  //  Automated Device Enrollment (ADE/DEP) + ABM/ASM 
   listDepServers(token: string) {
     return request<{ servers: DepServer[] }>("/api/v1/dep/servers", token);
   },
@@ -629,13 +632,32 @@ export const api = {
     return request<{ skip_keys: DepSkipKey[] }>("/api/v1/dep/skip-keys", token);
   },
 
+  //  Declarative Device Management (DDM) 
+  // Per-device DDM state: desired vs. reported declarations, sync status, drift.
+  // include_payloads=1 additionally returns each desired declaration's raw payload.
+  getDeviceDdm(token: string, deviceId: string, includePayloads = false) {
+    const qs = includePayloads ? "?include_payloads=1" : "";
+    return request<DdmDeviceState>(`/api/v1/devices/${deviceId}/ddm${qs}`, token);
+  },
+  // Queue an immediate DDM sync for this device (admin).
+  syncDeviceDdm(token: string, deviceId: string) {
+    return request<{ queued: boolean }>(`/api/v1/devices/${deviceId}/ddm/sync`, token, {
+      method: "POST",
+    });
+  },
+  // Declarations catalog for the Declarations page (mirrors the declarations.yaml
+  // document, one row per declaration with its scope summary).
+  listDeclarations(token: string) {
+    return request<{ declarations: DeclarationSummary[] }>("/api/v1/declarations", token);
+  },
+
   // Health
   health() {
     return request<{ status: string }>("/api/v1/health", undefined);
   },
 };
 
-// ── Types ────────────────────────────────────────────────────────────────────
+//  Types 
 
 export interface DiscoveredTenant {
   tenant_id: string;
@@ -791,8 +813,8 @@ export interface EnrollmentAttempt {
   created_at: string | null;
 }
 
-// ── ADE/DEP + ABM/ASM. Mirror DepServer.to_dict() (controller/models/tenant.py)
-// and controller/api/dep.py. Secret token/key material is NEVER present. ─────
+//  ADE/DEP + ABM/ASM. Mirror DepServer.to_dict() (controller/models/tenant.py)
+// and controller/api/dep.py. Secret token/key material is NEVER present. 
 export type DepServerStatus = "unlinked" | "awaiting_token" | "linked" | "error";
 
 export interface DepServer {
@@ -868,6 +890,66 @@ export interface DepSkipKey {
   deprecated: boolean;
 }
 
+//  Declarative Device Management (DDM) 
+// Mirrors controller/services/ddm_manager.py's computed declaration set and
+// the device's DDM status report (StatusItems from the DeclarativeManagement
+// status channel). One declaration the controller wants the device to have.
+export interface DdmDeclarationDesired {
+  identifier: string;
+  type: string; // e.g. "com.apple.configuration.legacy"
+  server_token: string;
+  source: string; // where this declaration came from (profile bridge, native, etc.)
+  name: string;
+  // Only present when the caller passed include_payloads=1.
+  payload?: Record<string, unknown>;
+}
+
+// What the device itself reported back for one declaration (keyed by identifier
+// in DdmDeviceState.reported).
+export interface DdmDeclarationReported {
+  active: boolean;
+  valid: "unknown" | "invalid" | "valid";
+  "server-token"?: string;
+  reasons?: Array<{ code?: string; description?: string; details?: Record<string, unknown> }>;
+}
+
+export interface DdmDeviceState {
+  supported: boolean;
+  tenant_enabled: boolean;
+  enabled_at: string | null;
+  last_sync_at: string | null;
+  last_published_token: string | null;
+  desired: DdmDeclarationDesired[];
+  reported: Record<string, DdmDeclarationReported>;
+  // Nested/dot-path status facts (StatusItems), rendered data-driven like
+  // Device.attributes.
+  status_items: Record<string, unknown>;
+  client_capabilities: Record<string, unknown>;
+  // Identifiers present in `desired` but missing/inactive/invalid in `reported`.
+  drift: string[];
+}
+
+// One row on the Declarations page. Mirrors DeclarationItem (declarations.yaml,
+// controller/utils/yaml_validator.py) -- id, type, and the same scoping fields
+// as a Profile (groups/conditions/include-exclude/rollout) -- summarized by
+// GET /api/v1/declarations. Scope details are summarized server-side into the
+// `scope` object; counts stand in for the raw condition/cherry-pick lists.
+export interface DeclarationSummary {
+  id: string;
+  name: string;
+  type: string;
+  description?: string;
+  scope?: {
+    platforms?: string[];
+    groups?: string[];
+    conditions?: number;
+    include_devices?: number;
+    exclude_devices?: number;
+    rollout?: boolean;
+  };
+  scoped_count?: number;
+}
+
 // An admin action recorded through the console. Mirrors AuditLog.to_dict()
 // (controller/models/tenant.py). detail carries only non-secret context.
 export interface AuditLogEntry {
@@ -889,6 +971,10 @@ export interface TenantInfo {
   s3_config?: Record<string, unknown>;
   auth_provider?: string;
   dep_enabled: boolean;
+  // Declarative Device Management (DDM). enabled_at is null until the tenant
+  // has ever turned it on.
+  ddm_enabled: boolean;
+  ddm_enabled_at?: string | null;
   created_at: string;
   is_active: boolean;
   // Admin-entered renewal reminders (manual-entry MVP).
@@ -909,7 +995,7 @@ export interface User {
   external_id: string | null;
 }
 
-// ── ATC flow types ─────────────────────────────────────────────────────────
+//  ATC flow types 
 
 export interface FlowNodeParamSpec {
   name: string;
@@ -979,7 +1065,7 @@ export interface FlowRunDetail extends FlowRunSummary {
   flow: FlowDoc | null;
 }
 
-// ── flows.yaml document shape (authored by the visual editor) ──────────────
+//  flows.yaml document shape (authored by the visual editor) 
 
 export interface FlowNode {
   id: string;
@@ -1009,7 +1095,7 @@ export interface FlowsConfig {
   flow: FlowDoc;
 }
 
-// ── Dispatcher (compliance) types ──────────────────────────────────────────
+//  Dispatcher (compliance) types 
 
 export interface DispatcherCheckParamSpec {
   name: string;

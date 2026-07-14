@@ -122,7 +122,7 @@ export function blankPayload(m: PayloadManifest): Record<string, unknown> {
   return out;
 }
 
-// ── Enrollment (Automated Device Enrollment / DEP) manifest ───────────────────
+//  Enrollment (Automated Device Enrollment / DEP) manifest 
 
 // Setup Assistant panes that can be skipped (skip_setup_items). Mirrors the
 // controller's skip-keys registry (controller/services/skip_keys.py, itself from

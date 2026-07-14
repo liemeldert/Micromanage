@@ -316,7 +316,7 @@ export function DepServerPanel({
 
   return (
     <Stack gap="lg">
-      {/* ── Connection status ──────────────────────────────────────────── */}
+      {/*  Connection status  */}
       <Card withBorder radius="md" p="lg">
         <Group justify="space-between" align="flex-start">
           <Stack gap={4}>
@@ -405,7 +405,7 @@ export function DepServerPanel({
         </Text>
       </Card>
 
-      {/* ── Enrollment profiles ────────────────────────────────────────── */}
+      {/*  Enrollment profiles  */}
       <Card withBorder radius="md" p="lg">
         <Group justify="space-between" mb="sm">
           <Title order={5}>Enrollment profiles</Title>
@@ -513,7 +513,7 @@ export function DepServerPanel({
         </Text>
       </Card>
 
-      {/* ── Assigned devices ───────────────────────────────────────────── */}
+      {/*  Assigned devices  */}
       <Card withBorder radius="md" p="lg">
         <Group justify="space-between" mb="sm">
           <Title order={5}>Devices ({devices.length})</Title>

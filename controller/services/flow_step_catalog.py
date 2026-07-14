@@ -45,6 +45,13 @@ WAIT_SIGNALS: List[Dict[str, str]] = [
                     "acknowledges acceptance, not completion."},
     {"value": "command_ack", "label": "A command is acknowledged",
      "description": "A send_command step's command was acknowledged by the device."},
+    {"value": "ddm_status", "label": "A DDM status report arrives",
+     "description": "The device delivers a Declarative Device Management status "
+                    "report (any content)."},
+    {"value": "declaration_applied", "label": "A declaration is applied",
+     "description": "A declaration a sync_declarations step queued is reported "
+                    "active and valid. Refs are the declaration's yaml id from "
+                    "declarations.yaml."},
 ]
 
 _WAIT_SIGNAL_VALUES = frozenset(s["value"] for s in WAIT_SIGNALS)
@@ -162,6 +169,18 @@ FLOW_STEP_CATALOG: List[Dict[str, Any]] = [
         "params": [
             {"name": "app_ids", "label": "Apps", "type": "app_ids", "required": True},
         ],
+    },
+    {
+        "type": "sync_declarations",
+        "label": "Sync declarations",
+        "description": "Queue a DeclarativeManagement sync so the device pulls its "
+                       "current declaration set (DDM). When the tenant has DDM "
+                       "disabled or the device does not support it, the step is "
+                       "skipped with a note -- the run continues either way.",
+        "category": "Deploy",
+        "waits": False,
+        "edges": ["next"],
+        "params": [],
     },
     {
         "type": "send_command",

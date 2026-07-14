@@ -18,7 +18,7 @@ import { IconArrowBackUp, IconHistory } from "@tabler/icons-react";
 import { api, type ConfigVersion } from "../../../lib/api";
 import { useAuth } from "../../../lib/auth-context";
 
-type EditableType = "groups" | "apps" | "profiles";
+type EditableType = "groups" | "apps" | "profiles" | "declarations";
 
 /**
  * History drawer for a config document: lists prior versions (newest first),

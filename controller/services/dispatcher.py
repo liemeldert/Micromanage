@@ -107,7 +107,7 @@ def _action_key(action: Dict[str, Any]) -> str:
                       sort_keys=True, default=str)
 
 
-# ── Entry points ─────────────────────────────────────────────────────────────
+#  Entry points 
 
 async def evaluate_device(device: Device, reason: str = "event") -> None:
     """Evaluate every enabled rule for a device and reconcile its alerts.
@@ -175,13 +175,24 @@ async def sweep_all_tenants() -> None:
             logger.exception("dispatcher: sweep failed for tenant %s", tenant.id)
 
 
-# ── Context (drift signal, read from deployment tables -- no new queries) ─────
+#  Context (drift signal, read from deployment tables -- no new queries) 
 
 async def _build_ctx(device: Device, tenant: Tenant, rules: List[Dict[str, Any]]) -> Dict[str, Any]:
     ctx: Dict[str, Any] = {}
     check_types = {
         (r.get("check") or {}).get("type") for r in rules if isinstance(r, dict)
     }
+    # DDM desired set: in-memory computation (YAML + device row, no device
+    # queries), only when a declaration_drift rule exists AND the device runs
+    # DDM (the check treats everything else as compliant anyway).
+    if "declaration_drift" in check_types and getattr(device, "ddm_enabled_at", None):
+        try:
+            from controller.services import ddm_manager
+            ctx["ddm_desired"] = await ddm_manager.compute_device_declarations(device, tenant)
+        except Exception:
+            logger.exception("dispatcher: DDM desired-set computation failed for %s",
+                             device.serial_number)
+            ctx["ddm_desired"] = []
     # Only touch the deployment tables when a rule actually reads them, so the
     # common case (security/posture checks) adds no DB work on the webhook path.
     if not (check_types & {"missing_profile", "config_drift"}):
@@ -217,7 +228,7 @@ async def _build_ctx(device: Device, tenant: Tenant, rules: List[Dict[str, Any]]
     return ctx
 
 
-# ── Alert lifecycle ──────────────────────────────────────────────────────────
+#  Alert lifecycle 
 
 async def _active_alert(device: Device, rule_id: str) -> Optional[Alert]:
     """The single active (non-resolved) alert for a (device, rule).
@@ -371,7 +382,7 @@ async def _resolve_alert(alert: Alert, device: Device, reason: str) -> None:
     await alert.save(update_fields=["status", "resolved_at", "detail"])
 
 
-# ── Actions ──────────────────────────────────────────────────────────────────
+#  Actions 
 
 async def _fire_actions(tenant: Tenant, device: Device, rule: Dict[str, Any],
                        alert: Alert, master_on: bool, webhooks: Dict[str, Any]) -> None:
@@ -565,7 +576,7 @@ async def _queue_app_installs(tenant: Tenant, device: Device,
     return queued
 
 
-# ── Tags (additive/idempotent, mirrors the manual endpoint) ──────────────────
+#  Tags (additive/idempotent, mirrors the manual endpoint) 
 
 async def _apply_tags(device: Device, tags: List[str], *, add: bool) -> None:
     tags = _list(tags)
@@ -614,7 +625,7 @@ def _spawn_reconcile(tenant_id: str) -> None:
         logger.exception("dispatcher: scheduling reconcile failed for %s", tenant_id)
 
 
-# ── Webhook notifications (signed, best-effort, bounded retry) ────────────────
+#  Webhook notifications (signed, best-effort, bounded retry) 
 
 def _redact_action_params(action: Dict[str, Any]) -> Dict[str, Any]:
     """A safe copy of a send_command action's params for the alert ledger: drop
@@ -724,7 +735,7 @@ async def _deliver_webhook(url: str, secret: Optional[str], payload: Dict[str, A
                  rule_id, WEBHOOK_MAX_ATTEMPTS)
 
 
-# ── Admin-approved destructive remediation (from the API) ────────────────────
+#  Admin-approved destructive remediation (from the API) 
 
 async def approve_remediation(alert: Alert, action_key: str, approver: str) -> Dict[str, Any]:
     """Execute a queued destructive remediation after an admin approves it.

@@ -106,7 +106,7 @@ export function AppWizard({
 
   const effectiveAppId = addVersion ? existingApp!.id : id;
 
-  // ── per-step validity ──────────────────────────────────────────────────────
+  //  per-step validity 
   const identityValid =
     SLUG_RE.test(id) && !takenIds.includes(id) && name.trim().length > 0 && BUNDLE_ID_RE.test(bundleId);
   const packageValid = version.trim().length > 0 && s3Key.trim().length > 0 && SHA256_RE.test(sha256);

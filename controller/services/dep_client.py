@@ -131,7 +131,7 @@ class DepClient:
         self._transport = transport or _httpx_transport
         self._session_token: Optional[str] = None
 
-    # ── auth ────────────────────────────────────────────────────────────────
+    #  auth 
     async def _authenticate(self) -> None:
         url = f"{self._base}/session"
         headers = {
@@ -153,7 +153,7 @@ class DepClient:
         except Exception:
             raise DepAuthError("BAD_SESSION_RESPONSE", "No auth_session_token", status)
 
-    # ── request core ────────────────────────────────────────────────────────
+    #  request core 
     async def _request(
         self, method: str, path: str, body: Optional[Dict[str, Any]] = None
     ) -> Dict[str, Any]:
@@ -215,7 +215,7 @@ class DepClient:
         token = text.split()[0].strip('".,{}')
         return token[:60] or f"HTTP_{status}"
 
-    # ── endpoints ─────────────────────────────────────────────────────────────
+    #  endpoints 
     async def account(self) -> Dict[str, Any]:
         return await self._request("GET", "/account")
 

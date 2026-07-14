@@ -54,7 +54,7 @@ async def _get_server(server_id: str, admin: Principal) -> DepServer:
     return server
 
 
-# ── link lifecycle ────────────────────────────────────────────────────────────
+#  link lifecycle 
 
 @router.get("/servers")
 async def list_servers(admin: Principal = Depends(require_admin)) -> Dict[str, Any]:
@@ -161,7 +161,7 @@ async def unlink_server(server_id: str,
     return {"status": "unlinked"}
 
 
-# ── device sync ───────────────────────────────────────────────────────────────
+#  device sync 
 
 @router.post("/servers/{server_id}/sync")
 async def sync_now(server_id: str,
@@ -197,7 +197,7 @@ async def list_dep_devices(server_id: str,
     ]}
 
 
-# ── enrollment profiles ───────────────────────────────────────────────────────
+#  enrollment profiles 
 
 @router.post("/servers/{server_id}/default-profile")
 async def set_default_profile(server_id: str, body: DefaultProfileBody,
@@ -286,7 +286,7 @@ async def get_skip_keys(admin: Principal = Depends(require_admin)) -> Dict[str, 
     return {"skip_keys": skip_keys.catalog()}
 
 
-# ── device-facing ADE endpoint (UNAUTHENTICATED) ──────────────────────────────
+#  device-facing ADE endpoint (UNAUTHENTICATED) 
 
 @router.post("/enroll/{tenant_id}/{token}")
 async def ade_enroll(tenant_id: str, token: str, request: Request) -> Response:

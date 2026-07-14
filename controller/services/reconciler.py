@@ -65,7 +65,8 @@ async def _active_task_keys(tenant: Tenant) -> set:
 
     Key shapes: (device_id, 'profile_install', profile_id),
                 (device_id, 'profile_remove', profile_id),
-                (device_id, 'app_install', app_id, version).
+                (device_id, 'app_install', app_id, version),
+                (device_id, 'ddm_sync').
     """
     keys = set()
     active = await Task.filter(tenant=tenant, status__in=["pending", "running"]).all()
@@ -78,6 +79,8 @@ async def _active_task_keys(tenant: Tenant) -> set:
         elif t.type == "app_install" and details.get("app_info"):
             info = details["app_info"]
             keys.add((str(t.device_id), "app_install", info.get("app_id"), info.get("version")))
+        elif t.type == "ddm_sync":
+            keys.add((str(t.device_id), "ddm_sync"))
     return keys
 
 
@@ -139,7 +142,7 @@ async def reconcile_tenant(tenant: Tenant, yaml_base: Path) -> Dict[str, int]:
             )
 
     summary = {"profiles_queued": 0, "removals_queued": 0, "apps_queued": 0,
-               "tasks_timed_out": 0, "devices": 0, "errors": 0}
+               "ddm_syncs_queued": 0, "tasks_timed_out": 0, "devices": 0, "errors": 0}
 
     summary["tasks_timed_out"] = await _fail_timed_out_tasks(tenant)
 
@@ -165,7 +168,7 @@ async def reconcile_tenant(tenant: Tenant, yaml_base: Path) -> Dict[str, int]:
 
     for device in devices:
         try:
-            # ── Profiles: desired set ─────────────────────────────────────────
+            #  Profiles: desired set 
             # held_ids: scoped to this device but frozen by a gradual rollout
             # (wave not reached). Held profiles are DESIRED for removal purposes
             # -- never uninstalled -- but receive no install/update yet.
@@ -198,7 +201,7 @@ async def reconcile_tenant(tenant: Tenant, yaml_base: Path) -> Dict[str, int]:
                 active.add(key)
                 summary["profiles_queued"] += 1
 
-            # ── Profiles: remove what is installed but no longer desired ─────
+            #  Profiles: remove what is installed but no longer desired 
             deployments = await ProfileDeployment.filter(device=device).all()
             for deployment in deployments:
                 if deployment.profile_id in desired_ids:
@@ -222,7 +225,7 @@ async def reconcile_tenant(tenant: Tenant, yaml_base: Path) -> Dict[str, int]:
                 active.add(key)
                 summary["removals_queued"] += 1
 
-            # ── Apps ──────────────────────────────────────────────────────────
+            #  Apps 
             apps_to_install = await app_manager.evaluate_device_apps(
                 device, apps_config, groups_config
             )
@@ -250,12 +253,25 @@ async def reconcile_tenant(tenant: Tenant, yaml_base: Path) -> Dict[str, int]:
                 active.add(key)
                 summary["apps_queued"] += 1
 
+            #  DDM: re-sync declarations when the published token is stale 
+            # One path covers first enablement, declaration/profile edits,
+            # tag/group changes (the properties declaration re-tokens) and
+            # rollout wave progression -- sync_device no-ops when unchanged.
+            if tenant.ddm_enabled:
+                from controller.services import ddm_manager
+                ddm_key = (str(device.id), "ddm_sync")
+                if ddm_key not in active and ddm_manager.device_supports_ddm(device):
+                    if await ddm_manager.sync_device(device, reason="reconcile"):
+                        active.add(ddm_key)
+                        summary["ddm_syncs_queued"] += 1
+
         except Exception:
             summary["errors"] += 1
             logger.exception(
                 f"reconcile[{tenant.id}]: device {device.serial_number or device.udid} failed"
             )
 
-    if any(summary[k] for k in ("profiles_queued", "removals_queued", "apps_queued", "tasks_timed_out")):
+    if any(summary[k] for k in ("profiles_queued", "removals_queued", "apps_queued",
+                                "ddm_syncs_queued", "tasks_timed_out")):
         logger.info(f"reconcile[{tenant.id}]: {summary}")
     return summary

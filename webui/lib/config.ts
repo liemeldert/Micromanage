@@ -8,7 +8,7 @@ import yaml from "js-yaml";
 import { api, ApiError, type Device } from "./api";
 import { useAuth } from "./auth-context";
 
-// ── Schema types ─────────────────────────────────────────────────────────────
+//  Schema types 
 
 export type ConditionType =
   | "device_model"
@@ -121,7 +121,7 @@ export function profilePayloads(p: Profile): Record<string, unknown>[] {
   return [];
 }
 
-// ── Condition metadata (drives the visual builder) ───────────────────────────
+//  Condition metadata (drives the visual builder) 
 
 export type ValueKind =
   | "text" | "version" | "date" | "list" | "group" | "platform" | "tag" | "enrollment_source";
@@ -256,14 +256,14 @@ export function describeCondition(c: Condition): string {
   return `${conditionTypeMeta(c.type).label} ${pol} ${op} ${v}`;
 }
 
-// ── Validation helpers (mirror the backend validators) ───────────────────────
+//  Validation helpers (mirror the backend validators) 
 
 export const GROUP_NAME_RE = /^[a-zA-Z0-9-_]+$/;
 export const BUNDLE_ID_RE = /^[a-zA-Z0-9.-]+$/;
 export const SHA256_RE = /^[a-fA-F0-9]{64}$/;
 export const SLUG_RE = /^[a-zA-Z0-9._-]+$/;
 
-// ── Client-side group evaluation (for the "matches N devices" preview) ───────
+//  Client-side group evaluation (for the "matches N devices" preview) 
 // Best-effort mirror of group_manager.py; labelled as an estimate in the UI.
 
 function compareVersions(a: string, b: string): number {
@@ -478,7 +478,7 @@ export function rolloutCoverage(rollout: Rollout, now: Date = new Date()): numbe
   return Math.min(100, percent * (completed + 1));
 }
 
-// ── Naming templates ─────────────────────────────────────────────────────────
+//  Naming templates 
 // Device-state variables usable in naming templates. Mirrors the server registry
 // (controller/services/variables.py, GET /api/v1/naming/variables); kept inline
 // so the editor's live preview needs no round-trip, same pattern as CONDITION_TYPES.
@@ -566,7 +566,7 @@ export function devicePlatform(model: string | null | undefined): "iOS" | "macOS
   return "iOS";
 }
 
-// ── Config resource hook (load / save a single config type) ──────────────────
+//  Config resource hook (load / save a single config type) 
 
 type ConfigType = "groups" | "apps" | "profiles" | "tags" | "flows" | "dispatcher";
 

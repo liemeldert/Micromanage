@@ -74,7 +74,7 @@ BASE_FLOW = {
     "name": "Main flow",
     "enabled": True,
     "nodes": [
-        # ── DEP/ADE enrollment onboarding (Mac) ──────────────────────────────
+        #  DEP/ADE enrollment onboarding (Mac) 
         {"id": "s-dep", "type": "start",
          "params": {"kind": "enroll_dep", "match": {
              "conditions": [{"type": "platform", "operator": "in", "value": ["Mac"]}]}},
@@ -99,20 +99,20 @@ BASE_FLOW = {
         {"id": "dep-release", "type": "release_device", "next": "dep-end"},
         {"id": "dep-end", "type": "end"},
 
-        # ── OTA / manual enrollment ──────────────────────────────────────────
+        #  OTA / manual enrollment 
         {"id": "s-profile", "type": "start",
          "params": {"kind": "enroll_profile", "match": {}}, "next": "p-tag"},
         {"id": "p-tag", "type": "assign_tag", "params": {"tags": ["ota"]}, "next": "p-end"},
         {"id": "p-end", "type": "end"},
 
-        # ── Check-in trigger (parks so dedup is observable) ──────────────────
+        #  Check-in trigger (parks so dedup is observable) 
         {"id": "s-checkin", "type": "start",
          "params": {"kind": "checkin", "match": {}}, "next": "c-wait"},
         {"id": "c-wait", "type": "wait_for",
          "params": {"signal": "device_info", "timeout_minutes": 5}, "next": "c-end"},
         {"id": "c-end", "type": "end"},
 
-        # ── Scheduled interval (scoped to SCHED serials) ─────────────────────
+        #  Scheduled interval (scoped to SCHED serials) 
         {"id": "s-schedule", "type": "start",
          "params": {"kind": "schedule", "interval_minutes": 60, "match": {
              "conditions": [{"type": "serial_number", "operator": "in",
@@ -121,7 +121,7 @@ BASE_FLOW = {
         {"id": "sch-tag", "type": "assign_tag", "params": {"tags": ["swept"]}, "next": "sch-end"},
         {"id": "sch-end", "type": "end"},
 
-        # ── Human gate (manual-only) ─────────────────────────────────────────
+        #  Human gate (manual-only) 
         {"id": "s-gate", "type": "start",
          "params": {"kind": "enroll_profile", "match": {
              "conditions": [{"type": "serial_number", "operator": "in",
@@ -141,7 +141,7 @@ BASE_FLOW = {
         {"id": "g-cancel-end", "type": "end"},
         {"id": "g-end", "type": "end"},
 
-        # ── Ref-based wait (manual-only) ─────────────────────────────────────
+        #  Ref-based wait (manual-only) 
         {"id": "s-ref", "type": "start",
          "params": {"kind": "enroll_profile", "match": {
              "conditions": [{"type": "serial_number", "operator": "in",
@@ -154,7 +154,7 @@ BASE_FLOW = {
          "params": {"signal": "profile_installed", "timeout_minutes": 30}, "next": "r-end"},
         {"id": "r-end", "type": "end"},
 
-        # ── Two sequential ref waits (regression, manual-only) ───────────────
+        #  Two sequential ref waits (regression, manual-only) 
         {"id": "s-double", "type": "start",
          "params": {"kind": "enroll_profile", "match": {
              "conditions": [{"type": "serial_number", "operator": "in",
@@ -170,7 +170,7 @@ BASE_FLOW = {
          "params": {"signal": "profile_installed", "timeout_minutes": 30}, "next": "d-done"},
         {"id": "d-done", "type": "end"},
 
-        # ── Empty-expectation wait skip (manual-only) ────────────────────────
+        #  Empty-expectation wait skip (manual-only) 
         {"id": "s-standalone", "type": "start",
          "params": {"kind": "enroll_profile", "match": {
              "conditions": [{"type": "serial_number", "operator": "in",
@@ -233,8 +233,8 @@ async def main():
         return await Alert.filter(
             device_id=device.id, rule_id="atc:in-setup").exclude(status="resolved").first()
 
-    # ── 1) DEP enroll runs s-dep, applies tags/name/branch/install, parks; a
-    #      green in-setup alert opens ────────────────────────────────────────
+    #  1) DEP enroll runs s-dep, applies tags/name/branch/install, parks; a
+    #      green in-setup alert opens 
     print("1) enroll_dep on a Mac runs s-dep and parks; green in-setup alert opens")
     dev = await new_device("MAC-EU", "host-eu-1", dep=True)
     runs = await atc.start_flows_for_event(dev, "enroll_dep")
@@ -255,7 +255,7 @@ async def main():
           bool(a) and (a.detail or {}).get("kind") == "atc_in_setup"
           and (a.detail or {}).get("actions"))
 
-    # ── 2) device_info resumes -> release_device -> completes; alert resolves ──
+    #  2) device_info resumes -> release_device -> completes; alert resolves 
     print("2) device_info resumes the run through release_device to completion")
     await atc.advance_on_signal(str(dev.id), "device_info")
     await run.refresh_from_db()
@@ -263,7 +263,7 @@ async def main():
     check("release_device visited", "dep-release" in (run.context or {}).get("visited", []))
     check("in-setup alert resolved after release", await active_in_setup(dev) is None)
 
-    # ── 3) wait_for timeout follows on_timeout (degraded) ─────────────────────
+    #  3) wait_for timeout follows on_timeout (degraded) 
     print("3) wait_for timeout follows on_timeout")
     dev2 = await new_device("MAC-US", "host-us-1", dep=True)
     run2 = (await atc.start_flows_for_event(dev2, "enroll_dep"))[0]
@@ -278,7 +278,7 @@ async def main():
     check("timeout tag applied", "onboarding-timeout" in dev2.tags)
     check("completed after timeout path", run2.status == "completed")
 
-    # ── 4) DEP vs OTA dispatch: enroll_profile runs s-profile only ────────────
+    #  4) DEP vs OTA dispatch: enroll_profile runs s-profile only 
     print("4) enroll_profile runs the profile start (kind routing)")
     ota = await new_device("OTA-1", "host-ota")
     pruns = await atc.start_flows_for_event(ota, "enroll_profile")
@@ -286,13 +286,13 @@ async def main():
     check("one profile run started", len(pruns) == 1 and pruns[0].start_node == "s-profile")
     check("ota tag applied + completed", "ota" in ota.tags and pruns[0].status == "completed")
 
-    # ── 5) match scoping: a non-Mac device does not fire the Mac-scoped start ──
+    #  5) match scoping: a non-Mac device does not fire the Mac-scoped start 
     print("5) start match scope excludes out-of-scope devices")
     ipad = await new_device("IPAD-1", "host-ipad", dep=True, model="iPad13,8")
     ipad_runs = await atc.start_flows_for_event(ipad, "enroll_dep")
     check("Mac-scoped s-dep did not fire for an iPad", ipad_runs == [])
 
-    # ── 6) check-in dedup: a second check-in does not pile up a run ────────────
+    #  6) check-in dedup: a second check-in does not pile up a run 
     print("6) checkin start dedups while a run is active")
     cdev = await new_device("CHK-1", "host-chk")
     r1 = await atc.start_flows_for_event(cdev, "checkin")
@@ -303,7 +303,7 @@ async def main():
         device_id=cdev.id, start_node="s-checkin", status__in=["running", "waiting"]).count()
     check("exactly one active checkin run", active == 1)
 
-    # ── 7) scheduled interval: launch, then skip until the interval elapses ────
+    #  7) scheduled interval: launch, then skip until the interval elapses 
     print("7) scheduled start launches on interval, dedups within it")
     sdev = await new_device("SCHED-1", "host-sched")
     n1 = await atc.sweep_scheduled_starts(tenant, [sdev])
@@ -319,7 +319,7 @@ async def main():
     total_sched = await FlowRun.filter(device_id=sdev.id, start_node="s-schedule").count()
     check("two schedule runs recorded", total_sched == 2)
 
-    # ── 8) human gate: timeout -> manual_gate -> resume down chosen edge ───────
+    #  8) human gate: timeout -> manual_gate -> resume down chosen edge 
     print("8) wait_for timeout escalates to a manual_gate; admin decision resumes")
     gdev = await new_device("GATE-1", "host-gate")
     grun = await atc.start_run_from_start(gdev, "s-gate")
@@ -371,7 +371,7 @@ async def main():
     check("run failed on gate dismissal", grun2.status == "failed")
     _ = ga2
 
-    # ── 9) ref-based wait matches only the queued profile ref ─────────────────
+    #  9) ref-based wait matches only the queued profile ref 
     print("9) profile_installed wait matches only the queued profile ref")
     dev3 = await new_device("REF-1", "host-ref")
     run3 = await atc.start_run_from_start(dev3, "s-ref")
@@ -384,14 +384,14 @@ async def main():
     await run3.refresh_from_db()
     check("matching profile ref resumes to completion", run3.status == "completed")
 
-    # ── 10) empty-expectation ref wait is skipped, not hung ───────────────────
+    #  10) empty-expectation ref wait is skipped, not hung 
     print("10) a ref-based wait with nothing queued is skipped")
     dev6 = await new_device("STANDALONE-1", "host-sa")
     run6 = await atc.start_run_from_start(dev6, "s-standalone")
     await run6.refresh_from_db()
     check("standalone wait_for(app_installed) skipped -> completed", run6.status == "completed")
 
-    # ── 11) two sequential ref waits: stale ref must not satisfy the second ────
+    #  11) two sequential ref waits: stale ref must not satisfy the second 
     print("11) REGRESSION: second wait_for is not satisfied by a stale ref")
     dev7 = await new_device("DOUBLE-1", "host-dw")
     run7 = await atc.start_run_from_start(dev7, "s-double")
@@ -415,7 +415,7 @@ async def main():
     await run7.refresh_from_db()
     check("matching P2 resumes to completion", run7.status == "completed")
 
-    # ── 12) flow_hash pinning: a breaking edit can't corrupt an in-flight run ──
+    #  12) flow_hash pinning: a breaking edit can't corrupt an in-flight run 
     print("12) editing flows.yaml mid-run does not affect the pinned run")
     dev4 = await new_device("PIN-1", "host-eu-4", dep=True)
     run4 = (await atc.start_flows_for_event(dev4, "enroll_dep"))[0]
@@ -430,7 +430,7 @@ async def main():
     check("flow_hash unchanged", run4.flow_hash == original_hash)
     (tdir / "flows.yaml").write_text(yaml.safe_dump({"flow": BASE_FLOW}))
 
-    # ── 13) enroll supersede is scoped to the same start ──────────────────────
+    #  13) enroll supersede is scoped to the same start 
     print("13) re-enroll supersedes the prior run from the same start")
     dev5 = await new_device("RE-1", "host-eu-5", dep=True)
     ra = (await atc.start_flows_for_event(dev5, "enroll_dep"))[0]
@@ -442,7 +442,7 @@ async def main():
     check("prior run cancelled", ra.status == "cancelled")
     check("new run active + distinct", rb.id != ra.id and rb.status in ("waiting", "running", "completed"))
 
-    # ── 14) legacy multi-flow migration ───────────────────────────────────────
+    #  14) legacy multi-flow migration 
     print("14) legacy multi-flow flows.yaml migrates to a single flow")
     legacy = {"flows": [
         {"id": "legacy-a", "name": "A", "enabled": True, "priority": 10,
@@ -466,7 +466,7 @@ async def main():
     passthrough, _ = normalize_flow_document({"flow": BASE_FLOW})
     check("new-shape doc passes through unchanged", passthrough is BASE_FLOW)
 
-    # ── 15) flows.yaml validator ──────────────────────────────────────────────
+    #  15) flows.yaml validator 
     print("15) validator accepts the model flow and rejects malformed starts/gates")
 
     def validate_flow(doc):

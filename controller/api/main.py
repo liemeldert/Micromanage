@@ -45,9 +45,14 @@ app = FastAPI(title="MDM IAC API", version="1.0.0")
 logger = logging.getLogger(__name__)
 
 # Automated Device Enrollment (ADE/DEP) + ABM/ASM management + the device-facing
-# enrollment endpoint. See controller/api/dep.py, docs/specs/dep-ade-spec.md.
+# enrollment endpoint. See controller/api/dep.py
 from controller.api.dep import router as dep_router  # noqa: E402
 app.include_router(dep_router)
+
+# DDM legacy-profile bridge: the device-facing signed mobileconfig download
+# (the /ddm check-in endpoints themselves live on the webhook app for now)
+from controller.api.ddm import public_router as ddm_public_router  # noqa: E402
+app.include_router(ddm_public_router)
 
 # Base directory for per-tenant YAML config. Mirror the sync service
 # (controller/main.py), which honors YAML_CONFIG_PATH, so the API (writer) and the
@@ -60,14 +65,9 @@ def _tenant_dir(tenant_id: str) -> Path:
     """Filesystem config dir for a tenant."""
     return YAML_BASE / "tenants" / str(tenant_id)
 
-# Shared task manager so cancellation/state is visible across requests within
-# this process (a per-request instance made cancel a no-op).
+
 task_manager = TaskManager()
 
-# CORS: the browser talks to the controller only through the Next.js proxy
-# (same-origin), so cross-origin access should be tightly scoped. Configure
-# explicit origins via CORS_ALLOWED_ORIGINS (comma-separated); default to the
-# local dev web UI. Never "*" on a control-plane API.
 _cors_origins = [
     o.strip()
     for o in os.getenv("CORS_ALLOWED_ORIGINS", "http://localhost:3000").split(",")
@@ -106,8 +106,7 @@ def _restore_tenant_s3_secrets(
 ) -> Dict[str, Any]:
     """Before saving a tenant's S3 config, replace any secret the UI echoed back
     still redacted with the value currently stored, so an edit that never
-    revealed a credential can't overwrite it with the ``***redacted***``
-    sentinel (GET redacts every _SECRET_S3_KEYS value). Returns a new dict;
+    revealed a credential can't overwrite it with redacted. Returns a new dict;
     inputs are not mutated. The tenant analog of _restore_dispatcher_secrets."""
     stored = stored or {}
     result = dict(incoming or {})
@@ -120,8 +119,7 @@ def _restore_tenant_s3_secrets(
                 # rather than persist it as a live credential.
                 result.pop(key, None)
     return result
-# A Dispatcher webhook's url is itself a credential (e.g. a Slack incoming
-# webhook URL), so both url and secret are redacted from every API response.
+# A Dispatcher webhook's url is itself a credential so both url and secret are redacted from every API response.
 _SECRET_WEBHOOK_KEYS = ("url", "secret")
 
 
@@ -184,7 +182,7 @@ def _restore_dispatcher_secrets(tenant_id: str, config_data: Dict[str, Any]) -> 
 
 
 def _atomic_write_yaml(path: Path, data: Dict[str, Any]) -> None:
-    """Write YAML to ``path`` atomically (write temp + os.replace)."""
+    """Write YAML to path atomically (write temp + os.replace)."""
     tmp = path.with_suffix(path.suffix + ".tmp")
     with open(tmp, "w") as f:
         yaml.safe_dump(data, f, default_flow_style=False)
@@ -199,7 +197,7 @@ def _truthy(value: Any) -> bool:
 
 
 def _os_at_least(os_version: Optional[str], major: int) -> bool:
-    """True if the device OS major version is >= ``major`` (False if unparseable)."""
+    """True if the device OS major version is >= major (False if unparseable)."""
     from packaging import version
     try:
         return version.parse(str(os_version or "")).major >= major
@@ -247,6 +245,9 @@ class TenantUpdate(BaseModel):
     allowed_users: Optional[List[str]] = None
     s3_config: Optional[Dict[str, Any]] = None
     dep_enabled: Optional[bool] = None
+    # Declarative Device Management master switch (services.ddm_manager). The
+    # reconciler starts syncing supported devices once this is on.
+    ddm_enabled: Optional[bool] = None
     is_active: Optional[bool] = None
     # Tenant-default device-naming template applied at enrollment (services.naming):
     # {"template": "IT-{serial}", "apply_on_enroll": bool}. An empty dict clears it.
@@ -300,14 +301,14 @@ class DeviceFilter(BaseModel):
 async def login(request: LoginRequest, http_request: Request):
     """Authenticate a local user (email + password) and return a session token.
 
-    Tenants configured for an external provider (Clerk/OIDC) do not use this
+    Tenants configured for an external provider (OIDC) do not use this
     endpoint; their clients present a provider-issued token directly.
     """
     throttle_key = f"{request.tenant_id}:{request.user_email}"
     if not login_limiter.check(throttle_key):
         raise HTTPException(status_code=429, detail="Too many attempts; try again later")
 
-    # Generic error to avoid tenant/user enumeration.
+    # Generic to avoid enumeration
     invalid = HTTPException(status_code=401, detail="Invalid credentials")
 
     tenant = await Tenant.get_or_none(id=request.tenant_id)
@@ -325,7 +326,7 @@ async def login(request: LoginRequest, http_request: Request):
     if user and user.is_active and user.password_hash:
         ok = verify_password(request.password, user.password_hash)
     else:
-        # Always do the bcrypt work so timing doesn't reveal user existence.
+        # Always do the bcrypt work so timing doesn't show if a user exists
         verify_password(request.password, _DUMMY_PASSWORD_HASH)
         ok = False
     if not ok:
@@ -356,10 +357,10 @@ class DiscoverRequest(BaseModel):
 async def discover_login(request: DiscoverRequest, http_request: Request):
     """Email-first sign-in: which tenants can this email sign in to, and how.
 
-    Deliberate tradeoff: this necessarily reveals whether an email has access
-    (that's the point of an email-first flow). It is throttled with the same
-    limiter as login so it can't be used for bulk enumeration, and it returns
-    only what the sign-in flow needs -- never role or user details.
+    This approach does reveal if email has access to tenants
+    It is rate limited, but this flow does reveal more info than it should.
+    Maybe a domain-claim flow would be better for the future to avoid stuffing
+    
     """
     email = request.email.strip().lower()
     if not email or not login_limiter.check(f"discover:{email}"):
@@ -374,7 +375,7 @@ async def discover_login(request: DiscoverRequest, http_request: Request):
         cfg = t.auth_config or {}
         entry = {"tenant_id": t.id, "name": t.name, "provider": t.auth_provider}
         # External IdP tenants may configure where the browser should go to
-        # obtain a provider token (e.g. a Clerk-hosted sign-in page).
+        # obtain a provider token
         if t.auth_provider != "local" and cfg.get("login_url"):
             entry["login_url"] = cfg["login_url"]
         tenants.append(entry)
@@ -498,6 +499,7 @@ async def get_tenant_info(principal: Principal = Depends(get_current_principal))
         "s3_config": _redact_s3_config(tenant.s3_config),
         "auth_provider": tenant.auth_provider,
         "dep_enabled": tenant.dep_enabled,
+        "ddm_enabled": tenant.ddm_enabled,
         "created_at": tenant.created_at,
         "is_active": tenant.is_active,
         # Admin-entered renewal reminders (manual-entry MVP; see models.tenant).
@@ -518,8 +520,8 @@ async def update_tenant(update: TenantUpdate, admin: Principal = Depends(require
         tenant.allowed_users = update.allowed_users
     if update.s3_config is not None:
         # Access key ID and secret access key are a pair. Reject a request that
-        # sends a fresh value for exactly one of them (the other being the
-        # redaction sentinel or absent) -- restoring the partner from the stored
+        # sends a fresh value for exactly one of them 
+        # restoring the partner from the stored
         # value would silently persist a mismatched credential. This enforces
         # the form's both-or-neither rule server-side so a direct API call
         # (curl, a script, a stale build) can't corrupt the pair either.
@@ -538,6 +540,8 @@ async def update_tenant(update: TenantUpdate, admin: Principal = Depends(require
         tenant.s3_config = _restore_tenant_s3_secrets(tenant.s3_config, update.s3_config)
     if update.dep_enabled is not None:
         tenant.dep_enabled = update.dep_enabled
+    if update.ddm_enabled is not None:
+        tenant.ddm_enabled = update.ddm_enabled
     if update.device_naming is not None:
         # Normalise to {"template": str, "apply_on_enroll": bool}; an empty/blank
         # template clears the tenant default (stored as {}). Group-level templates
@@ -582,6 +586,8 @@ async def update_tenant(update: TenantUpdate, admin: Principal = Depends(require
                 config["tenant"]["s3"] = tenant.s3_config
             config["tenant"].setdefault("dep", {})
             config["tenant"]["dep"]["enabled"] = tenant.dep_enabled
+            config["tenant"].setdefault("ddm", {})
+            config["tenant"]["ddm"]["enabled"] = tenant.ddm_enabled
             # Mirror the naming template (read back by the ConfigWatcher at main.py).
             config["tenant"]["device_naming"] = tenant.device_naming or {}
 
@@ -601,9 +607,11 @@ async def update_tenant(update: TenantUpdate, admin: Principal = Depends(require
 
 # Editable YAML config documents: validated PUT + version history. Grows as
 # subsystems land (tags in Phase 0; flows / dispatcher follow in later phases).
-# "config" is READABLE but not editable via the API -- it embeds S3 secrets --
+# "config" is READABLE but not editable via the API, it embeds S3 secrets
 # so reads allow it while writes/history do not.
-_EDITABLE_CONFIG_TYPES = ["groups", "apps", "profiles", "tags", "flows", "dispatcher"]
+_EDITABLE_CONFIG_TYPES = ["groups", "apps", "profiles", "tags", "flows", "dispatcher",
+                          "declarations"]
+# TODO: evaluate if this can be cleanly removed.
 _READABLE_CONFIG_TYPES = _EDITABLE_CONFIG_TYPES + ["config"]
 # Config docs whose authoring can act on devices (send commands, auto-remediate)
 # or reach arbitrary URLs (webhook SSRF), so writing them is admin-only even
@@ -613,7 +621,7 @@ _ADMIN_ONLY_CONFIG_TYPES = {"flows", "dispatcher"}
 # no required-file stub. Copied into the validation sandbox when present so
 # cross-document checks (e.g. a tag referenced by a group, a profile referenced
 # by a flow) resolve on any save.
-_OPTIONAL_CONFIG_FILES = ["tags.yaml", "flows.yaml", "dispatcher.yaml"]
+_OPTIONAL_CONFIG_FILES = ["tags.yaml", "flows.yaml", "dispatcher.yaml", "declarations.yaml"]
 
 
 @app.get("/api/v1/config/{config_type}")
@@ -624,7 +632,7 @@ async def get_yaml_config(
 ):
     """Get YAML configuration by type (groups, apps, profiles, config).
 
-    With ``raw=true`` the response is the YAML document itself (text/plain) --
+    With raw=true the response is the YAML document itself (text/plain)
     used by the YAML viewer. config.yaml is re-rendered after credential
     redaction in raw mode too, so S3 secrets never leave the server.
     """
@@ -668,7 +676,7 @@ async def get_yaml_config(
     return config
 
 
-# ── Config history ─────────────────────────────────────────────────────────
+# Config history
 # Every successful config save snapshots the PREVIOUS document so breaking
 # changes can be recovered from within the editor. Bounded per config type.
 _HISTORY_LIMIT = 50
@@ -704,12 +712,12 @@ def _snapshot_config_history(tenant_id: str, config_type: str, user: str) -> Non
             old.unlink()
     except (OSError, ValueError):
         # Best-effort: a history failure (incl. a non-UTF-8 outgoing file, which
-        # raises UnicodeDecodeError -- a ValueError) must NEVER block the save.
+        # raises UnicodeDecodeError a ValueError) must NEVER block the save.
         logger.exception("config history snapshot failed for %s/%s", tenant_id, config_type)
 
 
 def _autofill_rollout_starts(config_type: str, config_data: Dict[str, Any]) -> None:
-    """Stamp ``rollout.start`` (now, UTC) on any rollout block that lacks one.
+    """Stamp rollout.start (now, UTC) on any rollout block that lacks one.
 
     Keeps the runtime stateless: wave math needs a fixed start, and authors
     shouldn't have to hand-write timestamps. An existing start is never touched
@@ -743,8 +751,8 @@ async def update_yaml_config(
     """Update YAML configuration.
 
     Validates the SUBMITTED data (not the existing on-disk files) by validating
-    it in an isolated copy of the tenant config dir, and only commits -- atomically
-    -- when validation passes. The previous document is snapshotted to history.
+    it in an isolated copy of the tenant config dir, and only commits when 
+    validation passes. The previous document is snapshotted to history.
     """
     if config_type not in _EDITABLE_CONFIG_TYPES:
         raise HTTPException(status_code=400, detail="Invalid config type")
@@ -764,8 +772,8 @@ def _spawn_tenant_reconcile(tenant_id: str) -> None:
     """Fire-and-forget a reactive reconcile for a tenant.
 
     Used after any change that alters desired-vs-observed state (config save,
-    device tag update). ``_spawn`` keeps a strong reference -- a bare
-    ``create_task`` handle can be garbage-collected mid-run. Best-effort: a
+    device tag update). _spawn keeps a strong reference -- a bare
+    create_task handle can be garbage-collected mid-run. Best-effort: a
     reconcile failure is logged, never surfaced to the caller.
     """
     from controller.services.reconciler import reconcile_tenant, _spawn
@@ -991,12 +999,10 @@ async def sync_now(principal: Principal = Depends(get_current_principal)):
     return {"message": "Sync complete", **summary}
 
 
-# ── Map tiles ─────────────────────────────────────────────────────────────────
+# Map tiles 
 # Same-origin proxy for OpenStreetMap raster tiles so the device-location map
-# works under the app's strict CSP (img-src 'self' blob:) WITHOUT the browser
-# ever contacting a third-party tile CDN -- device locations don't leak to OSM,
-# only the controller does (and it caches). Authenticated; the browser fetches
-# tiles with its bearer token and renders them as blob: images.
+# works under the app's strict CSP (img-src 'self' blob:)
+# This avoids a third party CDN
 from collections import OrderedDict
 
 _TILE_CACHE: "OrderedDict[str, bytes]" = OrderedDict()
@@ -1305,7 +1311,7 @@ async def get_device_details(device_id: str, principal: Principal = Depends(get_
 
     # Why did the last operation on this device fail (if it did)? A dedicated,
     # tenant-scoped, limit-1 lookup -- deliberately NOT derived from the
-    # `tasks` slice above, since the most recent failure could be older than
+    # tasks slice above, since the most recent failure could be older than
     # the last 10 tasks. Single-device path only (see list_devices) so this
     # never becomes an N+1 across a device list.
     last_failed_task = (
@@ -1655,7 +1661,7 @@ async def update_device_tags(
     flow, or a Dispatcher rule) is never clobbered. Tags can drive group
     membership, so after the write we recompute the device's groups and queue a
     reactive reconcile (tags -> groups -> profile/app scoping). Audited as a
-    ``tag_update`` Task.
+    tag_update Task.
     """
     tenant = principal.tenant
     device = await Device.get_or_none(id=device_id, tenant=tenant)
@@ -1737,7 +1743,198 @@ async def update_device_tags(
             "added": added, "removed": removed, "groups_changed": groups_changed}
 
 
-# ── ATC flow runs ────────────────────────────────────────────────────────────
+# Declarative Device Management
+
+# Humanized labels for the auto-managed declarations (services.ddm_manager builds
+# them for every DDM device; they have no declarations.yaml item to name them).
+_DDM_AUTO_NAMES = {
+    "mm.cfg.status-subscriptions": "Status subscriptions",
+    "mm.act.status-subscriptions": "Status subscriptions (activation)",
+    "mm.mgmt.org-info": "Organization info",
+    "mm.mgmt.properties": "Device properties",
+}
+
+
+def _ddm_desired_entry(decl: Dict[str, Any], names_by_id: Dict[str, str],
+                       include_payload: bool) -> Dict[str, Any]:
+    """Shape one computed declaration for the API: source is the yaml id for
+    authored items (and their paired activations), "auto" otherwise."""
+    identifier = str(decl.get("Identifier") or "")
+    source = "auto"
+    if identifier not in _DDM_AUTO_NAMES:
+        for prefix in ("mm.cfg.", "mm.act."):
+            if identifier.startswith(prefix):
+                source = identifier[len(prefix):]
+                break
+    if source != "auto":
+        name = names_by_id.get(source) or source
+    else:
+        name = _DDM_AUTO_NAMES.get(identifier, identifier)
+    entry = {
+        "identifier": identifier,
+        "type": decl.get("Type"),
+        "server_token": decl.get("ServerToken"),
+        "source": source,
+        "name": name,
+    }
+    if include_payload:
+        entry["payload"] = decl.get("Payload") or {}
+    return entry
+
+
+@app.get("/api/v1/devices/{device_id}/ddm")
+async def get_device_ddm(
+        device_id: str,
+        include_payloads: bool = False,
+        principal: Principal = Depends(get_current_principal),
+):
+    """DDM state for a device: the live-computed desired declaration set joined
+    with what the device last reported, plus the raw status-item tree. Payloads
+    are omitted unless include_payloads=1 (keeps the response light)."""
+    tenant = principal.tenant
+    device = await Device.get_or_none(id=device_id, tenant=tenant)
+    if not device:
+        raise HTTPException(status_code=404, detail="Device not found")
+
+    from controller.services import ddm_manager
+    from controller.services.tenant_config import load_declarations
+
+    desired_full = await ddm_manager.compute_device_declarations(device, tenant)
+    names_by_id = {
+        str(d.get("id")): d.get("name")
+        for d in load_declarations(tenant.id).get("declarations") or []
+        if isinstance(d, dict) and d.get("id")
+    }
+    reported = device.ddm_declaration_status or {}
+    # Drift is only meaningful once the device runs DDM (has been sent a sync);
+    # before that everything would trivially read as "missing". management.*
+    # declarations always report active=false by design, and predicate-gated
+    # ones are legitimately inactive -- neither counts (mirrors the
+    # declaration_drift compliance check).
+    predicated = set()
+    for d in desired_full:
+        if d.get("Type") == "com.apple.activation.simple" \
+                and (d.get("Payload") or {}).get("Predicate"):
+            ident = d.get("Identifier") or ""
+            predicated.add(ident)
+            if ident.startswith("mm.act."):
+                predicated.add("mm.cfg." + ident[len("mm.act."):])
+    drift: List[str] = []
+    if device.ddm_enabled_at:
+        for d in desired_full:
+            ident = d.get("Identifier")
+            if (d.get("Type") or "").startswith("com.apple.management."):
+                continue
+            state = reported.get(ident)
+            if not isinstance(state, dict):
+                drift.append(ident)
+            elif state.get("valid") == "invalid" \
+                    or (state.get("active") is not True and ident not in predicated):
+                drift.append(ident)
+    return {
+        "supported": ddm_manager.device_supports_ddm(device),
+        "tenant_enabled": tenant.ddm_enabled,
+        "enabled_at": device.ddm_enabled_at,
+        "last_sync_at": device.ddm_last_sync_at,
+        "last_published_token": device.ddm_last_published_token,
+        "desired": [_ddm_desired_entry(d, names_by_id, include_payloads)
+                    for d in desired_full],
+        "reported": reported,
+        "status_items": device.ddm_status or {},
+        "client_capabilities": device.ddm_client_capabilities or {},
+        "drift": drift,
+    }
+
+
+@app.post("/api/v1/devices/{device_id}/ddm/sync")
+async def force_device_ddm_sync(
+        device_id: str,
+        admin: Principal = Depends(require_admin),
+):
+    """Force a declarative sync now (admin): clears the published token first so
+    the command is sent even when the computed set is unchanged."""
+    tenant = admin.tenant
+    device = await Device.get_or_none(id=device_id, tenant=tenant)
+    if not device:
+        raise HTTPException(status_code=404, detail="Device not found")
+    if device.enrollment_state != "enrolled":
+        raise HTTPException(
+            status_code=409,
+            detail=f"Device is {device.enrollment_state}; commands can only be sent to enrolled devices",
+        )
+
+    from controller.services import ddm_manager
+    device.ddm_last_published_token = None
+    await device.save(update_fields=["ddm_last_published_token"])
+    queued = await ddm_manager.sync_device(device, reason="manual")
+    await record_audit(
+        admin,
+        "device.ddm_sync",
+        target_type="device",
+        target_id=device_id,
+        detail={"serial_number": device.serial_number, "queued": queued},
+    )
+    return {"queued": queued}
+
+
+@app.get("/api/v1/declarations")
+async def list_declarations(principal: Principal = Depends(get_current_principal)):
+    """Lightweight declarations listing for the web UI: parsed declarations.yaml
+    plus, per item, how many enrolled devices its scope currently matches
+    (platform + unified scope; rollout waves are not simulated here)."""
+    tenant = principal.tenant
+    from controller.services.group_manager import GroupManager
+    from controller.services.profile_manager import ProfileManager
+    from controller.services.scoping import evaluate_scope
+    from controller.services.tenant_config import load_declarations, load_groups
+
+    cfg = load_declarations(tenant.id)
+    groups_config = load_groups(tenant.id)
+    devices = await Device.filter(tenant=tenant, enrollment_state="enrolled").all()
+    gm = GroupManager(tenant.id)
+    memberships = []
+    for d in devices:
+        try:
+            memberships.append((d, ProfileManager._device_platform(d),
+                                gm.evaluate_device_groups(d, groups_config)))
+        except Exception:
+            logger.exception("declarations: group eval failed for %s", d.serial_number)
+
+    items: List[Dict[str, Any]] = []
+    for item in cfg.get("declarations") or []:
+        if not isinstance(item, dict) or not item.get("id"):
+            continue
+        platforms = item.get("platforms") or []
+        scoped = 0
+        for device, platform, device_groups in memberships:
+            try:
+                if platforms and platform not in platforms:
+                    continue
+                if evaluate_scope(device, device_groups, item):
+                    scoped += 1
+            except Exception:
+                continue  # a bad condition skips the device, not the listing
+        entry: Dict[str, Any] = {
+            "id": str(item["id"]),
+            "name": item.get("name") or str(item["id"]),
+            "type": item.get("type"),
+            "scope": {
+                "platforms": platforms,
+                "groups": item.get("groups") or [],
+                "conditions": len(item.get("conditions") or []),
+                "include_devices": len(item.get("include_devices") or []),
+                "exclude_devices": len(item.get("exclude_devices") or []),
+                "rollout": bool(item.get("rollout")),
+            },
+            "scoped_count": scoped,
+        }
+        if item.get("description"):
+            entry["description"] = item["description"]
+        items.append(entry)
+    return {"declarations": items, "ddm_enabled": tenant.ddm_enabled}
+
+
+#  ATC flow runs 
 
 class FlowRunStart(BaseModel):
     start_node_id: str
@@ -1824,7 +2021,7 @@ async def resume_flow_run(
     return result.to_dict()
 
 
-# ── Dispatcher alerts ────────────────────────────────────────────────────────
+#  Dispatcher alerts 
 
 async def _enrich_alerts(alerts: List[Alert]) -> List[Dict[str, Any]]:
     """Alert dicts + a small device summary for the triage board, sorted by
@@ -2614,9 +2811,9 @@ async def list_audit_log(
     """Admin actions taken through the console (services.audit), newest-first.
 
     Admin-only and tenant-scoped: an admin sees only their own tenant's rows.
-    Filters are exact matches -- ``action`` and ``target_type`` are
-    server-written enums and ``actor`` is a server-written email, never free
-    text. ``detail`` never carries a secret (see models.tenant.AuditLog).
+    Filters are exact matches -- action and target_type are
+    server-written enums and actor is a server-written email, never free
+    text. detail never carries a secret (see models.tenant.AuditLog).
     """
     query = AuditLog.filter(tenant=admin.tenant)
     if action:

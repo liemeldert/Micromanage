@@ -322,7 +322,7 @@ export function ProfileEditor({ profileId }: { profileId?: string }) {
     if (ok) router.push("/profiles");
   }
 
-  // ── render ──────────────────────────────────────────────────────────────────
+  //  render 
   if (loading || !initialized) {
     return (
       <Box py={80} ta="center">
@@ -365,7 +365,7 @@ export function ProfileEditor({ profileId }: { profileId?: string }) {
       </Group>
 
       <Box style={{ display: "flex", gap: "var(--mantine-spacing-lg)", alignItems: "flex-start", flexWrap: wide ? "nowrap" : "wrap" }}>
-        {/* ── Left: metadata + payload list (sticky while keys scroll) ──── */}
+        {/*  Left: metadata + payload list (sticky while keys scroll)  */}
         <Box
           style={
             wide
@@ -567,7 +567,7 @@ export function ProfileEditor({ profileId }: { profileId?: string }) {
           </Stack>
         </Box>
 
-        {/* ── Right: payload editor ────────────────────────────────────── */}
+        {/*  Right: payload editor  */}
         <Box style={{ flex: "1 1 auto", minWidth: 0, width: wide ? undefined : "100%" }}>
           <Card withBorder radius="md" padding="md" mih={360}>
             {draft.kind === "enrollment" ? (
@@ -646,7 +646,7 @@ export function ProfileEditor({ profileId }: { profileId?: string }) {
         </Box>
       </Box>
 
-      {/* ── Searchable "Add payload" picker ──────────────────────────────── */}
+      {/*  Searchable "Add payload" picker  */}
       <Modal opened={addOpen} onClose={() => setAddOpen(false)} title="Add payload" size="md">
         <Stack gap="sm">
           <TextInput

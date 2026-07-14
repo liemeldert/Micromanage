@@ -50,7 +50,7 @@ import {
 import { api, type CatalogCommand, type Device } from "../../lib/api";
 import { useAuth } from "../../lib/auth-context";
 
-// ── Custom flows for commands we know well ────────────────────────────────────
+//  Custom flows for commands we know well 
 const KNOWN_FLOWS: Record<
   string,
   { body: string; danger?: boolean; serialConfirm?: boolean; returnToService?: boolean }
@@ -121,7 +121,7 @@ export function RefreshButton({
   );
 }
 
-// ── The modal (custom or generic, decided by the catalog entry) ───────────────
+//  The modal (custom or generic, decided by the catalog entry) 
 function CommandModal({
   device, entry, opened, onClose, onDone,
 }: {
@@ -329,7 +329,7 @@ function CommandModal({
   );
 }
 
-// ── Shared runner hook: fire simple commands, open modals for the rest ────────
+//  Shared runner hook: fire simple commands, open modals for the rest 
 function useCommandRunner(device: Device, onDispatched: () => void) {
   const { token } = useAuth();
   const [modalEntry, setModalEntry] = useState<CatalogCommand | null>(null);
@@ -368,7 +368,7 @@ function useCommandRunner(device: Device, onDispatched: () => void) {
   return { runOrOpen, busyType, modal };
 }
 
-// ── Quick actions (left rail) ─────────────────────────────────────────────────
+//  Quick actions (left rail) 
 export function QuickActionsCard({
   device, catalog, onDispatched, onShowAll,
 }: {
@@ -477,7 +477,7 @@ export function QuickActionsCard({
   );
 }
 
-// ── Full catalog, grouped by category ─────────────────────────────────────────
+//  Full catalog, grouped by category 
 export function CommandsPanel({
   device, catalog, onDispatched,
 }: {

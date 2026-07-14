@@ -13,6 +13,11 @@ from controller.services.webhook_handler import WebhookHandler
 app = FastAPI()
 logger = logging.getLogger(__name__)
 
+# Declarative Device Management check-in endpoints (NanoMDM's -dm proxy target).
+# Lives on this app so both NanoMDM callbacks share the same internal port.
+from controller.api.ddm import router as ddm_router  # noqa: E402
+app.include_router(ddm_router)
+
 # Shared secret between NanoMDM and the controller. NanoMDM is configured with
 # the webhook URL carrying this secret (?secret=...); the controller rejects any
 # call that does not present it. Without it the endpoint is forgeable by anyone

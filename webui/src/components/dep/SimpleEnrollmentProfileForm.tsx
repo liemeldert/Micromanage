@@ -86,7 +86,7 @@ export function SimpleEnrollmentProfileForm({
   const [busy, setBusy] = useState(false);
   const [showAdvanced, setShowAdvanced] = useState(false);
 
-  // ── form state ──────────────────────────────────────────────────────────
+  //  form state 
   const [name, setName] = useState("");
   const [platforms, setPlatforms] = useState<string[]>([...PLATFORMS]);
   const [removable, setRemovable] = useState(false);

@@ -86,7 +86,7 @@ def device_platform_category(model: Optional[str]) -> str:
     return "Other"
 
 
-# ── Conditions ────────────────────────────────────────────────────────────────
+#  Conditions 
 
 def evaluate_condition(
     device: Any,
@@ -224,7 +224,7 @@ def _date(device_date: Optional[datetime], operator: str, condition_value: Any) 
     return False
 
 
-# ── Scopes (profiles / app versions) ─────────────────────────────────────────
+#  Scopes (profiles / app versions) 
 
 def evaluate_scope(
     device: Any,
@@ -256,7 +256,7 @@ def evaluate_scope(
     return True
 
 
-# ── Gradual rollout ───────────────────────────────────────────────────────────
+#  Gradual rollout 
 
 # Iteration backstop for the wave walk (covers years of hourly steps).
 _MAX_WAVE_STEPS = 20000

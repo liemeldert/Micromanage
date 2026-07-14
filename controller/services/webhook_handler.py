@@ -148,7 +148,7 @@ class WebhookHandler:
         else:
             logger.info(f"webhook: ignoring topic={topic!r} (no event body)")
 
-    # ── Check-ins (Authenticate / TokenUpdate / Connect / CheckOut) ───────────
+    #  Check-ins (Authenticate / TokenUpdate / Connect / CheckOut) 
     async def _handle_checkin(self, topic: str, event: Dict[str, Any]):
         udid = event.get("udid")
         if not udid:
@@ -157,6 +157,15 @@ class WebhookHandler:
 
         if topic == "mdm.CheckOut":
             await self._handle_checkout(udid)
+            return
+
+        if topic == "mdm.DeclarativeManagement":
+            # Fire-and-forget duplicate of the DDM check-in NanoMDM already
+            # proxied to /ddm (which does the real work) -- proof of life only.
+            device = await Device.get_or_none(udid=udid)
+            if device:
+                await device.save(update_fields=["last_seen"])
+            logger.debug(f"webhook: DeclarativeManagement check-in from {udid}")
             return
 
         # Authenticate carries the device inventory; TokenUpdate/Connect confirm the
@@ -328,7 +337,7 @@ class WebhookHandler:
         await device.save()
         logger.info(f"webhook: device {udid} checked out (unenrolled, record retained)")
 
-    # ── Command results (Connect with an acknowledge_event) ───────────────────
+    #  Command results (Connect with an acknowledge_event) 
     async def _handle_acknowledge(self, topic: str, event: Dict[str, Any]):
         udid = event.get("udid")
         if not udid:
@@ -382,6 +391,8 @@ class WebhookHandler:
                 await self._handle_profile_remove_response(task, response, status)
             else:
                 await self._handle_profile_install_response(task, response, status)
+        elif task.type == "ddm_sync":
+            await self._handle_ddm_sync_response(device, task, response, status)
         else:
             # Direct commands (refresh_info, restart, shutdown, clear_passcode,
             # profile_remove, ...) carry only a command_uuid. Previously NO branch
@@ -504,7 +515,7 @@ class WebhookHandler:
         # Dispatcher: fresh posture/inventory may change compliance.
         await _dispatcher_eval(device)
 
-    # ── Per-command response handlers ─────────────────────────────────────────
+    #  Per-command response handlers 
     # Note on Apple MDM semantics: a device responds "Acknowledged" AFTER it has
     # executed the command (for InstallProfile that means the profile IS
     # installed). Idle never carries a command_uuid -- it's filtered upstream in
@@ -571,6 +582,20 @@ class WebhookHandler:
                 deployment.status = 'failed'
                 deployment.last_error = error_msg
                 await deployment.save()
+
+    async def _handle_ddm_sync_response(self, device: Device, task: Task,
+                                        response: Dict[str, Any], status: str):
+        """Handle a DeclarativeManagement command response. Acknowledged only
+        means the device accepted the sync -- the actual declaration exchange
+        happens on the /ddm check-in endpoints (controller/api/ddm.py)."""
+        if status == 'Acknowledged':
+            await task.update_progress(100, 'completed')
+        elif status in ('Error', 'CommandFormatError'):
+            task.error = self._error_message(response, 'Declarative sync failed')
+            await task.update_progress(task.progress, 'failed')
+            # Clear the published token so the reconciler retries the sync.
+            device.ddm_last_published_token = None
+            await device.save(update_fields=["ddm_last_published_token"])
 
     async def _handle_profile_remove_response(self, task: Task, response: Dict[str, Any], status: str):
         """Handle profile removal response"""

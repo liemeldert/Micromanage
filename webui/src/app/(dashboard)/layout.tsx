@@ -23,6 +23,7 @@ import {
   IconStack2,
   IconApps,
   IconFileCertificate,
+  IconFileDescription,
   IconFileCode,
   IconListCheck,
   IconSettings,
@@ -42,6 +43,7 @@ const NAV_ITEMS = [
   { label: "Groups",     icon: IconStack2,             href: "/groups" },
   { label: "Apps",       icon: IconApps,               href: "/apps" },
   { label: "Profiles",   icon: IconFileCertificate,    href: "/profiles" },
+  { label: "Declarations", icon: IconFileDescription,  href: "/declarations" },
   { label: "ATC",        icon: IconSitemap,            href: "/atc" },
   { label: "Dispatcher", icon: IconActivityHeartbeat,  href: "/compliance" },
   { label: "Tasks",      icon: IconListCheck,          href: "/tasks" },
@@ -77,7 +79,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
       navbar={{ width: 220, breakpoint: "sm", collapsed: { mobile: !opened } }}
       padding={0}
     >
-      {/* ── Navbar ────────────────────────────────────────────────── */}
+      {/*  Navbar  */}
       <AppShell.Navbar
         style={{ background: "var(--mantine-color-dark-8, #1a1b1e)", borderRight: "none" }}
       >
@@ -160,7 +162,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
         </AppShell.Section>
       </AppShell.Navbar>
 
-      {/* ── Main ─────────────────────────────────────────────────── */}
+      {/*  Main  */}
       <AppShell.Main>
         <Box p="lg" style={{ minHeight: "100vh" }}>
           {children}

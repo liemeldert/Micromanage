@@ -88,7 +88,7 @@ export function buildPlist(value: unknown): string {
   );
 }
 
-// ── .mobileconfig helpers ────────────────────────────────────────────────────
+//  .mobileconfig helpers 
 
 export interface ImportedProfile {
   name?: string;

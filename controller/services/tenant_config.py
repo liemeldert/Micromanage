@@ -53,3 +53,19 @@ def load_profiles(tenant_id: str) -> List[Dict[str, Any]]:
     """The ``profiles`` list from a tenant's profiles.yaml (empty if absent)."""
     profiles = _load(tenant_id, "profiles.yaml").get("profiles", [])
     return profiles if isinstance(profiles, list) else []
+
+
+def load_declarations(tenant_id: str) -> Dict[str, Any]:
+    """A tenant's declarations.yaml (DDM), normalized to its three keys with
+    empty defaults when the file is absent or malformed."""
+    data = _load(tenant_id, "declarations.yaml")
+    declarations = data.get("declarations", [])
+    subscriptions = data.get("status_subscriptions", [])
+    org_info = data.get("organization_info", {})
+    return {
+        "declarations": declarations if isinstance(declarations, list) else [],
+        "status_subscriptions": (
+            [str(s) for s in subscriptions if s] if isinstance(subscriptions, list) else []
+        ),
+        "organization_info": org_info if isinstance(org_info, dict) else {},
+    }

@@ -23,6 +23,10 @@ class Tenant(Model):
     # not secrets -- no redaction needed.
     apns_cert_expires_at = fields.DatetimeField(null=True)
     dep_token_expires_at = fields.DatetimeField(null=True)
+    # Declarative Device Management master switch (services.ddm_manager). Off by
+    # default: enabling queues a DeclarativeManagement sync to every supported
+    # device on the next reconcile.
+    ddm_enabled = fields.BooleanField(default=False)
     created_at = fields.DatetimeField(auto_now_add=True)
     updated_at = fields.DatetimeField(auto_now=True)
     is_active = fields.BooleanField(default=True)
@@ -110,6 +114,16 @@ class Device(Model):
     dep_profile_uuid = fields.CharField(max_length=64, null=True)
     dep_profile_status = fields.CharField(max_length=30, null=True)
     dep_last_synced_at = fields.DatetimeField(null=True)
+    # Declarative Device Management state (services.ddm_manager). ddm_status is
+    # the merged StatusItems tree the device reports; ddm_declaration_status is
+    # the flat per-declaration view ({identifier: {active, valid, ...}});
+    # client-capabilities gates which declaration types we serve.
+    ddm_enabled_at = fields.DatetimeField(null=True)
+    ddm_last_sync_at = fields.DatetimeField(null=True)
+    ddm_last_published_token = fields.CharField(max_length=64, null=True)
+    ddm_status = fields.JSONField(default=dict)
+    ddm_declaration_status = fields.JSONField(default=dict)
+    ddm_client_capabilities = fields.JSONField(default=dict)
 
     class Meta:
         table = "devices"

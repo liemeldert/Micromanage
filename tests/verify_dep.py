@@ -266,7 +266,7 @@ async def main():
 
     tenant = await Tenant.create(id="default", name="Default")
 
-    # ── 1) Link: begin_link -> (ABM) encrypt token -> complete_link ──────────
+    #  1) Link: begin_link -> (ABM) encrypt token -> complete_link 
     print("1) link a DEP server (keypair + token decrypt + /account verify)")
     server = await dep_manager.begin_link(tenant, "abm")
     check("keypair generated + status awaiting_token",
@@ -309,7 +309,7 @@ async def main():
     check("to_dict() NEVER leaks token/key", not any(
         k in server.to_dict() for k in ("token_enc", "private_key_enc", "public_cert_pem")))
 
-    # ── 2) Device sync -> placeholders (paged full fetch) ────────────────────
+    #  2) Device sync -> placeholders (paged full fetch) 
     print("2) sync assigned devices into pending placeholders")
     summary = await dep_manager.sync_devices(server, transport=fake)
     check("sync ok", summary["ok"])
@@ -331,7 +331,7 @@ async def main():
     check("no duplicate devices after empty delta",
           await Device.filter(tenant=tenant).count() == 3)
 
-    # ── 3) Delta with a modified + deleted (placeholder) op ──────────────────
+    #  3) Delta with a modified + deleted (placeholder) op 
     print("3) delta sync: modified + deleted")
     fake.sync_batches = [[
         {"serial_number": "SER-A", "model": "MacBookPro18,3", "op_type": "modified",
@@ -345,7 +345,7 @@ async def main():
     a = await Device.get(tenant=tenant, serial_number="SER-A")
     check("modified device profile_status updated", a.dep_profile_status == "pushed")
 
-    # ── 4) Push a DEP profile + assign; idempotent re-push ───────────────────
+    #  4) Push a DEP profile + assign; idempotent re-push 
     print("4) push + assign an enrollment profile")
     enroll_url = "https://mdm.example.com/api/v1/dep/enroll/default"
     mapping = await dep_manager.push_profile(server, "zero-touch", enroll_url, transport=fake)
@@ -367,7 +367,7 @@ async def main():
     a = await Device.get(tenant=tenant, serial_number="SER-A")
     check("device profile status -> assigned", a.dep_profile_status == "assigned")
 
-    # ── 5) Default-profile auto-assign on newly-synced devices ───────────────
+    #  5) Default-profile auto-assign on newly-synced devices 
     print("5) default profile auto-assigns to new devices")
     server.default_profile_id = "zero-touch"
     await server.save()
@@ -378,7 +378,7 @@ async def main():
     check("new device auto-assigned the default profile",
           "SER-D" in fake.assigned.get("PUUID-1", []) and d.dep_profile_status == "assigned")
 
-    # ── 6) enrollment_source scope condition ─────────────────────────────────
+    #  6) enrollment_source scope condition 
     print("6) enrollment_source scope condition")
     ade_dev = Device(tenant=tenant, serial_number="X", device_model="Mac14,2",
                      os_version="14", attributes={"enrollment_source": "ade"}, groups=[], tags=[])
@@ -389,7 +389,7 @@ async def main():
     check("OTA/unknown device does NOT match (defaults to ota)",
           not scoping.evaluate_condition(ota_dev, cond, []))
 
-    # ── 7) release_device node -> DeviceConfigured via audited path ──────────
+    #  7) release_device node -> DeviceConfigured via audited path 
     print("7) release_device sends DeviceConfigured")
     FakeConnector.sent = []
     enrolled = await Device.create(tenant=tenant, udid="UDID-REL", serial_number="SER-A",
@@ -407,7 +407,7 @@ async def main():
     check("device_configured audit task recorded",
           await Task.filter(tenant=tenant, type="device_configured").count() == 1)
 
-    # ── 7b) ADE endpoint: token-gated + pre-stamps enrollment_source ─────────
+    #  7b) ADE endpoint: token-gated + pre-stamps enrollment_source 
     print("7b) ADE enroll endpoint gates on the per-tenant token")
     os.environ["MDM_TOPIC"] = "com.apple.mgmt.External.test"
     os.environ["SCEP_CHALLENGE"] = "test-challenge"
@@ -438,7 +438,7 @@ async def main():
     check("ADE endpoint stamped enrollment_source=ade",
           (ade_dev2.attributes or {}).get("enrollment_source") == "ade")
 
-    # ── 7c) ADE MachineInfo CMS signature verification ───────────────────────
+    #  7c) ADE MachineInfo CMS signature verification 
     print("7c) Apple CA signature verification (CMS)")
     import tempfile as _tf
     from controller.services import dep_verify
@@ -480,7 +480,7 @@ async def main():
     os.environ.pop("DEP_APPLE_ANCHOR_CERTS", None)
     dep_verify._anchors.cache_clear()
 
-    # ── 8) unlink wipes secrets ──────────────────────────────────────────────
+    #  8) unlink wipes secrets 
     print("8) unlink wipes secret material")
     await dep_manager.unlink(server)
     await server.refresh_from_db()
@@ -488,7 +488,7 @@ async def main():
           server.token_enc is None and server.private_key_enc is None
           and server.status == "unlinked")
 
-    # ── 9) remove fully deletes an unfinished connection ─────────────────────
+    #  9) remove fully deletes an unfinished connection 
     print("9) remove deletes the row, its profiles, and clears device linkage")
     scratch = await dep_manager.begin_link(tenant, "scratch")
     await DepProfile.create(tenant=tenant, dep_server=scratch, profile_id="p1")

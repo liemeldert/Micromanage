@@ -66,10 +66,31 @@ CHECK_CATALOG: List[Dict[str, Any]] = [
     {"type": "config_drift", "label": "Configuration drift",
      "description": "Any desired profile/app is missing or failed to install.",
      "category": "Drift", "params": []},
+    {"type": "declaration_drift", "label": "Declaration drift (DDM)",
+     "description": "A desired DDM declaration is missing from the device's reported "
+                    "state, inactive, or invalid. Devices without DDM enabled are "
+                    "treated as compliant.",
+     "category": "Drift",
+     "params": [{"name": "ids", "label": "Declaration ids", "type": "tags",
+                 "required": False,
+                 "help": "Limit to specific declarations.yaml ids; empty checks the "
+                         "whole desired set."}]},
     {"type": "tagged", "label": "Carries a tag",
      "description": "The device carries any of the named tags.",
      "category": "Status",
      "params": [{"name": "tags", "label": "Tags", "type": "tags", "required": True}]},
+    {"type": "ddm_status", "label": "DDM status item (advanced)",
+     "description": "Compare a dot-path into the device's DDM status report. Devices "
+                    "without DDM data are treated as compliant.",
+     "category": "Advanced",
+     "params": [
+         {"name": "path", "label": "Status item path", "type": "string", "required": True,
+          "help": 'Dot path into the DDM StatusItems tree, e.g. "softwareupdate.install-state".'},
+         {"name": "operator", "label": "Operator", "type": "select", "required": True,
+          "options": ["equals", "not_equals", "contains", "gte", "lte",
+                      "exists", "not_exists"]},
+         {"name": "value", "label": "Value", "type": "string", "required": False},
+     ]},
     {"type": "attribute", "label": "Attribute (advanced)",
      "description": "Compare a dot-path into the device's reported attributes.",
      "category": "Advanced",
@@ -94,7 +115,7 @@ def catalog() -> Dict[str, Any]:
     return {"checks": CHECK_CATALOG}
 
 
-# ── Attribute access ─────────────────────────────────────────────────────────
+#  Attribute access 
 
 def _sec(device: Any) -> Dict[str, Any]:
     attrs = getattr(device, "attributes", None) or {}
@@ -113,7 +134,7 @@ def _dig(obj: Any, path: str) -> Any:
     return cur
 
 
-# ── Evaluation ───────────────────────────────────────────────────────────────
+#  Evaluation 
 
 def evaluate_check(
     check: Dict[str, Any], device: Any, ctx: Optional[Dict[str, Any]] = None
@@ -223,6 +244,98 @@ def _config_drift(device, params, ctx):
     return None
 
 
+def _declaration_drift(device, params, ctx):
+    # Only devices that actually run DDM (ddm_enabled_at stamped by the first
+    # sync) are judged -- an unenrolled-in-DDM fleet must not false-alarm.
+    if not getattr(device, "ddm_enabled_at", None):
+        return None
+    desired = ctx.get("ddm_desired") or []
+    # Predicate-gated declarations legitimately report active=false when their
+    # predicate evaluates false on-device -- only "invalid" is drift for them.
+    # (Computed before any ids filter: the activation carries the predicate.)
+    predicated = set()
+    for d in desired:
+        if d.get("Type") == "com.apple.activation.simple" \
+                and (d.get("Payload") or {}).get("Predicate"):
+            ident = d.get("Identifier") or ""
+            predicated.add(ident)
+            if ident.startswith("mm.act."):
+                predicated.add("mm.cfg." + ident[len("mm.act."):])
+    ids = params.get("ids")
+    ids = ids if isinstance(ids, list) else ([ids] if ids else [])
+    if ids:
+        wanted = {f"mm.cfg.{x}" for x in (str(i) for i in ids if i)}
+        desired = [d for d in desired if d.get("Identifier") in wanted]
+    reported = getattr(device, "ddm_declaration_status", None) or {}
+    problems = []
+    for d in desired:
+        ident = d.get("Identifier")
+        # management.* declarations always report active=false by design.
+        if (d.get("Type") or "").startswith("com.apple.management."):
+            continue
+        state = reported.get(ident)
+        if not isinstance(state, dict):
+            problems.append({"identifier": ident, "status": "missing"})
+            continue
+        if state.get("valid") == "invalid" \
+                or (state.get("active") is not True and ident not in predicated):
+            reasons = state.get("reasons") or []
+            code = reasons[0].get("code") if reasons and isinstance(reasons[0], dict) else None
+            problems.append({
+                "identifier": ident,
+                "status": "invalid" if state.get("valid") == "invalid" else "inactive",
+                **({"reason": code} if code else {}),
+            })
+    if problems:
+        first_reason = next((p["reason"] for p in problems if p.get("reason")), None)
+        summary = f"{len(problems)} declaration(s) missing or failed"
+        if first_reason:
+            summary += f" ({first_reason})"
+        return {"summary": summary,
+                "detail": {"problems": problems,
+                           "identifiers": [p["identifier"] for p in problems]}}
+    return None
+
+
+def _ddm_status(device, params, ctx):
+    status = getattr(device, "ddm_status", None) or {}
+    # No DDM data is "unknown", not "known-bad" (mirrors declaration_drift).
+    if not getattr(device, "ddm_enabled_at", None) or not status:
+        return None
+    path = params.get("path")
+    op = params.get("operator")
+    expected = params.get("value")
+    actual = _dig(status, path) if path else None
+    fired = False
+    if op == "exists":
+        fired = actual is not None
+    elif op == "not_exists":
+        fired = actual is None
+    elif actual is None:
+        # An unreported status item is "unknown": only the existence operators
+        # handle absence (mirrors the `attribute` check).
+        fired = False
+    elif op == "equals":
+        fired = str(actual) == str(expected)
+    elif op == "not_equals":
+        fired = str(actual) != str(expected)
+    elif op == "contains":
+        if isinstance(actual, (list, tuple)):
+            fired = any(str(x) == str(expected) for x in actual)
+        else:
+            fired = str(expected) in str(actual)
+    elif op in ("gte", "lte"):
+        try:
+            a, b = float(actual), float(expected)
+            fired = a >= b if op == "gte" else a <= b
+        except (TypeError, ValueError):
+            fired = False
+    if fired:
+        return {"summary": f"DDM {path} {op} {expected if expected is not None else ''}".strip(),
+                "detail": {"path": path, "operator": op, "value": expected, "actual": actual}}
+    return None
+
+
 def _tagged(device, params, ctx):
     want = params.get("tags")
     want = want if isinstance(want, list) else ([want] if want else [])
@@ -285,6 +398,8 @@ _EVALUATORS = {
     "unsupervised": _unsupervised,
     "missing_profile": _missing_profile,
     "config_drift": _config_drift,
+    "declaration_drift": _declaration_drift,
+    "ddm_status": _ddm_status,
     "tagged": _tagged,
     "attribute": _attribute,
 }

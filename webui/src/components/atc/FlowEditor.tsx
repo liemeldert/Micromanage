@@ -62,7 +62,7 @@ const MANTINE_HEX: Record<string, string> = {
   indigo: "#3b5bdb",
 };
 
-// ── Custom canvas node ───────────────────────────────────────────────────────
+//  Custom canvas node 
 export function FlowNodeCard({ data, selected }: NodeProps) {
   const d = data as FlowNodeData;
   const node = d.node;
@@ -155,7 +155,7 @@ export function FlowNodeCard({ data, selected }: NodeProps) {
 
 const nodeTypes = { atc: FlowNodeCard };
 
-// ── Editor ───────────────────────────────────────────────────────────────────
+//  Editor 
 export interface FlowEditorOptions {
   tagNames: string[];
   profileIds: string[];
