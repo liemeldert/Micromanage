@@ -85,6 +85,7 @@ import { useAuth } from "../../../../../lib/auth-context";
 import { TaskDetailDrawer } from "../../../../components/TaskDetailDrawer";
 import { QuickActionsCard, CommandsPanel, RefreshButton } from "../../../../components/DeviceCommandKit";
 import { DeviceTagsCard } from "../../../../components/DeviceTagsCard";
+import { BreakTheGlassCard } from "../../../../components/BreakTheGlassCard";
 import { DeviceLocationMap, type DeviceLocation } from "../../../../components/DeviceLocationMap";
 import {
   flattenToDotPaths,
@@ -954,6 +955,8 @@ export default function DeviceDetailPage({ params }: { params: Promise<{ id: str
               </Card>
 
               <DeviceTagsCard device={device} onChanged={handleDispatched} />
+
+              {isAdmin && <BreakTheGlassCard deviceId={device.id} />}
 
               {(battery !== null || usedPct !== null) && (
                 <SimpleGrid cols={{ base: 1, sm: 2 }} spacing="md">

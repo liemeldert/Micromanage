@@ -340,6 +340,22 @@ export const api = {
     return request<{ commands: CatalogCommand[] }>("/api/v1/commands/catalog", token);
   },
 
+  // Non-secret projection (kinds, labels, reveal ledger) -- never the plaintext.
+  getDeviceSecrets(token: string, deviceId: string) {
+    return request<{ secrets: DeviceSecret[] }>(
+      `/api/v1/devices/${deviceId}/secrets`,
+      token,
+    );
+  },
+  // Break the glass: returns the plaintext ONCE, audits, and raises a board alert.
+  revealDeviceSecret(token: string, deviceId: string, kind: string) {
+    return request<RevealedSecret>(
+      `/api/v1/devices/${deviceId}/secrets/${kind}/reveal`,
+      token,
+      { method: "POST" },
+    );
+  },
+
   //  ATC flows 
   // Node palette + wait-signal registry -- drives the visual editor data-driven.
   getFlowStepCatalog(token: string) {
@@ -692,6 +708,34 @@ export interface ConfigVersion {
   saved_at: string | null;
   user: string | null;
   size?: number;
+}
+
+// Break-The-Glass: an escrowed per-device secret (non-secret projection). The
+// plaintext is never in this shape -- it only arrives in RevealedSecret.
+export interface DeviceSecret {
+  id: string;
+  device_id: string;
+  kind: string;         // managed_admin_password | firmware_password | recovery_lock
+  kind_label: string;
+  label: string | null;
+  meta: Record<string, unknown>;
+  created_by: string | null;
+  created_at: string | null;
+  updated_at: string | null;
+  revealed_at: string | null;
+  revealed_by: string | null;
+  reveal_count: number;
+  sealed: boolean;      // true == the glass has never been broken
+}
+
+export interface RevealedSecret {
+  kind: string;
+  kind_label: string;
+  label: string | null;
+  value: string;        // the plaintext, returned once
+  meta: Record<string, unknown>;
+  revealed_at: string | null;
+  reveal_count: number;
 }
 
 export type EnrollmentState = "enrolled" | "unenrolled" | "pending";

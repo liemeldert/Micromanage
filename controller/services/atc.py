@@ -3,19 +3,19 @@
 An ATC flow (flows.yaml, validated by utils.yaml_validator) runs per device as
 an asynchronous state machine (models.FlowRun). MDM is asynchronous: a flow
 executes forward until it hits a node that must wait for the device
-(``wait_for``), then persists its position and resumes when the matching webhook
+(wait_for), then persists its position and resumes when the matching webhook
 signal arrives, or when the timeout sweep fires. A flow is NOT a coroutine that
 blocks on MDM round-trips.
 
 Determinism under edits: the flow definition is snapshotted into
-``FlowRun.context['flow']`` at start and fingerprinted by ``flow_hash``, so an
+FlowRun.context['flow'] at start and fingerprinted by flow_hash, so an
 admin editing flows.yaml mid-run does not change the definition an in-flight run
 executes.
 
 Every public entry point is best-effort and defensive: they run on the
 enrollment / webhook / poll hot paths, so a malformed flow or a node error fails
 only that run (recorded on the FlowRun) and is never allowed to propagate into
-the caller. Mirrors the ``try/except -> log -> continue`` discipline of
+the caller. Mirrors the try/except -> log -> continue discipline of
 services.scoping.
 """
 
@@ -26,7 +26,7 @@ import os
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
-from controller.models.tenant import Alert, Device, FlowRun, Tenant
+from controller.models.tenant import Alert, Device, DeviceSecret, FlowRun, Tenant
 from controller.services import tenant_config
 from controller.services.scoping import evaluate_condition, evaluate_scope
 
@@ -97,7 +97,7 @@ def _nodes_by_id(flow: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
 
 def _scope_matches(device: Device, device_groups: List[str],
                    scope: Optional[Dict[str, Any]]) -> bool:
-    """A flow trigger's ``match`` scope. An empty match fires for every enroll;
+    """A flow trigger's match scope. An empty match fires for every enroll;
     otherwise the unified scope engine decides."""
     scope = scope or {}
     if not any(scope.get(k) for k in
@@ -148,7 +148,7 @@ async def _supersede(device_id: Any, start_id: str) -> None:
 
 async def _start_run(device: Device, flow: Dict[str, Any], start_node: Dict[str, Any],
                      event_kind: str) -> Optional[FlowRun]:
-    """Create a FlowRun entering at ``start_node`` and advance it once."""
+    """Create a FlowRun entering at start_node and advance it once."""
     try:
         run = await FlowRun.create(
             tenant_id=device.tenant_id,
@@ -172,8 +172,8 @@ async def _start_run(device: Device, flow: Dict[str, Any], start_node: Dict[str,
 
 
 async def start_flows_for_event(device: Device, event_kind: str) -> List[FlowRun]:
-    """Start runs for every ``start`` node in the single flow that fires on
-    ``event_kind`` and whose match scopes this device.
+    """Start runs for every start node in the single flow that fires on
+    event_kind and whose match scopes this device.
 
     Enroll events supersede a prior run from the same start; checkin/schedule
     events dedup (skip while a run from that start is still active). Best-effort:
@@ -207,7 +207,7 @@ async def start_flows_for_event(device: Device, event_kind: str) -> List[FlowRun
 
 
 async def start_run_from_start(device: Device, start_node_id: str) -> Optional[FlowRun]:
-    """Manually start a run from a specific ``start`` node (testing / API).
+    """Manually start a run from a specific start node (testing / API).
 
     Supersedes an active run from the same start. Returns None if the node
     doesn't exist, isn't a start node, the flow is malformed, or the start fails."""
@@ -280,7 +280,7 @@ async def advance_on_signal(device_id: str, signal: str, ref: Optional[str] = No
 
 
 async def sweep_timeouts(tenant: Tenant) -> int:
-    """Resolve waiting runs whose deadline has passed: take the ``on_timeout``
+    """Resolve waiting runs whose deadline has passed: take the on_timeout
     edge, else fail the run. Returns how many were swept."""
     swept = 0
     try:
@@ -340,10 +340,10 @@ async def sweep_timeouts(tenant: Tenant) -> int:
 
 async def sweep_scheduled_starts(tenant: Tenant,
                                  devices: Optional[List[Device]] = None) -> int:
-    """Launch runs for ``schedule`` start nodes whose interval has elapsed for an
+    """Launch runs for schedule start nodes whose interval has elapsed for an
     in-scope device. Called each poll tick; the interval (not the tick) throttles.
-    Capped per tenant per sweep so a large fleet can't launch en masse -- the
-    most-overdue devices go first; the rest catch up on later ticks."""
+    This is capped per tenant to avoid a large fleet basically DDOSing us.
+    Devices are prioritized based off how long ago they were queued."""
     launched = 0
     flow = _load_flow(str(tenant.id))
     if not flow or not flow.get("enabled", True):
@@ -414,7 +414,7 @@ async def sweep_scheduled_starts(tenant: Tenant,
 #  Execution 
 
 async def _advance(run: FlowRun, device: Device) -> None:
-    """Execute forward from ``run.current_node`` until the run parks (wait_for),
+    """Execute forward from run.current_node until the run parks (wait_for),
     completes (end) or fails. Never raises."""
     flow = (run.context or {}).get("flow") or {}
     nodes = _nodes_by_id(flow)
@@ -451,8 +451,7 @@ async def _advance(run: FlowRun, device: Device) -> None:
             await _park(run, node)
             return
         if ntype == "manual_gate":
-            # Escalate to a human: raise a Dispatcher alert and park until an
-            # admin picks an option (never times out on its own).
+            # Raises an alert for someone to intervene.
             await _park_manual(run, device, node)
             return
 
@@ -502,6 +501,12 @@ async def _execute_node(run: FlowRun, device: Device, node: Dict[str, Any]) -> O
     if ntype == "release_device":
         await _release_device(run, device)
         return node.get("next")
+    if ntype == "configure_accounts":
+        await _configure_accounts(run, device, params)
+        return node.get("next")
+    if ntype == "set_firmware_lock":
+        await _set_firmware_lock(run, device, params)
+        return node.get("next")
     if ntype == "sync_declarations":
         await _sync_declarations(run, device)
         return node.get("next")
@@ -537,8 +542,7 @@ async def _apply_tags(run: FlowRun, device: Device, tags: List[str], *, add: boo
     # A tag change can shift scoping (a profile/group may key off a tag) even when
     # group *names* are unchanged, so always request a reconcile.
     _mark_dirty(run)
-    # Persist recomputed groups only if membership actually shifted -- compare new
-    # groups against the OLD GROUPS (not the old tag set).
+    # Persist recomputed groups only if membership actually shifted
     groups_before = set(device.groups or [])
     _recompute_groups(device)
     if set(device.groups or []) != groups_before:
@@ -722,11 +726,7 @@ async def _send_command(run: FlowRun, device: Device, command: Any, params: Dict
 
 
 async def _sync_declarations(run: FlowRun, device: Device) -> None:
-    """Queue a DDM DeclarativeManagement sync for the device.
-
-    A DDM-disabled tenant or an unsupported device is a skipped timeline note,
-    never a run failure -- a mixed fleet shares one flow. Like send_command, the
-    enqueue is awaited inline (it is a single NanoMDM call)."""
+    """Queue a DDM DeclarativeManagement sync for the device."""
     from controller.services import ddm_manager
 
     tenant = await Tenant.get_or_none(id=device.tenant_id)
@@ -793,7 +793,7 @@ async def release_device_manual(device: Device, actor: str) -> bool:
 
 async def _push_device_configured(device: Device, user: str) -> None:
     """Background DeviceConfigured push + audit task (spawned by callers so the
-    MDM round-trip never blocks the hot path). ``user`` is the audit actor."""
+    MDM round-trip never blocks the hot path). user is the audit actor."""
     from controller.services.mdm_connector import MDMConnector
     from controller.services.task_manager import TaskManager
 
@@ -820,7 +820,183 @@ async def _push_device_configured(device: Device, user: str) -> None:
         await connector.close()
 
 
-#  Human decision gate + Dispatcher alerts 
+#  Account + firmware provisioning (managed-secret escrow)
+
+async def _configure_accounts(run: FlowRun, device: Device, params: Dict[str, Any]) -> None:
+    """Send AccountConfiguration to control the setup-time user account and
+    managed accounts with escrowed credentials (services.device_secrets).
+
+    Awaited inline (not spawned) so the command is enqueued BEFORE a later
+    release_device queues DeviceConfigured. 
+    The device processes them in order, so the account policy applies before the user
+    reaches the account pane.
+    Will not run if a device is past setup assistant."""
+    if device.enrollment_state != "enrolled" or not device.udid:
+        _timeline(run, run.current_node, "configure_accounts: device not enrolled; skipped")
+        return
+
+    from controller.services import account_hash, device_secrets
+    from controller.services.mdm_connector import MDMConnector
+    from controller.services.task_manager import TaskManager
+
+    tenant = await Tenant.get_or_none(id=device.tenant_id)
+    if tenant is None:
+        return
+
+    mode = params.get("primary_account")
+    skip_primary = mode == "skip"
+    set_regular = mode == "prompt_standard"
+    lock_primary = bool(params.get("lock_primary_account"))
+    full_name = str(params.get("primary_full_name") or "").strip() or None
+    short_name = str(params.get("primary_short_name") or "").strip() or None
+
+    auto_admins: Optional[List[Dict[str, Any]]] = None
+    admin_short: Optional[str] = None
+    if params.get("managed_admin"):
+        admin_short = str(params.get("managed_admin_shortname") or "").strip() or "mmadmin"
+        admin_full = str(params.get("managed_admin_fullname") or "").strip() or "Managed Admin"
+        hidden = params.get("managed_admin_hidden")
+        hidden = True if hidden is None else bool(hidden)
+        src = params.get("managed_admin_password_source") or "generate"
+        password = (str(params.get("managed_admin_password") or "")
+                    if src == "static" else account_hash.generate_password())
+        if not password:
+            _timeline(run, run.current_node,
+                      "configure_accounts: managed-admin password empty; managed admin skipped")
+        else:
+            # Escrow BEFORE sending: we must never create an admin account whose
+            # password we can't store. A missing encryption key raises here and
+            # fails the node (nothing sent), rather than stranding a locked-out
+            # admin on the device.
+            await device_secrets.escrow(
+                device, DeviceSecret.KIND_MANAGED_ADMIN, password,
+                label=admin_short, created_by=f"atc:{run.flow_id}",
+                meta={"account_shortname": admin_short},
+            )
+            auto_admins = [{
+                "shortName": admin_short,
+                "fullName": admin_full,
+                "hidden": hidden,
+                "passwordHash": account_hash.password_hash_blob(password),
+            }]
+
+    # Audit task: record the shape, never the password.
+    task = await TaskManager().create_task(
+        tenant=tenant, task_type="account_configuration",
+        description=f"AccountConfiguration on {device.serial_number}",
+        device=device, user=f"atc:{run.flow_id}",
+        details={"primary_account": mode, "lock_primary_account": lock_primary,
+                 "managed_admin": bool(auto_admins),
+                 "managed_admin_shortname": admin_short},
+    )
+    connector = MDMConnector()
+    try:
+        result = await connector.account_configuration(
+            device.udid,
+            skip_primary_setup=skip_primary,
+            set_primary_as_regular=set_regular,
+            lock_primary_account=lock_primary,
+            primary_full_name=full_name,
+            primary_short_name=short_name,
+            auto_setup_admins=auto_admins,
+        )
+        task.details["command_uuid"] = result.get("command_uuid")
+        task.status = "running"
+        await task.save()
+        note = f"primary={mode}" + (f", managed admin '{admin_short}' escrowed"
+                                    if auto_admins else "")
+        _timeline(run, run.current_node, f"configure_accounts: {note} sent")
+    except Exception as exc:
+        task.status = "failed"
+        task.error = str(exc)
+        await task.save()
+        _timeline(run, run.current_node, f"configure_accounts: send failed ({exc})")
+        logger.warning("ATC: AccountConfiguration failed for %s: %s", device.udid, exc)
+    finally:
+        await connector.close()
+
+
+async def _set_firmware_lock(run: FlowRun, device: Device, params: Dict[str, Any]) -> None:
+    """Set the firmware / recovery lock and escrow its password.
+
+    Apple Silicon -> SetRecoveryLock; Intel -> SetFirmwarePassword.
+    """
+    if device.enrollment_state != "enrolled" or not device.udid:
+        _timeline(run, run.current_node, "set_firmware_lock: device not enrolled; skipped")
+        return
+
+    is_apple_silicon = (device.attributes or {}).get("IsAppleSilicon")
+    if is_apple_silicon is True:
+        request_type, kind, lock_label = ("SetRecoveryLock",
+                                          DeviceSecret.KIND_RECOVERY_LOCK, "Recovery Lock")
+    elif is_apple_silicon is False:
+        request_type, kind, lock_label = ("SetFirmwarePassword",
+                                          DeviceSecret.KIND_FIRMWARE, "Firmware password")
+    else:
+        _timeline(run, run.current_node,
+                  "set_firmware_lock: device architecture unknown (no IsAppleSilicon "
+                  "reported yet); skipped")
+        return
+
+    from controller.services import account_hash, crypto_secrets, device_secrets
+    from controller.services.mdm_connector import MDMConnector
+    from controller.services.task_manager import TaskManager
+
+    tenant = await Tenant.get_or_none(id=device.tenant_id)
+    if tenant is None:
+        return
+
+    src = params.get("password_source")
+    new_pw = (str(params.get("password") or "") if src == "static"
+              else account_hash.generate_password(style="alphanumeric"))
+    if not new_pw:
+        _timeline(run, run.current_node, "set_firmware_lock: password empty; skipped")
+        return
+
+    # If a lock is already escrowed for this kind, pass it as CurrentPassword so a
+    # re-run (a fresh enroll re-fires the flow) rotates rather than being rejected
+    # for an already-set lock.
+    current_pw = None
+    existing = await DeviceSecret.get_or_none(device_id=device.id, kind=kind)
+    if existing is not None:
+        current_pw = crypto_secrets.decrypt(existing.value_enc)
+
+    # Escrow BEFORE sending: never set a lock whose password we can't hand back.
+    # (First-set is the common path; on a rotation whose send later fails on the
+    # device, the escrow leads the device until the command is retried.)
+    await device_secrets.escrow(
+        device, kind, new_pw, label=lock_label, created_by=f"atc:{run.flow_id}",
+        meta={"lock_type": request_type},
+    )
+
+    fields: Dict[str, Any] = {"NewPassword": new_pw}
+    if current_pw:
+        fields["CurrentPassword"] = current_pw
+
+    task = await TaskManager().create_task(
+        tenant=tenant, task_type="set_firmware_lock",
+        description=f"{lock_label} on {device.serial_number}",
+        device=device, user=f"atc:{run.flow_id}",
+        details={"lock_type": request_type},  # never the password
+    )
+    connector = MDMConnector()
+    try:
+        result = await connector.send_raw_command(device.udid, request_type, fields)
+        task.details["command_uuid"] = result.get("command_uuid")
+        task.status = "running"
+        await task.save()
+        _timeline(run, run.current_node, f"set_firmware_lock: {lock_label} sent + escrowed")
+    except Exception as exc:
+        task.status = "failed"
+        task.error = str(exc)
+        await task.save()
+        _timeline(run, run.current_node, f"set_firmware_lock: send failed ({exc})")
+        logger.warning("ATC: %s failed for %s: %s", request_type, device.udid, exc)
+    finally:
+        await connector.close()
+
+
+# Dispatcher alerts
 
 def _gate_options(node: Dict[str, Any]) -> List[Dict[str, str]]:
     """The validated decision options for a manual_gate: [{label, edge}], keeping
@@ -1070,12 +1246,7 @@ async def _park(run: FlowRun, node: Dict[str, Any]) -> None:
         minutes = 0
     run.status = "waiting"
     run.waiting_signal = signal
-    # For ref-based signals, remember what this run is waiting on (display + a
-    # human hint; the actual match is against context['expected']).
     expected = (run.context or {}).get("expected", {}).get(signal) or []
-    # Display hint only (matching is against context['expected']); cap to the
-    # column width so a long ref list can't make the park-time save throw and
-    # leave the run un-parked.
     run.waiting_ref = (",".join(str(x) for x in expected)[:255] or None)
     run.wait_deadline = _now() + timedelta(minutes=minutes if minutes > 0 else 60)
     _timeline(run, node.get("id"), f"waiting for {signal} (timeout {minutes}m)")

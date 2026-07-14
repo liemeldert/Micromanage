@@ -237,6 +237,66 @@ FLOW_STEP_CATALOG: List[Dict[str, Any]] = [
         "params": [],
     },
     {
+        "type": "configure_accounts",
+        "label": "Configure setup accounts",
+        "description": "Configure accounts made during Setup Assistant for DEP devices.",
+        "category": "Accounts",
+        "waits": False,
+        "edges": ["next"],
+        "params": [
+            {"name": "primary_account", "label": "User account prompt", "type": "select",
+             "required": True, "options": [
+                 {"value": "prompt_admin", "label": "Prompt: create an Admin account"},
+                 {"value": "prompt_standard", "label": "Prompt: create a Standard account"},
+                 {"value": "skip", "label": "Don't prompt (skip account creation)"},
+             ], "help": "Standard maps to SetPrimarySetupAccountAsRegularUser; skip maps "
+                        "to SkipPrimarySetupAccountCreation, pair skip with a managed "
+                        "admin so the Mac still has an admin."},
+            {"name": "lock_primary_account", "label": "Lock the account fields", "type": "bool",
+             "required": False, "help": "The pre-filled name / short name can't be edited "
+                                        "by the user during setup."},
+            {"name": "primary_full_name", "label": "Pre-fill full name", "type": "string",
+             "required": False},
+            {"name": "primary_short_name", "label": "Pre-fill short name", "type": "string",
+             "required": False},
+            {"name": "managed_admin", "label": "Also create a managed admin", "type": "bool",
+             "required": False, "help": "A hidden local admin owned by MDM (AutoSetupAdmin"
+                                        "Accounts). Its password is escrowed for Break-The-Glass."},
+            {"name": "managed_admin_shortname", "label": "Managed admin short name",
+             "type": "string", "required": False, "help": "Default: mmadmin"},
+            {"name": "managed_admin_fullname", "label": "Managed admin full name",
+             "type": "string", "required": False},
+            {"name": "managed_admin_hidden", "label": "Hide the managed admin", "type": "bool",
+             "required": False, "help": "Hidden from the login window and Users list. Default: on."},
+            {"name": "managed_admin_password_source", "label": "Managed admin password",
+             "type": "select", "required": False, "options": [
+                 {"value": "generate", "label": "Auto-generate & escrow"},
+                 {"value": "static", "label": "Use the value entered below"},
+             ]},
+            {"name": "managed_admin_password", "label": "Static password", "type": "string",
+             "required": False, "secret": True,
+             "help": "Used only when the source is 'Use the value entered below'."},
+        ],
+    },
+    {
+        "type": "set_firmware_lock",
+        "label": "Set firmware lock",
+        "description": "Set the device's firmware lock and escrow its password. Must be after device reports information.",
+        "category": "Security",
+        "waits": False,
+        "edges": ["next"],
+        "params": [
+            {"name": "password_source", "label": "Password", "type": "select", "required": True,
+             "options": [
+                 {"value": "generate", "label": "Auto-generate & escrow"},
+                 {"value": "static", "label": "Use the value entered below"},
+             ]},
+            {"name": "password", "label": "Static password", "type": "string", "required": False,
+             "secret": True,
+             "help": "Used only when the source is 'Use the value entered below'."},
+        ],
+    },
+    {
         "type": "manual_gate",
         "label": "Human decision gate",
         "description": "Raise a Dispatcher alert and PAUSE the run until an admin "

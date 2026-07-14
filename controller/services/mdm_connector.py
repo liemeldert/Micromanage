@@ -66,7 +66,7 @@ class MDMConnector:
                             no_push: bool = False) -> Dict[str, Any]:
         """Enqueue a command for a device.
 
-        Always surfaces ``command_uuid`` in the returned dict so downstream code
+        Always surfaces command_uuid in the returned dict so downstream code
         (task tracking, webhook correlation) can bind the response back to the task.
         """
         url = f'/v1/enqueue/{enrollment_id}'
@@ -222,12 +222,12 @@ class MDMConnector:
         Intel Macs require a 6-digit PIN (needed afterwards to unlock);
         Apple Silicon and iOS obliterate without one.
 
-        ``return_to_service`` (supervised iOS/iPadOS 17+) makes the device
+        return_to_service (supervised iOS/iPadOS 17+) makes the device
         automatically re-enroll after the wipe instead of returning to a plain
         out-of-box state. Pass a dict with:
-          * ``wifi_profile``  -- a Wi-Fi .mobileconfig (bytes) the wiped device
+          * wifi_profile  -- a Wi-Fi .mobileconfig (bytes) the wiped device
             joins to reach the server (required for non-ADE devices);
-          * ``enrollment_profile`` -- the enrollment .mobileconfig (bytes) to
+          * enrollment_profile -- the enrollment .mobileconfig (bytes) to
             re-apply (required for non-ADE; ADE devices can omit it).
         plistlib serializes the bytes as <data>.
         """
@@ -257,7 +257,7 @@ class MDMConnector:
         """Release an ADE device from Setup Assistant (DeviceConfigured).
 
         Only meaningful for a supervised ADE device whose DEP profile set
-        ``await_device_configured`` -- the device pauses at "Remote Management"
+        await_device_configured -- the device pauses at "Remote Management"
         until this arrives, so the flow can finish provisioning first, THEN let the
         user in. A no-op on any other device.
         """
@@ -266,11 +266,63 @@ class MDMConnector:
         logger.info(f"Queued DeviceConfigured (release from Setup Assistant) for {device_udid}: {result}")
         return result
 
+    async def account_configuration(
+        self,
+        device_udid: str,
+        *,
+        skip_primary_setup: bool = False,
+        set_primary_as_regular: bool = False,
+        lock_primary_account: bool = False,
+        primary_full_name: Optional[str] = None,
+        primary_short_name: Optional[str] = None,
+        auto_setup_admins: Optional[List[Dict[str, Any]]] = None,
+    ) -> Dict[str, Any]:
+        """Configure the local accounts a Mac creates during Setup Assistant
+        (AccountConfiguration).
+
+        Only meaningful while the Mac AWAITS configuration -- i.e. its DEP profile
+        set await_device_configured and the flow has not yet released it with
+        DeviceConfigured. Sent after setup it is a no-op. Send it BEFORE the
+        flow's release_device step.
+
+        * skip_primary_setup   -> SkipPrimarySetupAccountCreation (no user
+          account is prompted; the device relies on the managed admin / directory).
+        * set_primary_as_regular -> SetPrimarySetupAccountAsRegularUser (the
+          account the user creates is Standard, not Admin).
+        * lock_primary_account / primary_full_name / primary_short_name
+          -> LockPrimaryAccountInfo + PrimaryAccountFullName / PrimaryAccountUserName
+          (pre-fill and optionally lock the account fields).
+        * auto_setup_admins -> AutoSetupAdminAccounts, a list of
+          {"shortName", "fullName", "hidden", "passwordHash"} dicts, where
+          passwordHash is the serialized SALTED-SHA512-PBKDF2 plist BYTES from
+          services.account_hash (plistlib emits it as the required <data>).
+        """
+        command_dict: Dict[str, Any] = {}
+        if skip_primary_setup:
+            command_dict["SkipPrimarySetupAccountCreation"] = True
+        if set_primary_as_regular:
+            command_dict["SetPrimarySetupAccountAsRegularUser"] = True
+        if lock_primary_account:
+            command_dict["LockPrimaryAccountInfo"] = True
+        if primary_full_name:
+            command_dict["PrimaryAccountFullName"] = primary_full_name
+        if primary_short_name:
+            command_dict["PrimaryAccountUserName"] = primary_short_name
+        if auto_setup_admins:
+            command_dict["AutoSetupAdminAccounts"] = auto_setup_admins
+
+        command_plist, command_uuid = self._create_command_plist(
+            "AccountConfiguration", command_dict
+        )
+        result = await self.enqueue_command(device_udid, command_plist, command_uuid=command_uuid)
+        logger.info(f"Queued AccountConfiguration for {device_udid}: {result}")
+        return result
+
     async def declarative_management(self, device_udid: str,
                                      tokens_json: Optional[bytes] = None) -> Dict[str, Any]:
         """Enable / resynchronize Declarative Device Management on a device.
 
-        ``tokens_json`` (the tokens-endpoint JSON, front-loaded as plist <data>)
+        tokens_json (the tokens-endpoint JSON, front-loaded as plist <data>)
         lets the device skip one round-trip; the actual sync happens against the
         DDM check-in endpoints (controller/api/ddm.py via NanoMDM's -dm proxy).
         """

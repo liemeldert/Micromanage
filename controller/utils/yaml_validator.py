@@ -1155,6 +1155,46 @@ class YAMLValidator:
                 self.errors.append(
                     f"{where} (wait_for) requires a positive integer 'timeout_minutes'"
                 )
+        elif t == "configure_accounts":
+            mode = p.get("primary_account")
+            if mode not in ("prompt_admin", "prompt_standard", "skip"):
+                self.errors.append(
+                    f"{where} (configure_accounts) 'primary_account' must be one of "
+                    "prompt_admin / prompt_standard / skip"
+                )
+            if p.get("managed_admin"):
+                src = p.get("managed_admin_password_source") or "generate"
+                if src not in ("generate", "static"):
+                    self.errors.append(
+                        f"{where} (configure_accounts) 'managed_admin_password_source' "
+                        "must be 'generate' or 'static'"
+                    )
+                if src == "static" and not str(p.get("managed_admin_password") or "").strip():
+                    self.errors.append(
+                        f"{where} (configure_accounts) a static managed-admin password "
+                        "source requires 'managed_admin_password'"
+                    )
+                short = str(p.get("managed_admin_shortname") or "").strip()
+                if short and not re.match(r'^[a-z_][a-z0-9_.-]*$', short):
+                    self.errors.append(
+                        f"{where} (configure_accounts) 'managed_admin_shortname' must be a "
+                        "valid Unix short name (lowercase, starts with a letter/underscore)"
+                    )
+            elif mode == "skip":
+                self.warnings.append(
+                    f"{where} (configure_accounts) skips account creation without a managed "
+                    "admin -- the Mac may have no administrator. Enable 'managed_admin'."
+                )
+        elif t == "set_firmware_lock":
+            src = p.get("password_source")
+            if src not in ("generate", "static"):
+                self.errors.append(
+                    f"{where} (set_firmware_lock) 'password_source' must be 'generate' or 'static'"
+                )
+            if src == "static" and not str(p.get("password") or "").strip():
+                self.errors.append(
+                    f"{where} (set_firmware_lock) a static password source requires 'password'"
+                )
         # end: no params.
 
     def _check_flow_graph(self, owner: str, edges: Dict[str, List[str]],

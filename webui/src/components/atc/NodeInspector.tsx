@@ -9,8 +9,10 @@ import {
   Group,
   MultiSelect,
   NumberInput,
+  PasswordInput,
   Select,
   Stack,
+  Switch,
   TagsInput,
   Text,
   TextInput,
@@ -226,6 +228,121 @@ export function NodeInspector({
             value={typeof p.timeout_minutes === "number" ? p.timeout_minutes : 60}
             onChange={(v) => patch({ timeout_minutes: typeof v === "number" ? v : 60 })}
           />
+        </Stack>
+      )}
+
+      {node.type === "configure_accounts" && (
+        <Stack gap="xs">
+          <Select
+            label="User account prompt"
+            description="What the user is asked to create during Setup Assistant."
+            data={[
+              { value: "prompt_admin", label: "Prompt — create an Admin account" },
+              { value: "prompt_standard", label: "Prompt — create a Standard account" },
+              { value: "skip", label: "Don't prompt (skip account creation)" },
+            ]}
+            value={typeof p.primary_account === "string" ? p.primary_account : null}
+            onChange={(v) => patch({ primary_account: v ?? undefined })}
+          />
+          <Switch
+            label="Lock the account fields"
+            description="The pre-filled name / short name can't be edited by the user."
+            checked={p.lock_primary_account === true}
+            onChange={(e) => patch({ lock_primary_account: e.currentTarget.checked })}
+          />
+          <Group grow>
+            <TextInput
+              label="Pre-fill full name"
+              value={typeof p.primary_full_name === "string" ? p.primary_full_name : ""}
+              onChange={(e) => patch({ primary_full_name: e.currentTarget.value || undefined })}
+            />
+            <TextInput
+              label="Pre-fill short name"
+              value={typeof p.primary_short_name === "string" ? p.primary_short_name : ""}
+              onChange={(e) => patch({ primary_short_name: e.currentTarget.value || undefined })}
+            />
+          </Group>
+          <Divider label="Managed admin" labelPosition="left" my={2} />
+          <Switch
+            label="Create a hidden MDM-managed admin"
+            description="Its password is escrowed for Break-The-Glass."
+            checked={p.managed_admin === true}
+            onChange={(e) => patch({ managed_admin: e.currentTarget.checked })}
+          />
+          {p.managed_admin === true && (
+            <>
+              <Group grow>
+                <TextInput
+                  label="Short name"
+                  placeholder="mmadmin"
+                  value={typeof p.managed_admin_shortname === "string" ? p.managed_admin_shortname : ""}
+                  onChange={(e) => patch({ managed_admin_shortname: e.currentTarget.value || undefined })}
+                />
+                <TextInput
+                  label="Full name"
+                  placeholder="Managed Admin"
+                  value={typeof p.managed_admin_fullname === "string" ? p.managed_admin_fullname : ""}
+                  onChange={(e) => patch({ managed_admin_fullname: e.currentTarget.value || undefined })}
+                />
+              </Group>
+              <Switch
+                label="Hide the account"
+                description="Hidden from the login window and Users list."
+                checked={p.managed_admin_hidden !== false}
+                onChange={(e) => patch({ managed_admin_hidden: e.currentTarget.checked })}
+              />
+              <Select
+                label="Password"
+                data={[
+                  { value: "generate", label: "Auto-generate & escrow" },
+                  { value: "static", label: "Use the value entered below" },
+                ]}
+                value={
+                  typeof p.managed_admin_password_source === "string"
+                    ? p.managed_admin_password_source
+                    : "generate"
+                }
+                onChange={(v) => patch({ managed_admin_password_source: v ?? "generate" })}
+              />
+              {p.managed_admin_password_source === "static" && (
+                <PasswordInput
+                  label="Static password"
+                  value={typeof p.managed_admin_password === "string" ? p.managed_admin_password : ""}
+                  onChange={(e) => patch({ managed_admin_password: e.currentTarget.value })}
+                />
+              )}
+            </>
+          )}
+          <Alert variant="light" color="gray" icon={<IconInfoCircle size={16} />}>
+            Only applies while an ADE Mac is held in Setup Assistant (needs the DEP
+            profile&apos;s &quot;Await device configured&quot;). Place this <b>before</b>{" "}
+            Release from Setup Assistant.
+          </Alert>
+        </Stack>
+      )}
+
+      {node.type === "set_firmware_lock" && (
+        <Stack gap="xs">
+          <Select
+            label="Password"
+            data={[
+              { value: "generate", label: "Auto-generate & escrow" },
+              { value: "static", label: "Use the value entered below" },
+            ]}
+            value={typeof p.password_source === "string" ? p.password_source : null}
+            onChange={(v) => patch({ password_source: v ?? undefined })}
+          />
+          {p.password_source === "static" && (
+            <PasswordInput
+              label="Static password"
+              value={typeof p.password === "string" ? p.password : ""}
+              onChange={(e) => patch({ password: e.currentTarget.value })}
+            />
+          )}
+          <Alert variant="light" color="gray" icon={<IconInfoCircle size={16} />}>
+            Apple Silicon → Recovery Lock; Intel → EFI firmware password. Requires
+            supervision. The password is escrowed for Break-The-Glass.
+          </Alert>
         </Stack>
       )}
 

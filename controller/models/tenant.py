@@ -554,3 +554,75 @@ class DepProfile(Model):
             "last_error": self.last_error,
             "updated_at": self.updated_at.isoformat() if self.updated_at else None,
         }
+
+
+class DeviceSecret(Model):
+    """A per-device credential store
+
+
+    Holds secrets that the controller placed onto a device, but must be able to
+    retrieve again later.
+    value_enc is Fernet-encrypted at rest (services.crypto_secrets).
+    to_dict is the non-secret projection. 
+    One row per (device, kind).
+    Reprovisioning the same secret overwrites the value and clears the reveal ledger. 
+    Encrypt-at-rest is mandatory for this row, exactly as for the DEP token (models.DepServer)."""
+
+    # Escrow kinds. Kept as plain strings (not an enum) to match the codebase's
+    # stringly-typed status columns; the API validates against this set.
+    KIND_MANAGED_ADMIN = "managed_admin_password"
+    KIND_FIRMWARE = "firmware_password"
+    KIND_RECOVERY_LOCK = "recovery_lock"
+    KINDS = (KIND_MANAGED_ADMIN, KIND_FIRMWARE, KIND_RECOVERY_LOCK)
+
+    _KIND_LABELS = {
+        KIND_MANAGED_ADMIN: "Managed admin password",
+        KIND_FIRMWARE: "Firmware password",
+        KIND_RECOVERY_LOCK: "Recovery lock password",
+    }
+
+    id = fields.UUIDField(pk=True)
+    tenant = fields.ForeignKeyField("models.Tenant", related_name="device_secrets")
+    device = fields.ForeignKeyField("models.Device", related_name="secrets")
+    kind = fields.CharField(max_length=40)
+    # Non-secret context shown in the UI. Safe to serialize.
+    label = fields.CharField(max_length=255, null=True)
+    # crypto_secrets ciphertext of the plaintext password. NEVER serialized.
+    value_enc = fields.TextField()
+    # metadata firleds
+    meta = fields.JSONField(default=dict)
+    created_by = fields.CharField(max_length=255, null=True)  # atc:<flow> | admin:<email>
+    created_at = fields.DatetimeField(auto_now_add=True)
+    updated_at = fields.DatetimeField(auto_now=True)
+    # Ledger of when the secret was revealed to an admin and by whom
+    revealed_at = fields.DatetimeField(null=True)
+    revealed_by = fields.CharField(max_length=255, null=True)
+    reveal_count = fields.IntField(default=0)
+
+    class Meta:
+        table = "device_secrets"
+        unique_together = (("device", "kind"),)
+        ordering = ["kind"]
+
+    @property
+    def kind_label(self) -> str:
+        return self._KIND_LABELS.get(self.kind, self.kind)
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Non-secret projection. NEVER includes value_enc / the plaintext."""
+        return {
+            "id": str(self.id),
+            "device_id": str(self.device_id),
+            "kind": self.kind,
+            "kind_label": self.kind_label,
+            "label": self.label,
+            "meta": self.meta or {},
+            "created_by": self.created_by,
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+            "updated_at": self.updated_at.isoformat() if self.updated_at else None,
+            "revealed_at": self.revealed_at.isoformat() if self.revealed_at else None,
+            "revealed_by": self.revealed_by,
+            "reveal_count": self.reveal_count,
+            # "sealed" = never revealed
+            "sealed": self.revealed_at is None,
+        }

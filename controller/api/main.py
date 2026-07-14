@@ -34,6 +34,7 @@ from controller.models.tenant import (
     Alert,
     EnrollmentAttempt,
     AuditLog,
+    DeviceSecret,
 )
 from controller.services.app_manager import AppManager
 from controller.services.mdm_connector import MDMConnector
@@ -2021,7 +2022,73 @@ async def resume_flow_run(
     return result.to_dict()
 
 
-#  Dispatcher alerts 
+#  device specific escrowed secrets
+
+@app.get("/api/v1/devices/{device_id}/secrets")
+async def list_device_secrets(
+        device_id: str,
+        admin: Principal = Depends(require_admin),
+):
+    """List a device's escrowed secrets (managed-admin / firmware / recovery-lock
+    passwords). Only shows details on device secrets, not the secret values themselves"""
+    device = await Device.get_or_none(id=device_id, tenant=admin.tenant)
+    if not device:
+        raise HTTPException(status_code=404, detail="Device not found")
+    from controller.services import device_secrets
+    secrets = await device_secrets.list_for_device(device)
+    return {"secrets": [s.to_dict() for s in secrets]}
+
+
+@app.post("/api/v1/devices/{device_id}/secrets/{kind}/reveal")
+async def reveal_device_secret(
+        device_id: str,
+        kind: str,
+        admin: Principal = Depends(require_admin),
+):
+    """returns an escrowed secret's plaintext ONCE.
+
+    Admin-only. 
+    This marks that the secret has been revealed, writes an AuditLog row, and raises a
+    Dispatcher alert on the device.
+    The plaintext is returned in this response body and nowhere else.
+    """
+    if kind not in DeviceSecret.KINDS:
+        raise HTTPException(status_code=400, detail="Unknown secret kind")
+    device = await Device.get_or_none(id=device_id, tenant=admin.tenant)
+    if not device:
+        raise HTTPException(status_code=404, detail="Device not found")
+    secret = await DeviceSecret.get_or_none(device_id=device.id, kind=kind)
+    if not secret:
+        raise HTTPException(status_code=404, detail="No such secret is escrowed for this device")
+
+    from controller.services import device_secrets
+    plaintext = await device_secrets.reveal(secret, f"admin:{admin.email}")
+    if plaintext is None:
+        # Stored value could not be decrypted (corrupt, or the key was rotated).
+        raise HTTPException(
+            status_code=409,
+            detail="The escrowed secret could not be decrypted (encryption key "
+                   "changed or the value is corrupt). Re-provision it.",
+        )
+    # Audit AFTER the reveal succeeded; the detail carries NO secret material.
+    await record_audit(
+        admin, "device_secret.reveal",
+        target_type="device", target_id=str(device.id),
+        detail={"kind": kind, "serial_number": device.serial_number,
+                "reveal_count": secret.reveal_count},
+    )
+    return {
+        "kind": kind,
+        "kind_label": secret.kind_label,
+        "label": secret.label,
+        "value": plaintext,
+        "meta": secret.meta or {},
+        "revealed_at": secret.revealed_at.isoformat() if secret.revealed_at else None,
+        "reveal_count": secret.reveal_count,
+    }
+
+
+#  Dispatcher alerts
 
 async def _enrich_alerts(alerts: List[Alert]) -> List[Dict[str, Any]]:
     """Alert dicts + a small device summary for the triage board, sorted by
