@@ -1,38 +1,6 @@
-"""Unified device-scoping engine.
+"""Scope evaluation, gradual rollout logic, and conditions.
 
-One place that answers "does this device match?" for every scopeable object --
-group conditions, profile scopes and app-version scopes all evaluate through
-here (mirrored client-side in webui/lib/config.ts for previews).
-
-A *condition* is ``{type, operator, value, negate?}``. Types: device_model,
-serial_number, hostname, os_version, enrollment_date, ``group`` (membership in
-another group -- combined with ``negate: true`` this expresses "device NOT IN
-group"), ``platform`` (coarse device family) and ``tag`` (an imperative device
-label). ``negate`` inverts any condition.
-
-A *scope* is a dict with any of ``groups`` / ``conditions`` /
-``include_devices`` / ``exclude_devices`` (profiles and app versions embed
-these keys directly). Semantics, in precedence order:
-
-  1. serial in ``exclude_devices``  -> never scoped (exclude always wins)
-  2. serial in ``include_devices``  -> scoped (cherry-picked, e.g. test devices)
-  3. otherwise: ANY listed group matches AND ALL conditions match. With
-     neither groups nor conditions defined, nothing matches (explicit
-     include-only scopes are how you cherry-pick).
-
-*Gradual rollout* gates a scoped item by wave: ``rollout = {percent,
-interval_hours, skip_weekends?, start}``. Every ``interval_hours`` another
-``percent`` of devices become eligible (weekend windows can be skipped; UTC).
-Assignment is a stable hash of (device id, item key, rollout start) so a
-device never hops between waves, and a new rollout (new start) reshuffles the
-order. A device outside the current wave is *held*: the reconciler makes no
-change for that (device, item) pair -- it neither installs nor removes.
-
-All evaluation is defensive: malformed input means "no match", never an
-exception -- this runs on the enrollment hot path. Regex conditions are
-ReDoS-bounded via the ``regex`` module's per-match timeout (checked during
-matching, so it interrupts even a GIL-holding match; stdlib ``re`` fallback
-has no timeout).
+Mirrored client-side in webui/lib/config.ts.
 """
 
 import hashlib
@@ -43,10 +11,13 @@ import re
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Dict, List, Optional
 
+from packaging import version
+
 logger = logging.getLogger(__name__)
 
 try:
     import regex as _regex_engine
+
     _HAS_REGEX_TIMEOUT = True
 except ImportError:  # pragma: no cover - regex is pinned in requirements
     _regex_engine = re
@@ -55,17 +26,18 @@ except ImportError:  # pragma: no cover - regex is pinned in requirements
 # Hard ceiling on a single condition's regex match, seconds.
 GROUP_REGEX_TIMEOUT = float(os.getenv("GROUP_REGEX_TIMEOUT_SECONDS", "2.0"))
 
-# A group_resolver answers "is this device in group <name>?" -- supplied by
-# GroupManager so group-type conditions can reference other groups (with its
-# cycle guard). Absent a resolver, membership is looked up in a precomputed
-# device_groups list.
+# Advisory ceiling on how many conditions one scope should carry. See the module docstring for why it is not enforced
+# here.
+MAX_SCOPE_CONDITIONS = 64
+
+# Resolves membership of one named group. GroupManager supplies one (with its cycle guard) so group conditions can
+# reference other groups; without it, membership comes from a precomputed device_groups list.
 GroupResolver = Callable[[str], bool]
 
-# Coarse device family, for the "platform" condition (premade options so an
-# "all Macs" group is one click). Derived from the device model identifier
-# (ProductName, e.g. "MacBookPro18,3", "iPad13,8"). Mirrored in
-# webui/lib/config.ts (PLATFORM_OPTIONS / devicePlatformCategory).
-PLATFORM_CATEGORIES = ["Mac", "iPhone", "iPad", "Apple TV", "Apple Watch", "iPod"]
+# Coarse device family for the "platform" condition, derived from the model identifier ("MacBookPro18,3", "iPad13,8").
+# Mirrored in webui/lib/config.ts.
+PLATFORM_CATEGORIES = ["Mac", "iPhone", "iPad", "Apple TV", "Apple Watch", "iPod",
+                       "Apple Vision Pro"]
 
 
 def device_platform_category(model: Optional[str]) -> str:
@@ -81,12 +53,14 @@ def device_platform_category(model: Optional[str]) -> str:
         return "Apple TV"
     if m.startswith("watch"):
         return "Apple Watch"
+    if m.startswith("realitydevice"):  # RealityDevice14,1 is Apple Vision Pro
+        return "Apple Vision Pro"
     if "mac" in m:  # MacBook*, Macmini, MacPro, iMac, Mac14,2, ...
         return "Mac"
     return "Other"
 
 
-#  Conditions 
+# ==Conditions==
 
 def evaluate_condition(
     device: Any,
@@ -94,14 +68,18 @@ def evaluate_condition(
     device_groups: Optional[List[str]] = None,
     group_resolver: Optional[GroupResolver] = None,
 ) -> bool:
-    """Evaluate one condition against a device. ``negate: true`` inverts."""
+    """Evaluate one condition against a device. negate: true inverts."""
+    if not isinstance(condition, dict):
+        # Hand-edited YAML can put a bare string or null where a mapping belongs.
+        logger.warning("condition is not a mapping, treating as no-match: %r", condition)
+        return False
     try:
         result = _evaluate_base(device, condition, device_groups or [], group_resolver)
+        return (not result) if condition.get("negate") else result
     except Exception:
         # An authoring mistake must never break evaluation (enroll hot path).
         logger.exception("condition evaluation failed: %r", condition)
-        result = False
-    return (not result) if condition.get("negate") else result
+        return False
 
 
 def _evaluate_base(
@@ -134,17 +112,13 @@ def _evaluate_base(
     if ctype == "enrollment_date":
         return _date(getattr(device, "enrollment_date", None), operator, value)
     if ctype == "tag":
-        # Membership in the device's imperative tag set (models.Device.tags),
-        # written by ATC/Dispatcher and by hand. Operator is ``in`` like
-        # ``group``/``platform``; combine with ``negate: true`` for "NOT tagged X".
+        # The device's imperative tag set (Device.tags), written by ATC, Dispatcher, or by hand.
         want = [str(n) for n in (value if isinstance(value, list) else [value]) if n]
         have = set(getattr(device, "tags", []) or [])
         return any(n in have for n in want)
     if ctype == "enrollment_source":
-        # How the device enrolled: "ade" (Automated Device Enrollment via ABM/ASM)
-        # or "ota" (user-installed / manual). Set at adoption time from the device's
-        # DEP linkage (services.webhook_handler); absent ⇒ treated as "ota". Operator
-        # is ``in`` like ``platform``; combine with ``negate: true`` for "NOT ADE".
+        # "ade" if the device came in through ABM/ASM, "ota" for user-installed. Set at adoption time from the DEP
+        # linkage; missing means "ota".
         want = [str(n) for n in (value if isinstance(value, list) else [value]) if n]
         source = (getattr(device, "attributes", {}) or {}).get("enrollment_source") or "ota"
         return source in want
@@ -152,9 +126,8 @@ def _evaluate_base(
 
 
 def _string(device_value: str, operator: str, condition_value: Any) -> bool:
-    """String conditions. Guarded: a malformed regex (re.error), a
-    catastrophic-backtracking pattern (TimeoutError) or an unexpected value
-    type (TypeError) is a no-match, never an exception."""
+    """String conditions. A bad regex, a backtracking blowup or a wrong value type is a no-match rather than an
+    exception."""
     try:
         if operator == "regex":
             if _HAS_REGEX_TIMEOUT:
@@ -163,16 +136,14 @@ def _string(device_value: str, operator: str, condition_value: Any) -> bool:
                 ))
             return bool(re.match(condition_value, device_value))
         elif operator == "in":
-            # Membership in a set of exact values. A scalar is treated as a
-            # one-element list (equality), not a substring test, so the
-            # client mirror (which always wraps in a list) agrees.
+            # Exact-value membership. A scalar becomes a one-element list rather than a substring test, so the client
+            # mirror (which always wraps in a list) agrees with us.
             values = condition_value if isinstance(condition_value, (list, tuple)) else [condition_value]
             return device_value in values
         elif operator == "equals":
             return device_value == condition_value
         elif operator == "contains":
-            # A list value matches if ANY listed substring is present, so an
-            # author can match several fragments at once.
+            # A list matches if any of its substrings is present.
             if isinstance(condition_value, (list, tuple)):
                 return any(str(v) in device_value for v in condition_value)
             return condition_value in device_value
@@ -183,11 +154,36 @@ def _string(device_value: str, operator: str, condition_value: Any) -> bool:
     return False
 
 
+# Memoized parses of condition version strings, never cleared.
+_CONDITION_VERSION_CACHE: Dict[str, Any] = {}
+
+# Sentinel distinguishing "parsed to an invalid version" from "not yet in the cache", since packaging.version.parse
+# never itself returns None.
+_INVALID_CONDITION_VERSION = object()
+
+
+def _parse_condition_version(condition_value: Any) -> Any:
+    """Parse (and memoize) the constant side of an os_version condition."""
+    key = str(condition_value)
+    cached = _CONDITION_VERSION_CACHE.get(key)
+    if cached is not None:
+        return cached
+    try:
+        parsed = version.parse(key)
+    except Exception:
+        parsed = _INVALID_CONDITION_VERSION
+    _CONDITION_VERSION_CACHE[key] = parsed
+    return parsed
+
+
 def _version(device_version: str, operator: str, condition_value: Any) -> bool:
-    from packaging import version
+    # The device's own version varies per call, so it is parsed fresh every time; only the authored comparison value is
+    # memoized. One try wraps both parses and the comparison, so any failure reaches the same no-match return.
     try:
         dev = version.parse(device_version)
-        cond = version.parse(str(condition_value))
+        cond = _parse_condition_version(condition_value)
+        if cond is _INVALID_CONDITION_VERSION:
+            return False
         if operator == "gte":
             return dev >= cond
         elif operator == "gt":
@@ -224,18 +220,14 @@ def _date(device_date: Optional[datetime], operator: str, condition_value: Any) 
     return False
 
 
-#  Scopes (profiles / app versions) 
+# ==Scopes (profiles / app versions)==
 
 def evaluate_scope(
     device: Any,
     device_groups: List[str],
     scope: Dict[str, Any],
 ) -> bool:
-    """Is a device inside a scope (groups/conditions/include/exclude)?
-
-    Exclude wins over everything; include wins over groups/conditions; with
-    neither groups nor conditions, only included devices match.
-    """
+    """Whether a device is inside a scope (groups/conditions/include/exclude)."""
     serial = getattr(device, "serial_number", "") or ""
     exclude = scope.get("exclude_devices") or []
     if serial and serial in exclude:
@@ -256,7 +248,7 @@ def evaluate_scope(
     return True
 
 
-#  Gradual rollout 
+# ==Gradual rollout==
 
 # Iteration backstop for the wave walk (covers years of hourly steps).
 _MAX_WAVE_STEPS = 20000
@@ -271,16 +263,7 @@ def _parse_start(value: Any) -> Optional[datetime]:
 
 
 def rollout_coverage(rollout: Dict[str, Any], now: Optional[datetime] = None) -> int:
-    """Percent of devices (0-100) the rollout currently covers.
-
-    Wave 1 (the first ``percent``) opens at ``start``; each completed
-    ``interval_hours`` window opens another wave at the moment it ends. With
-    ``skip_weekends``, waves whose opening moment falls on a Saturday/Sunday
-    (UTC) are deferred -- no new devices start updating over the weekend; the
-    rollout resumes with the first weekday-ending window.
-    A missing/invalid start fails OPEN (100%) so a hand-edited config can't
-    silently freeze deployments; a future start means 0%.
-    """
+    """Percent of devices (0-100) the rollout currently covers."""
     try:
         percent = int(rollout.get("percent") or 0)
     except (TypeError, ValueError):
@@ -311,9 +294,8 @@ def rollout_coverage(rollout: Dict[str, Any], now: Optional[datetime] = None) ->
         nxt = t + interval
         if nxt > now:
             break
-        # This window [t, nxt) has fully elapsed. Its wave opens at nxt; with
-        # skip_weekends a weekend opening moment defers the wave (nothing new
-        # starts updating on a Saturday/Sunday, UTC).
+        # Window [t, nxt) fully elapsed, so its wave opens at nxt, unless skip_weekends pushes a weekend opening into
+        # the next window.
         if not (skip_weekends and nxt.weekday() >= 5):
             completed += 1
         t = nxt
@@ -332,11 +314,7 @@ def device_in_rollout(
     item_key: str,
     now: Optional[datetime] = None,
 ) -> bool:
-    """Has this device's wave opened yet? (True = act now, False = hold.)
-
-    Salted by the rollout ``start`` so restarting a rollout reshuffles which
-    devices go first, while within one rollout assignment never changes.
-    """
+    """Whether this device's wave has opened: True acts now, False holds."""
     if not isinstance(rollout, dict) or not rollout:
         return True
     coverage = rollout_coverage(rollout, now)

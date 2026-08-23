@@ -1,32 +1,26 @@
-"""Backend E2E for the account-config + firmware-lock ATC nodes and the
-Break-The-Glass secret escrow, on in-memory sqlite (no docker, no MDM network).
+"""Backend E2E for the account-config and firmware-lock ATC nodes and device secret escrow, on in-memory sqlite (no
+docker, no MDM network).
 
-Covers:
-  * account_hash.password_hash_blob shape (SALTED-SHA512-PBKDF2 / 128 / 32) and
-    that the on-wire passwordHash actually verifies against the escrowed password.
-  * the configure_accounts node: AccountConfiguration keys for standard/admin/skip,
-    managed-admin provisioning + escrow, and password redaction from the audit task.
-  * the set_firmware_lock node: SetRecoveryLock (Apple Silicon) vs SetFirmwarePassword
-    (Intel) vs skip (unknown architecture), each escrowing its password.
-  * Break-The-Glass: device_secrets.reveal returns the plaintext, stamps the
-    ledger, and raises (then bumps) a single Dispatcher alert.
-  * the flows.yaml validator for the two new node types.
+Covers account_hash.password_hash_blob (SALTED-SHA512-PBKDF2, 128, 32) and that the on-wire passwordHash verifies
+against the escrowed password. Then the configure_accounts node: AccountConfiguration keys for standard/admin/skip,
+managed-admin provisioning and escrow, and password redaction from the audit task. Then set_firmware_lock choosing
+SetRecoveryLock on Apple silicon, SetFirmwarePassword on Intel and nothing on an unknown architecture, each escrowing
+its password. Finally device_secrets.reveal, which returns the plaintext, stamps the ledger and raises a single
+Dispatcher alert, and the flows.yaml validator for both node types.
 
-Run:  PYTHONPATH=. ./.venv/bin/python tests/verify_account_config.py
-Exits non-zero if any check fails.
+Run:  PYTHONPATH=. ./.venv/bin/python tests/verify_account_config.py Exits non-zero if any check fails.
 """
 
-import asyncio
 import hashlib
 import os
 import plistlib
-import sys
 import tempfile
 from pathlib import Path
 
-# Encryption-at-rest must be configured before crypto_secrets is first used
-# (escrow refuses to store plaintext). crypto_secrets reads the env lazily.
+# Encryption-at-rest must be configured before crypto_secrets is first used (escrow refuses to store plaintext).
+# crypto_secrets reads the env lazily.
 from cryptography.fernet import Fernet
+
 os.environ["SECRET_ENCRYPTION_KEY"] = Fernet.generate_key().decode()
 
 import yaml
@@ -35,8 +29,8 @@ from tortoise import Tortoise
 _FAILURES = []
 
 # Captured MDM commands (the fake connector appends here).
-ACCOUNT_CMDS = []   # list of kwargs dicts from account_configuration
-RAW_CMDS = []       # list of (request_type, fields) from send_raw_command
+ACCOUNT_CMDS = []  # list of kwargs dicts from account_configuration
+RAW_CMDS = []  # list of (request_type, fields) from send_raw_command
 
 
 def check(name, cond):
@@ -157,7 +151,7 @@ async def main():
     secret = await DeviceSecret.get_or_none(device_id=dev.id,
                                             kind=DeviceSecret.KIND_MANAGED_ADMIN)
     check("managed-admin password escrowed", secret is not None)
-    check("escrow is sealed (glass intact) initially", secret and secret.revealed_at is None)
+    check("escrow starts unrevealed", secret and secret.revealed_at is None)
     check("escrow value is not stored in plaintext",
           secret and secret.value_enc and "mmadmin" not in secret.value_enc)
 
@@ -175,7 +169,7 @@ async def main():
                                      ph["salt"], ph["iterations"], dklen=128)
     check("passwordHash entropy matches PBKDF2(revealed_password)", recomputed == ph["entropy"])
 
-    #  3) Break-The-Glass ledger + dispatcher alert
+    #  3) reveal ledger and dispatcher alert
     print("3) break the glass stamps the ledger and raises one alert")
     await secret.refresh_from_db()
     check("reveal stamped the ledger (count=1, broken)",
@@ -194,12 +188,12 @@ async def main():
                                 rule_id="breakglass:managed_admin_password").count()
     check("still a single break-glass alert (updated, not duplicated)", alerts == 1)
 
-    #  4) set_firmware_lock: Apple Silicon -> SetRecoveryLock (escrowed)
+    #  4) set_firmware_lock: Apple silicon -> SetRecoveryLock (escrowed)
     print("4) set_firmware_lock chooses the command by architecture")
     rl = await DeviceSecret.get_or_none(device_id=dev.id, kind=DeviceSecret.KIND_RECOVERY_LOCK)
-    check("recovery-lock password escrowed for Apple Silicon", rl is not None)
+    check("recovery-lock password escrowed for Apple silicon", rl is not None)
     recovery_cmds = [f for (rt, f) in RAW_CMDS if rt == "SetRecoveryLock"]
-    check("SetRecoveryLock sent for Apple Silicon", len(recovery_cmds) == 1)
+    check("SetRecoveryLock sent for Apple silicon", len(recovery_cmds) == 1)
     check("SetRecoveryLock carries a NewPassword", recovery_cmds and "NewPassword" in recovery_cmds[0])
 
     #  Intel device -> SetFirmwarePassword
@@ -253,14 +247,149 @@ async def main():
     check("static firmware lock without a password rejected",
           not v and any("password" in e for e in errs))
 
+    #  6) a static password in a flow node never leaves through the config API
+    print("6) flows.yaml static passwords are redacted on every read path")
+    # The import position doesn't matter here; api.main resolves the YAML base per call.
+    from controller.auth.dependencies import Principal
+    from controller.models.tenant import FlowRun, User
+    from controller.api.main import (
+        _REDACTED, _redact_flows_history, _restore_flow_secrets,
+        get_config_history_version, get_flow_run, get_yaml_config,
+        _snapshot_config_history,
+    )
+
+    SECRET_PW = "Sup3rSecret-BreakGlass"
+    static_flow = {**FLOW, "nodes": [
+        {"id": "s", "type": "start", "params": {"kind": "enroll_dep"}, "next": "cfg"},
+        {"id": "cfg", "type": "configure_accounts", "next": "fw", "params": {
+            "primary_account": "prompt_standard",
+            "managed_admin": True,
+            "managed_admin_password_source": "static",
+            "managed_admin_password": SECRET_PW,
+        }},
+        {"id": "fw", "type": "set_firmware_lock", "next": "e",
+         "params": {"password_source": "static", "password": SECRET_PW}},
+        {"id": "e", "type": "end", "params": {}},
+    ]}
+    _write_configs(base, static_flow)
+
+    member_user = await User.create(tenant=tenant, email="member@default", role="member")
+    member = Principal(tenant=tenant, user=member_user, email="member@default",
+                       role="member")
+
+    doc = await get_yaml_config("flows", False, member)
+    flow_obj = doc.get("flow") or (doc.get("flows") or [{}])[0]
+    node_params = {n["id"]: n.get("params", {}) for n in flow_obj.get("nodes", [])}
+    check("GET /config/flows redacts the managed-admin password",
+          node_params["cfg"]["managed_admin_password"] == _REDACTED)
+    check("GET /config/flows redacts the firmware password",
+          node_params["fw"]["password"] == _REDACTED)
+    check("GET /config/flows keeps non-secret params",
+          node_params["cfg"]["primary_account"] == "prompt_standard")
+
+    raw = await get_yaml_config("flows", True, member)
+    body = raw.body.decode()
+    check("GET /config/flows?raw=true has no plaintext password", SECRET_PW not in body)
+    check("GET /config/flows?raw=true still carries the sentinel", _REDACTED in body)
+
+    _snapshot_config_history("default", "flows", "tester@example.com")
+    versions = sorted((tdir / "_history" / "flows").glob("*.json"))
+    hist = await get_config_history_version("flows", versions[-1].stem, member)
+    check("history snapshot on disk keeps the real password",
+          SECRET_PW in versions[-1].read_text())
+    check("GET /config/flows/history/{id} redacts it", SECRET_PW not in hist["content"])
+    check("unparseable history snapshot fails closed",
+          _redact_flows_history("{[not yaml") == "")
+
+    run = await FlowRun.create(
+        tenant=tenant, device=dev, flow_id="acct", flow_hash="x" * 64,
+        status="completed", context={"flow": static_flow},
+    )
+    run_data = await get_flow_run(str(run.id), member)
+    run_params = {n["id"]: n.get("params", {}) for n in run_data["flow"]["nodes"]}
+    check("GET /flow-runs/{id} redacts the pinned snapshot",
+          run_params["fw"]["password"] == _REDACTED
+          and run_params["cfg"]["managed_admin_password"] == _REDACTED)
+    check("a run that still has a snapshot is reported as pinned",
+          run_data["flow_source"] == "pinned")
+    await run.refresh_from_db()
+    check("redacting the response leaves the stored snapshot intact",
+          run.context["flow"]["nodes"][2]["params"]["password"] == SECRET_PW)
+
+    #  6a) once a run's snapshot is gone, the run viewer falls back to flows.yaml and reports whether that
+    #      fallback still matches what ran.
+    print("6a) GET /flow-runs/{id} falls back to flows.yaml once the snapshot is gone")
+    pinned_hash = atc._flow_hash(static_flow)
+
+    waiting_run = await FlowRun.create(
+        tenant=tenant, device=dev, flow_id="acct", flow_hash=pinned_hash,
+        status="waiting", context={"flow": static_flow, "timeline": []},
+    )
+    waiting_data = await get_flow_run(str(waiting_run.id), member)
+    check("a waiting run still returns its pinned definition",
+          waiting_data["flow_source"] == "pinned" and waiting_data["flow"] is not None)
+
+    snapshot_free_run = await FlowRun.create(
+        tenant=tenant, device=dev, flow_id="acct", flow_hash=pinned_hash,
+        status="completed", context={"timeline": []},  # no 'flow' key: dropped at _complete
+    )
+    current_data = await get_flow_run(str(snapshot_free_run.id), member)
+    check("a snapshot-free terminal run gets a fallback flow, not null",
+          current_data["flow"] is not None)
+    check("an unedited fallback is reported as matching what ran",
+          current_data["flow_source"] == "current")
+    current_params = {n["id"]: n.get("params", {}) for n in current_data["flow"]["nodes"]}
+    check("the fallback flow gets the same redaction as any other read",
+          current_params["fw"]["password"] == _REDACTED)
+
+    # flows.yaml edited after the run's flow_hash was pinned: same run, different current document.
+    _write_configs(base, {**static_flow, "name": "Account flow (edited)"})
+    edited_data = await get_flow_run(str(snapshot_free_run.id), member)
+    check("a fallback edited since the run executed is reported as edited",
+          edited_data["flow_source"] == "edited" and edited_data["flow"] is not None)
+
+    # The tenant's flow was since deleted entirely: null, not a raise.
+    (tdir / "flows.yaml").unlink()
+    gone_data = await get_flow_run(str(snapshot_free_run.id), member)
+    check("a run whose flow no longer exists returns a null flow without raising",
+          gone_data["flow"] is None and gone_data["flow_source"] == "unavailable")
+
+    _write_configs(base, static_flow)  # restore flows.yaml for the checks below
+
+    # A save that echoes the sentinel back must not overwrite the stored password.
+    echoed = {"flow": {**static_flow, "nodes": [
+        {**n, "params": {**n.get("params", {}),
+                         **({"password": _REDACTED} if n["id"] == "fw" else {}),
+                         **({"managed_admin_password": _REDACTED} if n["id"] == "cfg" else {})}}
+        for n in static_flow["nodes"]
+    ]}}
+    _restore_flow_secrets("default", echoed)
+    restored = {n["id"]: n.get("params", {}) for n in echoed["flow"]["nodes"]}
+    check("PUT restores an echoed-back firmware password",
+          restored["fw"]["password"] == SECRET_PW)
+    check("PUT restores an echoed-back managed-admin password",
+          restored["cfg"]["managed_admin_password"] == SECRET_PW)
+
+    orphan = {"flow": {**static_flow, "nodes": [
+        {"id": "s", "type": "start", "params": {"kind": "enroll_dep"}, "next": "new"},
+        {"id": "new", "type": "set_firmware_lock", "next": "e",
+         "params": {"password_source": "static", "password": _REDACTED}},
+        {"id": "e", "type": "end", "params": {}},
+    ]}}
+    _restore_flow_secrets("default", orphan)
+    check("sentinel on an unknown node is dropped, never persisted",
+          "password" not in orphan["flow"]["nodes"][1]["params"])
+
     await Tortoise.close_connections()
     print()
     if _FAILURES:
         print(f"FAILED ({len(_FAILURES)}): " + "; ".join(_FAILURES))
         return 1
-    print("All account-config / break-the-glass checks passed.")
+    print("All account-config and secret-escrow checks passed.")
     return 0
 
 
 if __name__ == "__main__":
-    sys.exit(asyncio.run(main()))
+    from tests._verify_harness import run
+
+    run(main)

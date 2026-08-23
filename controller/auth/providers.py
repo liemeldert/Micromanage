@@ -1,24 +1,6 @@
-"""External identity providers (Clerk / generic OIDC).
+"""External identity providers (Clerk and generic OIDC).
 
-A production tenant can delegate authentication to Clerk or any OIDC provider.
-The frontend obtains a provider-issued JWT and presents it as a normal Bearer
-token; the controller verifies it against the provider's published JWKS using
-PyJWT's built-in JWKS client (no hand-rolled crypto, no secret shared with the
-provider). The verified subject/email is then mapped to a local ``User`` row,
-which is what carries tenant membership and role.
-
-Tenant ``auth_config`` shape for external providers::
-
-    {
-      "provider": "clerk" | "oidc",
-      "issuer": "https://your-app.clerk.accounts.dev",   # required
-      "jwks_url": "https://.../.well-known/jwks.json",    # optional, derived from issuer
-      "audience": "your-api-audience",                    # optional
-      "authorized_parties": ["https://app.example.com"],  # optional (Clerk azp check)
-      "email_claim": "email",                              # optional, default "email"
-      "sub_claim": "sub",                                  # optional, default "sub"
-      "algorithms": ["RS256"]                              # optional
-    }
+Verifies provider-issued JWTs against published JWKS and maps to local User rows.
 """
 
 import asyncio
@@ -27,8 +9,7 @@ from typing import Any, Dict, List, Optional
 import jwt
 from jwt import PyJWKClient
 
-# Cache one JWKS client per URL so signing keys are fetched once and cached
-# (PyJWKClient keeps its own in-memory key cache).
+# One client per JWKS URL; PyJWKClient keeps its own in-memory cache of the signing keys it has fetched.
 _JWK_CLIENTS: Dict[str, PyJWKClient] = {}
 
 
@@ -72,8 +53,7 @@ class ExternalJWTProvider:
             leeway=30,
             options={"verify_aud": bool(self.audience)},
         )
-        # Clerk recommends validating the authorized party (azp) against the
-        # set of origins you actually serve.
+        # Clerk recommends validating the authorized party (azp) against the set of origins you actually serve.
         if self.authorized_parties:
             azp = claims.get("azp")
             if azp not in self.authorized_parties:

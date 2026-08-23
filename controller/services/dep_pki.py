@@ -1,17 +1,6 @@
 """PKI for linking an Apple Business/School Manager server token (ADE/DEP).
 
-The link handshake (docs/specs/dep-ade-spec.md §3.2):
-
-  1. We generate an RSA keypair + a self-signed X.509 cert.
-  2. The admin uploads the PUBLIC cert to ABM/ASM (Settings -> MDM server).
-  3. ABM ENCRYPTS the server token to that public key -> a downloadable ``.p7m``
-     (CMS EnvelopedData, S/MIME).
-  4. The admin uploads the ``.p7m`` here; we DECRYPT it with the PRIVATE key.
-  5. Inside is the OAuth1 credential JSON the DEP client authenticates with.
-
-Nothing here touches the network. The private key is the counterpart to the crown-
-jewel token (it can decrypt a re-downloaded token), so callers persist it encrypted
-(services.crypto_secrets) and never log it.
+Decrypt Apple's CMS-encrypted server token to extract OAuth1 credentials.
 """
 
 import base64
@@ -38,11 +27,9 @@ class DepTokenError(ValueError):
 def generate_keypair(
     common_name: str = "micromanage-dep", validity_days: int = 365
 ) -> Tuple[str, str, _dt.datetime]:
-    """Generate an RSA-2048 keypair + self-signed cert for the ABM token exchange.
+    """Generate RSA-2048 keypair + self-signed cert for ABM token exchange.
 
-    Returns ``(private_key_pem, public_cert_pem, cert_expires_at)``. ABM only uses
-    the public key to encrypt the token, but the upload form is an X.509 cert, so we
-    wrap the public key in a self-signed cert.
+    Returns (private_key_pem, public_cert_pem, cert_expires_at).
     """
     key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
     now = _dt.datetime.now(_dt.timezone.utc)
@@ -74,14 +61,9 @@ def generate_keypair(
 def decrypt_server_token(
     p7m: bytes, private_key_pem: str, cert_pem: str
 ) -> Dict[str, Any]:
-    """Decrypt an ABM ``.p7m`` server token and parse the OAuth1 credentials.
+    """Decrypt ABM .p7m server token (S/MIME, PEM, base64, or DER) and parse OAuth1 credentials.
 
-    ABM/ASM hands back the token as CMS EnvelopedData encrypted to our public key.
-    The file can arrive as S/MIME (with MIME headers -- Apple's usual form), a PEM
-    ``PKCS7`` block, a bare base64 blob, or raw DER. We normalise all of those to
-    DER ourselves (Python's ``email`` parser handles the MIME/base64 quirks that
-    trip cryptography's S/MIME reader), then decrypt. Raises ``DepTokenError`` on
-    any failure.
+    Raises DepTokenError if decryption or parsing fails.
     """
     key = serialization.load_pem_private_key(private_key_pem.encode(), password=None)
     cert = x509.load_pem_x509_certificate(cert_pem.encode())
@@ -90,9 +72,7 @@ def decrypt_server_token(
 
     plaintext: Optional[bytes] = None
     errors = []
-    # Preferred: normalise to DER, then a self-contained CMS decrypt that supports
-    # any content cipher / RSA key-transport Apple uses. Fall back to cryptography's
-    # built-in readers (which handle inputs they themselves produced, e.g. tests).
+    # Try self-contained CMS decrypt first, then fall back to cryptography's built-in readers.
     attempts = []
     if der is not None:
         attempts.append(("cms", lambda: _decrypt_enveloped_der(der, key)))
@@ -108,7 +88,7 @@ def decrypt_server_token(
             if result:
                 plaintext = result
                 break
-        except Exception as exc:  # noqa: BLE001 -- try the next form
+        except Exception as exc:  # noqa: BLE001, just try the next form
             errors.append(f"{name}: {exc}")
     if plaintext is None:
         raise DepTokenError(
@@ -117,6 +97,28 @@ def decrypt_server_token(
         )
 
     return parse_token(plaintext.decode("utf-8", errors="replace"))
+
+
+def decrypt_cms(blob: bytes, private_key_pem: str) -> Optional[bytes]:
+    """Decrypt one CMS EnvelopedData blob (S/MIME, PEM, base64, or DER), return plaintext or None.
+
+    General-purpose; returns None on failure (for callers on webhook paths that need graceful degradation).
+    """
+    if not blob:
+        return None
+    try:
+        key = serialization.load_pem_private_key(private_key_pem.encode(), password=None)
+    except Exception:
+        logger.exception("CMS decrypt: the private key would not load")
+        return None
+    der = _extract_cms_der(blob)
+    if der is None:
+        return None
+    try:
+        return _decrypt_enveloped_der(der, key)
+    except Exception:
+        logger.warning("CMS decrypt failed (wrong key, or an unsupported cipher)")
+        return None
 
 
 _PEM_PKCS7_RE = re.compile(
@@ -128,7 +130,7 @@ def _extract_cms_der(p7m: bytes) -> Optional[bytes]:
     """Normalise an ABM token (S/MIME, PEM, base64, or raw DER) to CMS DER bytes."""
     if not p7m:
         return None
-    # Raw DER already? CMS ContentInfo is a SEQUENCE (tag 0x30).
+    # Raw DER: CMS ContentInfo is a SEQUENCE (tag 0x30).
     if p7m[:1] == b"\x30":
         return p7m
 
@@ -143,8 +145,8 @@ def _extract_cms_der(p7m: bytes) -> Optional[bytes]:
         except Exception:
             pass
 
-    # S/MIME: MIME headers + a base64 body. The email parser decodes the
-    # Content-Transfer-Encoding for us regardless of line-wrapping / CRLF quirks.
+    # S/MIME: MIME headers + a base64 body. The email parser decodes the Content-Transfer-Encoding for us regardless of
+    # line-wrapping / CRLF quirks.
     lowered = stripped.lower()
     if lowered.startswith(("content-type:", "mime-version:")) or "pkcs7-mime" in lowered:
         try:
@@ -168,12 +170,9 @@ def _extract_cms_der(p7m: bytes) -> Optional[bytes]:
 
 
 def _decrypt_enveloped_der(der: bytes, key) -> Optional[bytes]:
-    """Decrypt CMS EnvelopedData (DER) with our RSA private key, using asn1crypto to
-    parse and cryptography primitives for the RSA/AES(3DES) work.
+    """Decrypt CMS EnvelopedData (DER) using asn1crypto parsing + cryptography primitives.
 
-    Self-contained so we don't depend on cryptography's S/MIME reader or its narrow
-    pkcs7 cipher support. Returns the plaintext, or None if this isn't EnvelopedData
-    / no recipient matches / the cipher is unsupported.
+    Self-contained: supports any cipher and RSA scheme, not limited to cryptography's pkcs7 module.
     """
     from asn1crypto import cms as _cms
     from cryptography.hazmat.primitives import padding as sym_padding
@@ -250,7 +249,7 @@ def parse_token(text: str) -> Dict[str, Any]:
         # Fall back to the outermost { ... } so stray S/MIME headers don't break json.
         start, end = candidate.find("{"), candidate.rfind("}")
         if start != -1 and end != -1 and end > start:
-            candidate = candidate[start : end + 1]
+            candidate = candidate[start: end + 1]
     try:
         data = json.loads(candidate)
     except Exception as exc:
@@ -266,7 +265,7 @@ def parse_token(text: str) -> Dict[str, Any]:
 
 
 def token_expiry(token: Dict[str, Any]) -> Optional[_dt.datetime]:
-    """Parse ``access_token_expiry`` (ISO 8601) to an aware datetime, or None."""
+    """Parse access_token_expiry (ISO 8601) to an aware datetime, or None."""
     raw = token.get("access_token_expiry")
     if not raw:
         return None

@@ -1,16 +1,12 @@
-"""Standalone sqlite E2E check for Phase 0 (Device Tags).
+"""Standalone sqlite E2E check for device tags.
 
 Run (from repo root, with the project venv):
 
     PYTHONPATH=. ./.venv/bin/python tests/verify_tags.py
 
-No docker/Postgres needed: it spins up an in-memory sqlite via Tortoise,
-generate_schemas() to create every model column (incl. the new ``tags``), and
-exercises the tag scope condition, the tags->groups recompute chain, and the
-tags.yaml validator (including the unknown-tag warning). Prints PASS/FAIL and
-exits non-zero on any failure.
+No docker or Postgres needed: in-memory sqlite through Tortoise, with generate_schemas() for the full column set. Covers
+the tag scope condition, the tags-to-groups recompute chain, and the tags.yaml validator with its unknown-tag warning.
 """
-import asyncio
 import sys
 import tempfile
 from pathlib import Path
@@ -135,14 +131,152 @@ async def main() -> None:
         valid2, errors2, _ = YAMLValidator(tdp).validate_all()
         check("invalid tag operator rejected", valid2 is False and len(errors2) >= 1)
 
+    print("\n[7] evaluate_device_groups memoizes within one call")
+    # Without the memo, a group referenced by N others is resolved once per referencer, and a leaf condition can cost
+    # the regex module's 2 second worst case. The memo is a local dict, fresh per call. Cycle-guarded results stay out
+    # of it, so every graph below is compared against a memo-free walk rather than hand-written expectations.
+    import logging
+
+    import controller.services.group_manager as gm_mod
+
+    def naive_groups(manager, device_, groups_cfg):
+        """Reference walk: per-path cycle guard, no memo at all."""
+        by_name = {g["name"]: g for g in groups_cfg if g.get("name")}
+
+        def in_group(name, visiting):
+            if name in visiting:
+                return False
+            group = by_name.get(name)
+            if group is None:
+                return False
+            nxt = visiting | {name}
+            try:
+                return manager._matches(device_, group, lambda n: in_group(n, nxt))
+            except Exception:
+                return False
+
+        return [name for name in by_name if in_group(name, frozenset())]
+
+    def counted(fn, *args):
+        """Run fn, returning (result, evaluate_condition call count)."""
+        calls = {"n": 0}
+        real = gm_mod.evaluate_condition
+
+        def spy(*a, **kw):
+            calls["n"] += 1
+            return real(*a, **kw)
+
+        gm_mod.evaluate_condition = spy
+        try:
+            return fn(*args), calls["n"]
+        finally:
+            gm_mod.evaluate_condition = real
+
+    def ref(name, negate=False):
+        cond = {"type": "group", "operator": "in", "value": name}
+        if negate:
+            cond["negate"] = True
+        return cond
+
+    # Fan-in plus a chain: one leaf under ten middles under one top, so the leaf is referenced eleven times.
+    fan_in = [{"name": "leaf", "conditions": [
+        {"type": "platform", "operator": "in", "value": ["Mac"]}]}]
+    fan_in += [{"name": f"mid-{i}", "conditions": [ref("leaf")]} for i in range(10)]
+    fan_in.append({"name": "top", "conditions": [ref(f"mid-{i}") for i in range(10)]})
+
+    memo_groups, memo_calls = counted(gm.evaluate_device_groups, plain, fan_in)
+    naive_result, naive_calls = counted(naive_groups, gm, plain, fan_in)
+    check(f"fan-in membership is unchanged from a naive re-resolution "
+          f"({memo_groups})", memo_groups == naive_result
+          and memo_groups == ["leaf"] + [f"mid-{i}" for i in range(10)] + ["top"])
+    check(f"...at strictly fewer condition evaluations "
+          f"(memoized {memo_calls}, naive {naive_calls})",
+          memo_calls < naive_calls)
+
+    class _WarnCapture(logging.Handler):
+        def __init__(self):
+            super().__init__()
+            self.messages = []
+
+        def emit(self, record):
+            self.messages.append(record.getMessage())
+
+    group_log = logging.getLogger("controller.services.group_manager")
+
+    def with_warnings(fn, *args):
+        cap = _WarnCapture()
+        group_log.addHandler(cap)
+        try:
+            return fn(*args), cap.messages
+        finally:
+            group_log.removeHandler(cap)
+
+    # A two-group ring. Both members resolve to no-match and the guard says so.
+    ring = [{"name": "ring-a", "conditions": [ref("ring-b")]},
+            {"name": "ring-b", "conditions": [ref("ring-a")]}]
+    (ring_groups, ring_warnings) = with_warnings(
+        gm.evaluate_device_groups, plain, ring)
+    check("a two-group cycle resolves to no-match for both members",
+          ring_groups == [] == naive_groups(gm, plain, ring))
+    check("...and the cycle guard logs it",
+          any("group cycle detected" in m for m in ring_warnings))
+
+    # The path-dependent ring, and the reason a cycle-tainted result must never reach the memo. Either entry point cuts
+    # the ring somewhere different and both members still come out True, which a name-keyed memo cannot hold.
+    neg_ring = [{"name": "neg-a", "conditions": [ref("neg-b", negate=True)]},
+                {"name": "neg-b", "conditions": [ref("neg-a")]}]
+    neg_groups = gm.evaluate_device_groups(plain, neg_ring)
+    check(f"a negated ring agrees with the naive walk in both entry orders "
+          f"({neg_groups})",
+          neg_groups == naive_groups(gm, plain, neg_ring)
+          and neg_groups == ["neg-a", "neg-b"])
+
+    # The memo is per call. Same graph, two devices, opposite answers.
+    check("the memo does not leak between devices",
+          gm.evaluate_device_groups(plain, fan_in) != []
+          and gm.evaluate_device_groups(dev, fan_in) == []
+          and gm.evaluate_device_groups(plain, fan_in) != [])
+
+    # Self-loops, both polarities. The guard substitutes no-match for the recursive reference, so the plain one cannot
+    # match and the negated one necessarily does.
+    selfies = [{"name": "self-plain", "conditions": [ref("self-plain")]},
+               {"name": "self-neg", "conditions": [ref("self-neg", negate=True)]}]
+    self_groups = gm.evaluate_device_groups(plain, selfies)
+    check("a self-loop is no-match, its negation is a match",
+          self_groups == ["self-neg"] == naive_groups(gm, plain, selfies))
+
+    # One acyclic group referenced from inside a ring and from outside it in the same call. The reference from outside
+    # still has to get the right answer with nothing inside the ring cached.
+    mixed = [
+        {"name": "shared", "conditions": [
+            {"type": "platform", "operator": "in", "value": ["Mac"]}]},
+        {"name": "mix-a", "conditions": [ref("mix-b"), ref("shared")]},
+        {"name": "mix-b", "conditions": [ref("mix-a")]},
+        {"name": "plain-user", "conditions": [ref("shared")]},
+    ]
+    mixed_groups = gm.evaluate_device_groups(plain, mixed)
+    check(f"a mixed cyclic/acyclic graph agrees with the naive walk "
+          f"({mixed_groups})",
+          mixed_groups == naive_groups(gm, plain, mixed)
+          and mixed_groups == ["shared", "plain-user"])
+
+    # A reference to a name absent from groups_config is a fact about the config, not the path, so it is safe to cache.
+    missing = [{"name": "points-nowhere", "conditions": [ref("no-such-group")]},
+               {"name": "points-nowhere-2", "conditions": [ref("no-such-group")]}]
+    check("a reference to an absent group is a no-match, not an error",
+          gm.evaluate_device_groups(plain, missing)
+          == naive_groups(gm, plain, missing) == [])
+
     await Tortoise.close_connections()
 
     print()
     if FAILURES:
         print(f"RESULT: FAIL ({len(FAILURES)} check(s) failed): {FAILURES}")
         sys.exit(1)
-    print("RESULT: PASS (all Phase 0 tag checks passed)")
+    print("RESULT: PASS (all device tag checks passed)")
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    from tests._verify_harness import run
+
+    run(main)

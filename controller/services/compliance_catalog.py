@@ -1,15 +1,6 @@
-"""Catalog of Dispatcher compliance checks (curated + a generic escape hatch).
+"""Catalog of Dispatcher compliance checks: a curated set plus two generic ones.
 
-Single source of truth consumed by BOTH the validator (dispatcher.yaml check
-params are checked against it) and the web UI (GET /api/v1/dispatcher/check-catalog),
-so the rule editor renders its check picker + param forms data-driven -- same
-philosophy as command_catalog / flow_step_catalog.
-
-A check reads ONLY already-collected state (device.attributes from the webhook
-inventory, device.last_seen, the deployment tables) -- the Dispatcher never
-issues its own device queries. Evaluation is defensive: a missing attribute is
-treated per-check and never raises. ``evaluate_check`` returns a *finding*
-(``{"summary", "detail"}``) when the device is NON-COMPLIANT, else None.
+See docs/controller/services/compliance_catalog.md for design notes.
 """
 
 import logging
@@ -20,19 +11,17 @@ from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
-# ReDoS guard for the `attribute` regex operator: the pattern is admin-authored
-# but the subject is device-reported (untrusted) inventory, and evaluate_check
-# runs inline on the webhook hot path. Use the `regex` module's per-match timeout
-# (stdlib `re` has none), mirroring controller/services/scoping.py.
+# ReDoS guard: pattern is admin-authored but subject is untrusted device data (see docs for details).
 try:
     import regex as _regex_engine
+
     _HAS_REGEX_TIMEOUT = True
 except ImportError:  # pragma: no cover - regex is pinned in requirements
     _regex_engine = re
     _HAS_REGEX_TIMEOUT = False
 _REGEX_TIMEOUT = float(os.getenv("GROUP_REGEX_TIMEOUT_SECONDS", "2.0"))
 
-# Metadata for the UI check picker (curated checks + the generic `attribute`).
+# Per check type: the label and description shown to an admin, plus the params a rule may set.
 CHECK_CATALOG: List[Dict[str, Any]] = [
     {"type": "filevault_disabled", "label": "FileVault disabled",
      "description": "Full-disk encryption (FileVault) is not enabled (macOS).",
@@ -42,6 +31,22 @@ CHECK_CATALOG: List[Dict[str, Any]] = [
      "category": "Security", "params": []},
     {"type": "passcode_missing", "label": "No passcode",
      "description": "The device has no passcode set.",
+     "category": "Security", "params": []},
+    {"type": "user_approved_enrollment_missing", "label": "Enrollment not user-approved",
+     "description": "Nobody at the Mac ever approved its management, so macOS ignores "
+                    "the parts of a profile that depend on that approval (kernel "
+                    "extension policy, privacy/PPPC settings) while still reporting "
+                    "the profile installed.",
+     "category": "Security", "params": []},
+    {"type": "bootstrap_token_disallowed", "label": "Bootstrap token not usable",
+     "description": "The Mac's Secure Enclave will not let secure operations use its "
+                    "bootstrap token, so managed software updates and kernel extension "
+                    "approval fail whenever they need it. The setting can be changed on "
+                    "the Mac itself, in recoveryOS.",
+     "category": "Security", "params": []},
+    {"type": "remote_desktop_enabled", "label": "Remote Management enabled",
+     "description": "Remote Management (Apple Remote Desktop screen sharing and "
+                    "control) is switched on (macOS).",
      "category": "Security", "params": []},
     {"type": "os_below", "label": "OS below version",
      "description": "The OS version is below a minimum.",
@@ -79,6 +84,14 @@ CHECK_CATALOG: List[Dict[str, Any]] = [
      "description": "The device carries any of the named tags.",
      "category": "Status",
      "params": [{"name": "tags", "label": "Tags", "type": "tags", "required": True}]},
+    {"type": "flow_parked_for", "label": "Flow run parked too long",
+     "description": "An enrollment flow run has been waiting at the same step "
+                    "for longer than N hours. A run parked with no deadline is "
+                    "treated as compliant, because the engine puts it back on "
+                    "the clock by itself.",
+     "category": "Status",
+     "params": [{"name": "hours", "label": "Hours parked", "type": "int",
+                 "required": True}]},
     {"type": "ddm_status", "label": "DDM status item (advanced)",
      "description": "Compare a dot-path into the device's DDM status report. Devices "
                     "without DDM data are treated as compliant.",
@@ -96,7 +109,8 @@ CHECK_CATALOG: List[Dict[str, Any]] = [
      "category": "Advanced",
      "params": [
          {"name": "key", "label": "Attribute path", "type": "string", "required": True,
-          "help": 'Dot path into device attributes, e.g. "SecurityInfo.SIPEnabled".'},
+          "help": 'Dot path into device attributes, e.g. '
+                  '"SecurityInfo.SystemIntegrityProtectionEnabled".'},
          {"name": "operator", "label": "Operator", "type": "select", "required": True,
           "options": ["equals", "not_equals", "exists", "gt", "lt", "regex"]},
          {"name": "value", "label": "Value", "type": "string", "required": False},
@@ -115,12 +129,19 @@ def catalog() -> Dict[str, Any]:
     return {"checks": CHECK_CATALOG}
 
 
-#  Attribute access 
+# ==Attribute access==
 
 def _sec(device: Any) -> Dict[str, Any]:
     attrs = getattr(device, "attributes", None) or {}
     sec = attrs.get("SecurityInfo")
     return sec if isinstance(sec, dict) else {}
+
+
+def _sec_group(device: Any, name: str) -> Dict[str, Any]:
+    """One of SecurityInfo's nested dictionaries (FirewallSettings, ManagementStatus, SecureBoot), empty when the device
+    didn't report it."""
+    group = _sec(device).get(name)
+    return group if isinstance(group, dict) else {}
 
 
 def _dig(obj: Any, path: str) -> Any:
@@ -134,18 +155,33 @@ def _dig(obj: Any, path: str) -> Any:
     return cur
 
 
-#  Evaluation 
+def _run_field(run: Any, name: str) -> Any:
+    """One field off a flow run, which arrives either as a FlowRun row or as a plain mapping. The names are the model's
+    own in both cases, so nothing needs translating on the way in."""
+    if isinstance(run, dict):
+        return run.get(name)
+    return getattr(run, name, None)
+
+
+def _text(value: Any) -> Optional[str]:
+    """A value for a finding's detail, as text or as None. Alert detail is stored as JSON, so these stay scalar."""
+    return None if value is None else str(value)
+
+
+# ==Evaluation==
 
 def evaluate_check(
     check: Dict[str, Any], device: Any, ctx: Optional[Dict[str, Any]] = None
 ) -> Optional[Dict[str, Any]]:
-    """Return a finding dict when the device is NON-COMPLIANT for ``check``, else
-    None. Never raises: an evaluation error is logged and treated as compliant
-    (fail-safe: a bad check must not spam alerts)."""
-    ctx = ctx or {}
+    """Return a finding dict when the device is non-compliant for check, else None. Never raises: an evaluation error is
+    logged and the device treated as compliant, so a broken check raises no alerts."""
+    ctx = ctx if isinstance(ctx, dict) else {}
+    if not isinstance(check, dict):
+        logger.warning("compliance check is not a mapping, treating as compliant: %r", check)
+        return None
     ctype = check.get("type")
-    params = check.get("params") or {k: v for k, v in check.items() if k not in ("type",)}
     try:
+        params = check.get("params") or {k: v for k, v in check.items() if k not in ("type",)}
         return _EVALUATORS.get(ctype, lambda *_: None)(device, params, ctx)
     except Exception:
         logger.exception("compliance check %s failed for device %s", ctype,
@@ -154,21 +190,27 @@ def evaluate_check(
 
 
 def _filevault(device, params, ctx):
-    sec = _sec(device)
-    val = sec.get("FDE_Enabled")
-    if val is None:
-        val = sec.get("FileVaultStatus")  # some agents report this instead
-    # Fire only when we KNOW it's off (explicit False / "Off") -- an unreported
-    # posture is "unknown", not "disabled", so a fresh device doesn't false-alarm.
+    # SecurityInfo answers with FDE_Enabled, and the inventory writer stores the response as the device sent it. See
+    # https://raw.githubusercontent.com/apple/device-management/release/mdm/commands/information.security.yaml
+    val = _sec(device).get("FDE_Enabled")
+    # Only an explicit False or "Off" counts: an unreported posture is unknown rather than disabled.
     if val is False or (isinstance(val, str) and val.lower() in ("off", "false", "disabled")):
         return {"summary": "FileVault is disabled", "detail": {"FDE_Enabled": val}}
     return None
 
 
 def _firewall(device, params, ctx):
-    val = _sec(device).get("FirewallEnabled")
+    # macOS reports the application firewall inside SecurityInfo's FirewallSettings dictionary; there is no top-level
+    # FirewallEnabled on a Mac. Older stored inventories hold the flat key, so it stays as a fallback read.
+    val = _sec_group(device, "FirewallSettings").get("FirewallEnabled")
+    path = "SecurityInfo.FirewallSettings.FirewallEnabled"
+    if val is None:
+        val = _sec(device).get("FirewallEnabled")
+        path = "SecurityInfo.FirewallEnabled"
     if val is False:
-        return {"summary": "Firewall is disabled", "detail": {"FirewallEnabled": val}}
+        # The path goes in the detail: the fallback key means the inventory predates what devices report today.
+        return {"summary": "Firewall is disabled",
+                "detail": {"FirewallEnabled": val, "path": path}}
     return None
 
 
@@ -176,6 +218,42 @@ def _passcode(device, params, ctx):
     val = _sec(device).get("PasscodePresent")
     if val is False:
         return {"summary": "No device passcode is set", "detail": {"PasscodePresent": val}}
+    return None
+
+
+def _user_approved_enrollment(device, params, ctx):
+    # ManagementStatus is a Mac-only sub-dictionary. Anything that does not report it (an iPhone, a Mac that has not
+    # answered a SecurityInfo query yet) is unknown rather than unapproved, so only an explicit False counts.
+    val = _sec_group(device, "ManagementStatus").get("UserApprovedEnrollment")
+    if val is False:
+        return {"summary": "MDM enrollment was never approved by a user",
+                "detail": {"UserApprovedEnrollment": val}}
+    return None
+
+
+def _bootstrap_token(device, params, ctx):
+    sec = _sec(device)
+    val = sec.get("BootstrapTokenAllowedForAuthentication")
+    # String value: "allowed", "disallowed", or "not supported". Only "disallowed" is a posture problem.
+    if isinstance(val, str) and val.strip().lower() == "disallowed":
+        return {
+            "summary": "Bootstrap token use is disallowed on this Mac",
+            "detail": {
+                "BootstrapTokenAllowedForAuthentication": val,
+                "BootstrapTokenRequiredForSoftwareUpdate":
+                    sec.get("BootstrapTokenRequiredForSoftwareUpdate"),
+                "BootstrapTokenRequiredForKernelExtensionApproval":
+                    sec.get("BootstrapTokenRequiredForKernelExtensionApproval"),
+            },
+        }
+    return None
+
+
+def _remote_desktop(device, params, ctx):
+    val = _sec(device).get("RemoteDesktopEnabled")
+    if val is True:
+        return {"summary": "Remote Management is enabled",
+                "detail": {"RemoteDesktopEnabled": val}}
     return None
 
 
@@ -245,18 +323,15 @@ def _config_drift(device, params, ctx):
 
 
 def _declaration_drift(device, params, ctx):
-    # Only devices that actually run DDM (ddm_enabled_at stamped by the first
-    # sync) are judged -- an unenrolled-in-DDM fleet must not false-alarm.
+    # Only devices actually running DDM, which the first sync marks with ddm_enabled_at.
     if not getattr(device, "ddm_enabled_at", None):
         return None
     desired = ctx.get("ddm_desired") or []
-    # Predicate-gated declarations legitimately report active=false when their
-    # predicate evaluates false on-device -- only "invalid" is drift for them.
-    # (Computed before any ids filter: the activation carries the predicate.)
+    # Predicated declarations report active=false when predicate is false; only "invalid" counts as drift for those.
     predicated = set()
     for d in desired:
         if d.get("Type") == "com.apple.activation.simple" \
-                and (d.get("Payload") or {}).get("Predicate"):
+            and (d.get("Payload") or {}).get("Predicate"):
             ident = d.get("Identifier") or ""
             predicated.add(ident)
             if ident.startswith("mm.act."):
@@ -278,7 +353,7 @@ def _declaration_drift(device, params, ctx):
             problems.append({"identifier": ident, "status": "missing"})
             continue
         if state.get("valid") == "invalid" \
-                or (state.get("active") is not True and ident not in predicated):
+            or (state.get("active") is not True and ident not in predicated):
             reasons = state.get("reasons") or []
             code = reasons[0].get("code") if reasons and isinstance(reasons[0], dict) else None
             problems.append({
@@ -299,7 +374,7 @@ def _declaration_drift(device, params, ctx):
 
 def _ddm_status(device, params, ctx):
     status = getattr(device, "ddm_status", None) or {}
-    # No DDM data is "unknown", not "known-bad" (mirrors declaration_drift).
+    # No DDM data means unknown, so nothing is reported, as in declaration_drift.
     if not getattr(device, "ddm_enabled_at", None) or not status:
         return None
     path = params.get("path")
@@ -312,8 +387,7 @@ def _ddm_status(device, params, ctx):
     elif op == "not_exists":
         fired = actual is None
     elif actual is None:
-        # An unreported status item is "unknown": only the existence operators
-        # handle absence (mirrors the `attribute` check).
+        # An unreported status item is unknown: only the existence operators handle absence, as in the attribute check.
         fired = False
     elif op == "equals":
         fired = str(actual) == str(expected)
@@ -346,6 +420,53 @@ def _tagged(device, params, ctx):
     return None
 
 
+def _flow_parked_for(device, params, ctx):
+    """Flow runs that have sat at the same step longer than hours. Reads ctx["flow_runs"]."""
+    try:
+        hours = float(params.get("hours"))
+    except (TypeError, ValueError):
+        return None
+    now = datetime.now(timezone.utc)
+    stuck = []
+    for run in ctx.get("flow_runs") or []:
+        if _run_field(run, "status") != "waiting":
+            continue
+        # A park with no deadline is a legacy or hand-edited row, and atc._adopt_legacy_gate puts those back on the
+        # escalation clock at the next sweep tick.
+        if _run_field(run, "wait_deadline") is None:
+            continue
+        # updated_at is auto_now and a parked run writes on every partial arrival, so this measures how long the run has
+        # been silent, the same reading parked_before uses in api/main.py.
+        parked_since = _run_field(run, "updated_at")
+        if not isinstance(parked_since, datetime):
+            continue
+        since = (parked_since if parked_since.tzinfo
+                 else parked_since.replace(tzinfo=timezone.utc))
+        parked = (now - since).total_seconds() / 3600.0
+        if parked <= hours:
+            continue
+        entry = {
+            "flow_id": _text(_run_field(run, "flow_id")),
+            "node": _text(_run_field(run, "current_node")),
+            "waiting_signal": _text(_run_field(run, "waiting_signal")),
+            "hours_parked": round(parked, 1),
+        }
+        run_id = _run_field(run, "id")
+        if run_id is not None:
+            entry["run_id"] = str(run_id)
+        stuck.append(entry)
+    if not stuck:
+        return None
+    if len(stuck) == 1:
+        one = stuck[0]
+        summary = (f"Flow '{one['flow_id'] or '?'}' has been parked "
+                   f"{one['hours_parked']:g} hours at "
+                   f"'{one['node'] or '?'}' (limit {hours:g})")
+    else:
+        summary = f"{len(stuck)} flow runs parked longer than {hours:g} hours"
+    return {"summary": summary, "detail": {"runs": stuck}}
+
+
 def _attribute(device, params, ctx):
     key = params.get("key")
     op = params.get("operator")
@@ -356,17 +477,15 @@ def _attribute(device, params, ctx):
     if op == "exists":
         fired = actual is not None
     elif actual is None:
-        # A missing/unreported attribute is "unknown", not "known-bad": no
-        # comparison operator fires on it (mirrors the security checks, which
-        # only fire on an explicit value). Only `exists` handles absence above.
+        # A missing or unreported attribute is unknown: no comparison operator matches it, and only exists, above,
+        # handles absence.
         fired = False
     elif op == "equals":
         fired = str(actual) == str(expected)
     elif op == "not_equals":
         fired = str(actual) != str(expected)
     elif op == "regex":
-        # Timeout-bounded so a catastrophic-backtracking pattern against
-        # device-reported data can't hang the event loop (see module header).
+        # Timeout-bounded so a catastrophic-backtracking pattern against device-reported data cannot stall the loop.
         try:
             if _HAS_REGEX_TIMEOUT:
                 fired = _regex_engine.search(
@@ -392,6 +511,9 @@ _EVALUATORS = {
     "filevault_disabled": _filevault,
     "firewall_disabled": _firewall,
     "passcode_missing": _passcode,
+    "user_approved_enrollment_missing": _user_approved_enrollment,
+    "bootstrap_token_disallowed": _bootstrap_token,
+    "remote_desktop_enabled": _remote_desktop,
     "os_below": _os_below,
     "not_seen_for": _not_seen_for,
     "lost_mode_active": _lost_mode,
@@ -401,5 +523,6 @@ _EVALUATORS = {
     "declaration_drift": _declaration_drift,
     "ddm_status": _ddm_status,
     "tagged": _tagged,
+    "flow_parked_for": _flow_parked_for,
     "attribute": _attribute,
 }

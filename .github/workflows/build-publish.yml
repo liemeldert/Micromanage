@@ -1,13 +1,11 @@
 name: Build & publish images
 
-# Publishes the controller and webui images to GitHub Container Registry (ghcr.io).
-#   - push to the default branch  -> :dev  (+ :sha-<commit>)
-#   - published GitHub release    -> :stable, :latest, :<version>, :<major>.<minor>
 on:
   push:
-    branches: [main, master]
+    branches: [ main, master ]
+  pull_request:
   release:
-    types: [published]
+    types: [ published ]
   workflow_dispatch:
 
 permissions:
@@ -15,7 +13,89 @@ permissions:
   packages: write
 
 jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Match the interpreter the controller image ships (Dockerfile.controller:
+      # `FROM python:3.11-slim`). Also required: asyncpg==0.28.0 in
+      # controller/requirements.txt has no Python 3.13 wheel, so this must stay
+      # pinned to 3.11 rather than tracking latest.
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: controller/requirements.txt
+
+      - name: Install dependencies
+        run: pip install -r controller/requirements.txt
+
+      # Every tests/verify_*.py is a standalone script (no pytest) that runs
+      # against in-memory sqlite, prints PASS/FAIL lines, and exits non-zero on
+      # failure. Discover them by glob so a new verify_*.py is picked up
+      # automatically without touching this workflow.
+      #
+      # We run every script rather than stopping at the first failure, then
+      # fail the job at the end: that surfaces every broken script in one CI
+      # run instead of a fix-one-see-the-next-fail loop.
+      - name: Run verify test suite
+        run: |
+          status=0
+          for t in tests/verify_*.py; do
+            echo "::group::$t"
+            if PYTHONPATH=. python "$t"; then
+              echo "PASS: $t"
+            else
+              echo "FAIL: $t"
+              status=1
+            fi
+            echo "::endgroup::"
+          done
+          exit "$status"
+
+  # The verify suites run on sqlite, where the models already carry every
+  # column, so they never execute models.database._AUX_DDL: the hand-written
+  # Postgres DDL every process applies on boot. This job brings a fresh
+  # Postgres to the schema with it, twice, so a bad statement fails here and
+  # not on the first start after an upgrade.
+  schema:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:15-alpine
+        env:
+          POSTGRES_PASSWORD: ci
+          POSTGRES_DB: mdm_iac
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: controller/requirements.txt
+      - name: Install dependencies
+        run: pip install -r controller/requirements.txt
+      - name: Apply the schema to a fresh Postgres and check it
+        env:
+          DATABASE_URL: postgres://postgres:ci@localhost:5432/mdm_iac
+        run: PYTHONPATH=. python tests/pg_schema_check.py
+
   build:
+    needs: [ test, schema ]
+    # Publishing was never triggered by pull_request before this change (only
+    # push/release/workflow_dispatch); keep it that way now that pull_request
+    # runs the test job too, since a PR from a fork gets a read-only
+    # GITHUB_TOKEN that can't log in to ghcr.io anyway.
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false

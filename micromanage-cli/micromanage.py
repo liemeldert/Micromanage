@@ -40,7 +40,7 @@ class Config:
                 self.user_email = data.get('user_email')
     
     def save(self):
-        # The config holds a bearer token -- keep it private to the current user.
+        # The config holds a bearer token, so keep it readable only by its owner.
         CONFIG_FILE.parent.mkdir(parents=True, exist_ok=True)
         try:
             os.chmod(CONFIG_FILE.parent, 0o700)
@@ -87,11 +87,14 @@ async def make_request(method: str, endpoint: str, **kwargs):
             headers=headers,
             **kwargs
         )
-        
-        if response.status_code == 401:
+
+        # A 401 from /auth/login just means the credentials were wrong; let
+        # the login command report that itself. Anywhere else, 401 means the
+        # session is gone (expired, revoked, tenant deactivated).
+        if response.status_code == 401 and endpoint != '/auth/login':
             console.print("[red]Authentication failed. Please login again.[/red]")
             raise typer.Exit(1)
-        
+
         return response
 
 # Auth commands
@@ -218,10 +221,57 @@ async def tenant_update(
 yaml_app = typer.Typer(help="Manage YAML configurations")
 app.add_typer(yaml_app, name="yaml")
 
+# Flows commands
+flows_app = typer.Typer(help="Manage ATC flows")
+app.add_typer(flows_app, name="flows")
+
+
+@flows_app.command("migrate")
+@async_command
+async def flows_migrate(
+    dry_run: bool = typer.Option(False, "--dry-run", help="Validate without writing"),
+):
+    """Migrate flows.yaml to the multi-flow v2 format.
+
+    Normalization happens automatically on every read; this command forces the
+    on-disk document to be rewritten to the v2 schema.
+    """
+    response = await make_request("GET", "/config/flows")
+    if response.status_code != 200:
+        console.print(f"[red]Failed to get flows configuration: {response.text}[/red]")
+        raise typer.Exit(1)
+
+    version = response.headers.get("X-Config-Version")
+    doc = response.json()
+    headers = {"If-Match": version} if version else None
+    params = {"dry_run": "true"} if dry_run else {}
+
+    put_resp = await make_request("PUT", "/config/flows", json=doc, headers=headers, params=params)
+    if put_resp.status_code == 200:
+        result = put_resp.json()
+        if dry_run:
+            console.print("[green]✓ Dry run valid (no changes committed)[/green]")
+        else:
+            console.print("[green]✓ flows.yaml migrated to v2 schema successfully[/green]")
+        if result.get("warnings"):
+            console.print("[yellow]Warnings:[/yellow]")
+            for w in result["warnings"]:
+                console.print(f"  ⚠️  {w}")
+        if result.get("gate_findings"):
+            console.print("[yellow]Gate findings:[/yellow]")
+            for f in result["gate_findings"]:
+                console.print(f"  ℹ️  [{f.get('code')}] {f.get('message')}")
+    else:
+        console.print(f"[red]Migration failed: {put_resp.text}[/red]")
+        raise typer.Exit(1)
+
 @yaml_app.command("get")
 @async_command
 async def yaml_get(
-    config_type: str = typer.Argument(..., help="Config type: groups, apps, profiles, or config"),
+    config_type: str = typer.Argument(
+        ..., help="Config type: groups, apps, profiles, tags, flows, dispatcher, "
+                   "declarations, or config"
+    ),
     output: Optional[Path] = typer.Option(None, "--output", "-o", help="Output file")
 ):
     """Get YAML configuration"""
@@ -243,7 +293,10 @@ async def yaml_get(
 @yaml_app.command("update")
 @async_command
 async def yaml_update(
-    config_type: str = typer.Argument(..., help="Config type: groups, apps, or profiles"),
+    config_type: str = typer.Argument(
+        ..., help="Config type: groups, apps, profiles, tags, declarations, "
+                   "flows, or dispatcher (the last two need the admin role)"
+    ),
     file: Path = typer.Argument(..., help="YAML file to upload")
 ):
     """Update YAML configuration"""
@@ -276,7 +329,7 @@ async def yaml_update(
             if error_data['detail'].get('errors'):
                 console.print("[red]Errors:[/red]")
                 for error in error_data['detail']['errors']:
-                    console.print(f"  ❌ {error}")
+                    console.print(f"  [red]{error}[/red]")
             if error_data['detail'].get('warnings'):
                 console.print("[yellow]Warnings:[/yellow]")
                 for warning in error_data['detail']['warnings']:
@@ -305,7 +358,7 @@ async def yaml_validate():
         if result.get('errors'):
             console.print("\n[red]Errors:[/red]")
             for error in result['errors']:
-                console.print(f"  ❌ {error}")
+                console.print(f"  [red]{error}[/red]")
         
         if result.get('warnings'):
             console.print("\n[yellow]Warnings:[/yellow]")
@@ -447,40 +500,110 @@ async def device_info(device_id: str):
     else:
         console.print(f"[red]Device not found[/red]")
 
+@device_app.command("commands")
+@async_command
+async def device_commands():
+    """List every command the server can send, with its parameters"""
+    response = await make_request('GET', '/commands/catalog')
+
+    if response.status_code != 200:
+        console.print(f"[red]Failed to load command catalog: {response.json()}[/red]")
+        raise typer.Exit(1)
+
+    commands = response.json()['commands']
+
+    table = Table(title="Device Commands")
+    table.add_column("Command", style="cyan")
+    table.add_column("Category", style="magenta")
+    table.add_column("Description", style="white")
+    table.add_column("Params", style="yellow")
+    table.add_column("Admin only", style="red", justify="center")
+
+    for cmd in sorted(commands, key=lambda c: (c['category'], c['type'])):
+        params = ', '.join(p['name'] for p in cmd['params']) or '-'
+        table.add_row(
+            cmd['type'],
+            cmd['category'],
+            cmd['description'],
+            params,
+            '✓' if cmd['destructive'] else ''
+        )
+
+    console.print(table)
+    console.print("\n[dim]Send one with: device command <device_id> <command> "
+                   "[--param name=value ...][/dim]")
+
+
 @device_app.command("command")
 @async_command
 async def device_command(
     device_id: str,
-    command: str = typer.Argument(..., help="Command: refresh_info, restart, shutdown, clear_passcode")
+    command: str = typer.Argument(..., help="Command type; run 'device commands' for the full list"),
+    param: Optional[List[str]] = typer.Option(
+        None, "--param", "-p",
+        help="Command parameter as name=value (repeatable)"
+    ),
+    yes: bool = typer.Option(
+        False, "--yes", "-y",
+        help="Skip the confirmation prompt for destructive commands"
+    ),
 ):
-    """Send command to device"""
-    valid_commands = ['refresh_info', 'restart', 'shutdown', 'clear_passcode']
-    
-    if command not in valid_commands:
-        console.print(f"[red]Invalid command. Valid commands: {', '.join(valid_commands)}[/red]")
+    """Send a command to a device"""
+    catalog_response = await make_request('GET', '/commands/catalog')
+    if catalog_response.status_code != 200:
+        console.print(f"[red]Failed to load command catalog: {catalog_response.json()}[/red]")
         raise typer.Exit(1)
-    
-    if command in ['restart', 'shutdown', 'clear_passcode']:
-        if not typer.confirm(f"Are you sure you want to {command.replace('_', ' ')} the device?"):
+
+    entry = next(
+        (c for c in catalog_response.json()['commands'] if c['type'] == command), None
+    )
+    if entry is None:
+        console.print(
+            f"[red]Unknown command '{command}'. Run 'device commands' to see what's available.[/red]"
+        )
+        raise typer.Exit(1)
+    if not entry['allowed']:
+        console.print(f"[red]'{command}' requires the admin role.[/red]")
+        raise typer.Exit(1)
+
+    parameters = {}
+    for item in param or []:
+        if '=' not in item:
+            console.print(f"[red]--param must be name=value, got: {item}[/red]")
+            raise typer.Exit(1)
+        name, _, value = item.partition('=')
+        parameters[name] = value
+
+    missing = [p['label'] for p in entry['params']
+               if p.get('required') is True and not parameters.get(p['name'])]
+    if missing:
+        console.print(f"[red]Missing required parameter(s): {', '.join(missing)}[/red]")
+        raise typer.Exit(1)
+
+    # The server also gates destructive commands on role (admin-only) and would
+    # reject this anyway, but asking here avoids sending a command the operator
+    # didn't mean to fire.
+    if entry['destructive'] and not yes:
+        if not typer.confirm(f"'{command}' is destructive: {entry['description']} Continue?"):
             raise typer.Abort()
-    
+
     with Progress(
         SpinnerColumn(),
         TextColumn("[progress.description]{task.description}"),
         console=console,
     ) as progress:
         progress.add_task(f"Sending {command} command...", total=None)
-        
+
         response = await make_request(
             'POST',
             f'/devices/{device_id}/command',
-            json={'command_type': command, 'parameters': {}}
+            json={'command_type': command, 'parameters': parameters}
         )
-    
+
     if response.status_code == 200:
         result = response.json()
         console.print(f"[green]✓ {result['message']}[/green]")
-        
+
         if 'task_id' in result:
             console.print(f"[dim]Task ID: {result['task_id']}[/dim]")
     else:
@@ -532,8 +655,7 @@ async def task_list(
             
             device_name = 'N/A'
             if task.get('device_id'):
-                # For brevity, just show "Device" - in real app, could fetch device info
-                device_name = task.get('device_serial', 'Device')
+                device_name = (task.get('device') or {}).get('serial_number', 'Device')
             
             progress_str = f"{task['progress']}%" if task['status'] == 'running' else "-"
             
@@ -686,12 +808,13 @@ async def stats_devices(
         table.add_column("Percentage", style="yellow", justify="right")
         
         total = sum(item['count'] for item in data)
-        
-        # Sort by count descending
         data.sort(key=lambda x: x['count'], reverse=True)
-        
+
+        # /stats/devices/by-model rows are keyed "device_model"; by-os rows are
+        # keyed "os_version" (they group by different Device columns).
+        row_key = {'model': 'device_model', 'os': 'os_version'}[by]
         for item in data:
-            key = item[f'device_{by}'] or 'Unknown'
+            key = item[row_key] or 'Unknown'
             count = item['count']
             percentage = (count / total * 100) if total > 0 else 0
             
@@ -709,12 +832,12 @@ async def stats_devices(
 # Main CLI
 @app.callback()
 def main(
-    api_url: Optional[str] = typer.Option(None, "--api-url", envvar="MDM_API_URL"),
+    api_url: Optional[str] = typer.Option(None, "--api-url", envvar="MICROMANAGE_MDM_API_URL"),
     version: bool = typer.Option(False, "--version", "-v")
 ):
-    """MDM IAC Command Line Interface"""
+    """Micromanage Command Line Interface"""
     if version:
-        console.print("MDM CLI v1.0.0")
+        console.print("Micromanage CLI v1.0.0")
         raise typer.Exit()
     
     if api_url:

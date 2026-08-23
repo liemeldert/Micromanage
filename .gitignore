@@ -1,10 +1,10 @@
-# ── Secrets & local config ────────────────────────────────────────────────
+# Secrets & local config
 .env
 .env.*
 !.env.example
 !.env.prod.example
 
-# ── TLS / signing material ────────────────────────────────────────────────
+# TLS / signing material
 certs/
 *.pem
 *.key
@@ -13,7 +13,7 @@ certs/
 *.p12
 *.mobileconfig
 
-# ── Python ────────────────────────────────────────────────────────────────
+# Python guff
 __pycache__/
 *.py[cod]
 *.egg-info/
@@ -25,21 +25,19 @@ venv/
 .mypy_cache/
 .pytest_cache/
 
-# ── Node / Next.js ────────────────────────────────────────────────────────
+# Node / Next.js
 node_modules/
 .next/
 webui/.next/
 *.tsbuildinfo
 
-# ── Editors / OS ──────────────────────────────────────────────────────────
+# Editors / OS
 .idea/
 .vscode/
 .DS_Store
 
-# ── Local CLI state ───────────────────────────────────────────────────────
+# Local state
 .mmmdm/
-.claude/
 yaml-configs/
-
-# Internal design specs are kept outside the repo (implementation detail)
-docs/specs/
+docs/
+* .bak

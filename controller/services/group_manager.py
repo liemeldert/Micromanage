@@ -1,32 +1,13 @@
-"""Device group membership.
+"""Device group membership. services.scoping is the shared matching engine.
 
-A group matches a device by (see services.scoping for the shared engine):
-
-  * ``exclude_devices``: serials never in the group (wins over everything);
-  * ``include_devices``: cherry-picked serials that are always in the group
-    (e.g. a hand-picked test cohort), regardless of conditions;
-  * ``conditions``: ALL must match. Conditions support ``negate: true`` and the
-    ``group`` type (membership in another group), so "device NOT IN group-x"
-    is ``{type: group, operator: in, value: group-x, negate: true}``.
-
-Group-referencing-group is evaluated recursively with memoization and a cycle
-guard: a reference cycle (authoring error; the validator rejects it at save
-time) resolves as "not a member" and logs, rather than recursing forever.
-
-Runs on the enrollment hot path, the reconcile loop and the device-detail
-endpoint -- so evaluation is defensive end to end (see scoping.py for the
-regex ReDoS bounds).
+See docs for membership rules, recursive resolution, and cycle handling.
 """
 
 import logging
 from typing import Any, Dict, List
 
 from controller.models.tenant import Device
-from controller.services.scoping import (  # re-exported for callers/tests
-    GROUP_REGEX_TIMEOUT,
-    _HAS_REGEX_TIMEOUT,
-    evaluate_condition,
-)
+from controller.services.scoping import evaluate_condition
 
 logger = logging.getLogger(__name__)
 
@@ -38,37 +19,50 @@ class GroupManager:
     def evaluate_device_groups(
         self, device: Device, groups_config: List[Dict[str, Any]]
     ) -> List[str]:
-        """All groups the device belongs to, in groups.yaml order.
-
-        Deliberately un-memoized: memoizing a result computed while a reference
-        cycle was in progress would cache a cycle-transient value and make
-        membership depend on evaluation order. Group sets are small, and the
-        validator rejects cycles at save time, so a plain recursive walk with a
-        per-path ``visiting`` guard (mirroring the client) is both correct and
-        cheap. A cycle resolves as no-match for every group on the cycle.
-        """
+        """All groups the device belongs to, in groups.yaml order. Memoized within this call only. See docs for cycle handling."""
         by_name: Dict[str, Dict[str, Any]] = {
             g["name"]: g for g in groups_config if isinstance(g, dict) and g.get("name")
         }
 
-        def in_group(name: str, visiting: frozenset) -> bool:
+        # name -> membership, written only for cycle-free results (see in_group's tainted return value).
+        memo: Dict[str, bool] = {}
+
+        def in_group(name: str, visiting: frozenset):
+            """Returns (matches, tainted). tainted signals a cycle was cut in this subtree."""
+            cached = memo.get(name)
+            if cached is not None:
+                return cached, False
             if name in visiting:
                 logger.warning(
                     f"group cycle detected at '{name}' (tenant {self.tenant_id}); "
                     "treating as no-match"
                 )
-                return False
+                return False, True
             group = by_name.get(name)
             if group is None:
-                return False
+                memo[name] = False  # absence is a fact about groups_config, not the path
+                return False, False
             nxt = visiting | {name}
+            tainted = False
+
+            def resolver(n: str) -> bool:
+                nonlocal tainted
+                val, was_tainted = in_group(n, nxt)
+                if was_tainted:
+                    tainted = True
+                return val
+
             try:
-                return self._matches(device, group, lambda n: in_group(n, nxt))
+                result = self._matches(device, group, resolver)
             except Exception:
                 logger.exception(f"group '{name}' evaluation failed; treating as no-match")
-                return False
+                # Not memoized: recompute on every reference rather than assume a transient failure repeats.
+                return False, True
+            if not tainted:
+                memo[name] = result
+            return result, tainted
 
-        return [name for name in by_name if in_group(name, frozenset())]
+        return [name for name in by_name if in_group(name, frozenset())[0]]
 
     def _matches(self, device: Device, group: Dict[str, Any], resolver) -> bool:
         serial = getattr(device, "serial_number", "") or ""
@@ -78,7 +72,7 @@ class GroupManager:
             return True
         conditions = group.get("conditions") or []
         if not conditions:
-            # No conditions: only cherry-picked (include_devices) members match.
+            # No conditions: only include_devices members match.
             return False
         return all(
             evaluate_condition(device, c, group_resolver=resolver) for c in conditions

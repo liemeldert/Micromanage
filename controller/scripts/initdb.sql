@@ -1,5 +1,6 @@
 -- Create database schema
-CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
+CREATE
+EXTENSION IF NOT EXISTS "uuid-ossp";
 
 -- check if database exists
 -- CREATE DATABASE mdm_iac;
@@ -8,4 +9,6 @@ CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
 CREATE SCHEMA IF NOT EXISTS mdm;
 
 -- Grant permissions
-GRANT ALL ON SCHEMA mdm TO postgres;
+GRANT
+ALL
+ON SCHEMA mdm TO postgres;

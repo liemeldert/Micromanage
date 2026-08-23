@@ -1,22 +1,6 @@
-"""Apple DEP cloud-service client (the ONLY speaker of the Apple DEP protocol).
+"""The only module that speaks Apple's DEP protocol.
 
-Talks to ``https://mdmenrollment.apple.com`` on behalf of one linked server token,
-handling the OAuth 1.0a -> session-token handshake and the device/profile endpoints
-(docs/specs/dep-ade-spec.md §3.3). Everything else in the controller calls the typed
-methods here, so the Apple protocol is confined to one file and a prod fork could
-swap in nanodep's proxy behind the same interface.
-
-Auth model (per Apple's "Authenticating with a DEP server"):
-  * The first call signs ``GET /session`` with OAuth 1.0a (HMAC-SHA1, realm ADM)
-    using the four token credentials, and receives a short-lived
-    ``auth_session_token``.
-  * Every subsequent call carries it in ``X-ADM-Auth-Session`` (+ a mandatory
-    ``User-Agent`` and ``X-Server-Protocol-Version``).
-  * On ``401`` (session expired) or ``403`` whose body contains ``FORBIDDEN`` we
-    re-authenticate once and retry. Any ``X-ADM-Auth-Session`` echoed on a response
-    is adopted to avoid a full re-auth.
-
-Security: the token credentials and the Authorization header are NEVER logged.
+Talks to https://mdmenrollment.apple.com for DEP enrollment (OAuth 1.0a, device/profile endpoints, token refresh).
 """
 
 import base64
@@ -24,6 +8,7 @@ import hashlib
 import hmac
 import json
 import logging
+import os
 import time
 import urllib.parse
 import uuid
@@ -33,12 +18,14 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_BASE_URL = "https://mdmenrollment.apple.com"
 DEFAULT_USER_AGENT = "micromanage-mdm/1.0"
-SERVER_PROTOCOL_VERSION = "7"
+# Apple production clients send "7"; higher versions are supersets. Override via DEP_SERVER_PROTOCOL_VERSION.
+SERVER_PROTOCOL_VERSION = os.getenv("DEP_SERVER_PROTOCOL_VERSION", "7")
 
-# A transport takes (method, url, headers, body_bytes) and returns
-# (status_code, response_headers, response_body_bytes). Injected in tests; the
-# default uses httpx. Header dicts are case-insensitive by convention here (we
-# look keys up case-insensitively).
+# Apple's stated limit for POST /profile/devices, applied to all bulk device endpoints.
+MAX_DEVICES_PER_REQUEST = 1000
+
+# A transport takes (method, url, headers, body_bytes) and returns (status_code, response_headers, response_body_bytes).
+# Injected in tests; the default uses httpx. Header keys are looked up case-insensitively.
 Transport = Callable[
     [str, str, Dict[str, str], Optional[bytes]],
     Awaitable[Tuple[int, Dict[str, str], bytes]],
@@ -46,8 +33,8 @@ Transport = Callable[
 
 
 class DepError(Exception):
-    """A DEP API call failed. ``code`` is Apple's error code (or an HTTP-derived
-    stand-in); ``status`` the HTTP status; ``message`` a human string."""
+    """A DEP API call failed. code is Apple's error code (or an HTTP-derived stand-in), status the HTTP status, message
+    the failure text."""
 
     def __init__(self, code: str, message: str = "", status: Optional[int] = None):
         self.code = code
@@ -67,11 +54,7 @@ def _percent(value: str) -> str:
 def _oauth_authorization_header(
     token: Dict[str, Any], method: str, url: str
 ) -> str:
-    """Build the OAuth 1.0a HMAC-SHA1 Authorization header for the /session call.
-
-    ``url`` must be the request URL WITHOUT a query string (the /session call
-    carries none beyond the oauth_* params). realm is not part of the signature.
-    """
+    """Build OAuth 1.0a HMAC-SHA1 Authorization header for GET /session. url is the request URL without query."""
     oauth_params = {
         "oauth_consumer_key": token["consumer_key"],
         "oauth_token": token["access_token"],
@@ -96,6 +79,17 @@ def _oauth_authorization_header(
         f'{_percent(k)}="{_percent(v)}"' for k, v in sorted(header_params.items())
     ]
     return "OAuth " + ", ".join(parts)
+
+
+def _as_int(value: Any) -> Optional[int]:
+    """An int from whatever Apple put in a numeric field, or None. Apple sends retry_after_seconds as a number, but a
+    string would still be usable."""
+    if isinstance(value, bool) or value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def _hget(headers: Dict[str, str], name: str) -> Optional[str]:
@@ -131,7 +125,7 @@ class DepClient:
         self._transport = transport or _httpx_transport
         self._session_token: Optional[str] = None
 
-    #  auth 
+    #  auth
     async def _authenticate(self) -> None:
         url = f"{self._base}/session"
         headers = {
@@ -153,7 +147,7 @@ class DepClient:
         except Exception:
             raise DepAuthError("BAD_SESSION_RESPONSE", "No auth_session_token", status)
 
-    #  request core 
+    #  request core
     async def _request(
         self, method: str, path: str, body: Optional[Dict[str, Any]] = None
     ) -> Dict[str, Any]:
@@ -177,7 +171,8 @@ class DepClient:
                 self._session_token = refreshed
 
             text = raw.decode("utf-8", errors="replace") if raw else ""
-            if status == 401 or (status == 403 and "FORBIDDEN" in text.upper()):
+            # Case-sensitive on purpose: a looser match would re-auth on any 403 page that carries the word in prose.
+            if status == 401 or (status == 403 and "FORBIDDEN" in text):
                 if attempt == 1:
                     self._session_token = None
                     await self._authenticate()
@@ -202,8 +197,8 @@ class DepClient:
             text = ""
         if not text:
             return f"HTTP_{status}"
-        # Apple returns short codes like EXPIRED_CURSOR / T_C_NOT_SIGNED as bare
-        # text or in a JSON envelope; surface the first token that looks like one.
+        # Apple returns short codes like EXPIRED_CURSOR or T_C_NOT_SIGNED as bare text or inside a JSON envelope;
+        # surface the first token that looks like one.
         try:
             data = json.loads(text)
             if isinstance(data, dict):
@@ -215,7 +210,7 @@ class DepClient:
         token = text.split()[0].strip('".,{}')
         return token[:60] or f"HTTP_{status}"
 
-    #  endpoints 
+    #  endpoints
     async def account(self) -> Dict[str, Any]:
         return await self._request("GET", "/account")
 
@@ -233,24 +228,57 @@ class DepClient:
         )
 
     async def device_details(self, serials: List[str]) -> Dict[str, Any]:
-        return await self._request("POST", "/devices", {"devices": serials})
+        return await self._batched(
+            "POST", "/devices", serials, lambda batch: {"devices": batch})
 
     async def define_profile(self, profile: Dict[str, Any]) -> Dict[str, Any]:
         return await self._request("POST", "/profile", profile)
 
+    # Deliberate DEP API surface: no caller today.
     async def get_profile(self, profile_uuid: str) -> Dict[str, Any]:
         return await self._request("GET", f"/profile?profile_uuid={_percent(profile_uuid)}")
 
     async def assign_profile(
         self, profile_uuid: str, serials: List[str]
     ) -> Dict[str, Any]:
-        return await self._request(
-            "POST", "/profile/devices",
-            {"profile_uuid": profile_uuid, "devices": serials},
+        return await self._batched(
+            "POST", "/profile/devices", serials,
+            lambda batch: {"profile_uuid": profile_uuid, "devices": batch},
         )
 
     async def clear_profile(self, serials: List[str]) -> Dict[str, Any]:
-        return await self._request("DELETE", "/profile/devices", {"devices": serials})
+        return await self._batched(
+            "DELETE", "/profile/devices", serials, lambda batch: {"devices": batch})
 
     async def disown(self, serials: List[str]) -> Dict[str, Any]:
-        return await self._request("POST", "/devices/disown", {"devices": serials})
+        return await self._batched(
+            "POST", "/devices/disown", serials, lambda batch: {"devices": batch})
+
+    #  batching
+    async def _batched(
+        self, method: str, path: str, serials: List[str],
+        make_body: Callable[[List[str]], Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        """Split a serial list on MAX_DEVICES_PER_REQUEST and merge the responses. A failing batch raises after earlier batches are already applied at Apple."""
+        if not serials:
+            return {}
+        merged: Dict[str, Any] = {}
+        devices: Dict[str, Any] = {}
+        for start in range(0, len(serials), MAX_DEVICES_PER_REQUEST):
+            batch = serials[start:start + MAX_DEVICES_PER_REQUEST]
+            resp = await self._request(method, path, make_body(batch))
+            if not isinstance(resp, dict):
+                continue
+            page = resp.get("devices")
+            if isinstance(page, dict):
+                devices.update(page)
+            for key, value in resp.items():
+                if key in ("devices", "retry_after_seconds"):
+                    continue
+                merged.setdefault(key, value)
+            retry_after = _as_int(resp.get("retry_after_seconds"))
+            if retry_after is not None:
+                merged["retry_after_seconds"] = max(
+                    retry_after, _as_int(merged.get("retry_after_seconds")) or 0)
+        merged["devices"] = devices
+        return merged

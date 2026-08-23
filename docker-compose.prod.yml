@@ -8,7 +8,7 @@ services:
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      test: [ "CMD-SHELL", "pg_isready -U postgres" ]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -18,7 +18,15 @@ services:
   # decrypt the enrollment pkcsPKIEnvelope as step ca init only makes ECDSA) and
   # registers the SCEP provisioner devices enroll against.
   step-ca:
-    image: smallstep/step-ca:latest
+    # Pinned (was :latest): step-ca issues every device identity cert, so an
+    # unannounced upstream image change here can silently break SCEP
+    # enrollment fleet-wide with no code change on our side. 0.30.2 is the
+    # current stable release (verified against the smallstep/certificates
+    # GitHub releases API and the smallstep/step-ca Docker Hub tag list).
+    # To bump: check https://github.com/smallstep/certificates/releases for
+    # the new stable tag, confirm it exists on Docker Hub, then update the
+    # version here.
+    image: smallstep/step-ca:0.30.2
     environment:
       STEPCA_NAME: ${STEPCA_NAME:-MicromanageCA}
       STEPCA_PASSWORD: ${STEPCA_PASSWORD:?set STEPCA_PASSWORD}
@@ -27,13 +35,13 @@ services:
       SCEP_CHALLENGE: ${SCEP_CHALLENGE:?set SCEP_CHALLENGE}      # must match the controller's SCEP_CHALLENGE
     volumes:
       - step_ca_data:/home/step
-    entrypoint: ["sh", "-ec"]
+    entrypoint: [ "sh", "-ec" ]
     command:
       - |
         export STEPPATH=/home/step
         PW="$$STEPPATH/password"
         if [ ! -f "$$STEPPATH/config/ca.json" ]; then
-          echo "step-ca: first-run init with an RSA chain for SCEP…"
+          echo "step-ca: first-run init with an RSA chain for SCEP..."
           printf '%s' "$$STEPCA_PASSWORD" > "$$PW"
           step ca init --name "$$STEPCA_NAME" --dns "step-ca,localhost,$$MDM_HOSTNAME" \
             --provisioner admin --password-file "$$PW" --provisioner-password-file "$$PW" \
@@ -52,7 +60,7 @@ services:
     ports:
       - "${STEPCA_PORT:-9443}:9000" # CA + SCEP endpoint (devices reach this for identity)
     healthcheck:
-      test: ["CMD", "step", "ca", "health", "--ca-url", "https://localhost:9000"]
+      test: [ "CMD", "step", "ca", "health", "--ca-url", "https://localhost:9000" ]
       interval: 15s
       timeout: 5s
       retries: 5
@@ -66,7 +74,7 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
-    entrypoint: ["sh", "-ec"]
+    entrypoint: [ "sh", "-ec" ]
     command:
       - |
         psql -h postgres -U postgres -tAc "SELECT 1 FROM pg_database WHERE datname='nanomdm'" | grep -q 1 \
@@ -74,9 +82,33 @@ services:
         if psql -h postgres -U postgres -d nanomdm -tAc "select to_regclass('public.push_certs')" | grep -q push_certs; then
           echo "nanomdm-schema: tables already present"
         else
-          echo "nanomdm-schema: applying NanoMDM 0.9.0 pgsql schema to db 'nanomdm'…"
-          wget -qO- https://raw.githubusercontent.com/micromdm/nanomdm/v0.9.0/storage/pgsql/schema.sql \
-            | psql -h postgres -U postgres -d nanomdm -v ON_ERROR_STOP=1
+          # This branch only ever runs once: the push_certs check above is the
+          # gate, and it stays true for good once the schema is applied. That
+          # means bumping the pinned nanomdm image tag below does NOT re-run
+          # this step or apply that version's schema changes. NanoMDM's own
+          # docs say to apply each version's numbered schema-change files by
+          # hand (https://github.com/micromdm/nanomdm/blob/v0.9.0/docs/operations-guide.md);
+          # at 0.9.0 there are none for pgsql (only this one schema.sql), so
+          # nothing is missed today, but check for numbered files under
+          # storage/pgsql/ in the new tag before bumping the version.
+          echo "nanomdm-schema: fetching NanoMDM 0.9.0 pgsql schema..."
+          wget -qO /tmp/schema.sql https://raw.githubusercontent.com/micromdm/nanomdm/v0.9.0/storage/pgsql/schema.sql
+          # Pinned sha256 of that tag's storage/pgsql/schema.sql. This file is
+          # fetched over the network at deploy time and applied as the
+          # postgres superuser, so refuse to run it if it doesn't match what
+          # was reviewed rather than piping an unverified download into psql.
+          echo "33480889eb1154d1213ebba7d99b39fe1f02533266a23733a9b0b2500aceed6b  /tmp/schema.sql" | sha256sum -c - \
+            || { echo "nanomdm-schema: schema.sql sha256 mismatch, refusing to apply it" >&2; exit 1; }
+          echo "nanomdm-schema: sha256 verified, applying..."
+          # -1/--single-transaction wraps the whole file in one transaction.
+          # Without it, ON_ERROR_STOP=1 still stops on a mid-file failure, but
+          # everything before that point is already committed statement by
+          # statement, including CREATE TABLE push_certs partway through the
+          # file, and that table is exactly what the gate above checks, so a
+          # partial apply would read as complete on every later boot. -1 is
+          # safe here because CREATE DATABASE already ran as its own psql
+          # invocation above, outside this transaction.
+          psql -h postgres -U postgres -d nanomdm -v ON_ERROR_STOP=1 --single-transaction -f /tmp/schema.sql
           echo "nanomdm-schema: done"
         fi
     restart: "no"
@@ -89,8 +121,23 @@ services:
       - step_ca_data:/stepca:ro   # read step-ca's CA certs to validate device identity certs
       - nanomdm_data:/var/lib/nanomdm
     ports:
-      - "${MDM_PORT:-443}:9000" # device-facing MDM endpoint
-      # Management API
+      # Loopback only, and that is the whole story for this service now.
+      #
+      # NanoMDM 0.9.0 runs one HTTP listener for everything it serves: /mdm
+      # (what devices use), the basic-auth-gated /v1/* management API (enqueue,
+      # push, pushcert, and the FileVault/firmware escrow-key-unlock
+      # endpoints), and an unauthenticated /version: one http.NewServeMux,
+      # one http.ListenAndServe, see
+      # https://github.com/micromdm/nanomdm/blob/v0.9.0/cmd/nanomdm/main.go.
+      # There is no separate device-only port to publish, so publishing this
+      # one to every interface put enqueue (which includes EraseDevice for the
+      # whole fleet) on the internet behind one shared secret.
+      #
+      # The public port is MDM_PORT on the nanomdm-front service below, which
+      # allow-lists /mdm and answers 404 for the rest. This mapping stays so
+      # that `setup.sh push-cert` and a local curl against /v1 keep working
+      # from the host itself. It is the identical surface, just not routable
+      # from anywhere else.
       - "127.0.0.1:9000:9000"
     depends_on:
       postgres:
@@ -99,16 +146,77 @@ services:
         condition: service_healthy
       nanomdm-schema:
         condition: service_completed_successfully
+    # delete=1 turns on NanoMDM's own command deleter. Without it the nanomdm
+    # database keeps every raw command plist for good, and those plists carry
+    # the secrets the controller is careful never to store in the clear: the
+    # NewPassword and CurrentPassword of SetFirmwarePassword/SetRecoveryLock,
+    # the current FileVault recovery key sent with RotateFileVaultKey, and
+    # managed-admin credentials. The deleter removes a command, its queue rows
+    # and its results only once the enrollment has responded, and the controller
+    # has already correlated that response through the webhook by then, so
+    # nothing here depends on the rows staying. Existing accumulated rows are
+    # not touched by turning this on; DEPLOY.md has the one-time purge.
     command: >
       -storage pgsql
       -storage-dsn "postgres://postgres:${DB_PASSWORD}@postgres:5432/nanomdm?sslmode=disable"
+      -storage-options delete=1
       -ca /stepca/certs/root_ca.crt
       -intermediate /stepca/certs/intermediate_ca.crt
       -api "${NANOMDM_API_KEY}"
       -webhook-url "http://controller:8000/webhook/mdm?secret=${WEBHOOK_SECRET:?set WEBHOOK_SECRET}"
+      -webhook-hmac-key "${WEBHOOK_HMAC_KEY:-${WEBHOOK_SECRET}}"
       -dm "http://controller:8000/ddm/"
-      -dm-send-hmac-key "${WEBHOOK_SECRET:?set WEBHOOK_SECRET}"
+      -dm-send-hmac-key "${DDM_HMAC_SECRET:-${WEBHOOK_SECRET}}"
       -debug="${NANOMDM_DEBUG:-false}"
+    restart: unless-stopped
+
+  # The public face of NanoMDM: MDM_PORT lands here, not on the listener above.
+  # The config allow-lists /mdm, which is the only path a device in this stack
+  # ever asks for, and answers 404 for everything else on this port, /v1/ and
+  # /version included. 404 rather than 403 because a 403 confirms the path is
+  # there and that this host is a NanoMDM.
+  #
+  # Plain HTTP, like the rest of this file. Your own TLS-terminating proxy sits
+  # in front of it; see DEPLOY.md section 6.
+  nanomdm-front:
+    image: nginx:1.27-alpine
+    volumes:
+      # This needs the repo on disk. Portainer's "from this Git repo" option
+      # gives you that; pasting this file into the web editor does not. See
+      # DEPLOY.md section 4.
+      - ./deploy/nanomdm-front.conf:/etc/nginx/conf.d/default.conf:ro
+    ports:
+      - "${MDM_PORT:-443}:8080"
+    depends_on:
+      # Ordering only. The config re-resolves the upstream name per request
+      # through Docker's DNS, so this front survives nanomdm being recreated
+      # underneath it rather than holding a dead address.
+      nanomdm:
+        condition: service_started
+    restart: unless-stopped
+
+  # Off by default. Start it with `--profile direct-nanomdm` (or
+  # COMPOSE_PROFILES=direct-nanomdm) when you already run your own proxy in
+  # front of NanoMDM and want the whole listener, /v1/ and /version included,
+  # on a host port instead of the allow-list above. Whatever you put in front
+  # of it is then the thing that has to refuse those two paths.
+  #
+  # A proxy that runs on this compose network needs none of this: it can reach
+  # http://nanomdm:9000 directly.
+  #
+  # It publishes MDM_DIRECT_PORT rather than MDM_PORT so that turning the
+  # profile on cannot collide with nanomdm-front. If you want only this one
+  # reachable, point MDM_PORT at something you are not using.
+  nanomdm-direct:
+    profiles: [ "direct-nanomdm" ]
+    image: nginx:1.27-alpine
+    volumes:
+      - ./deploy/nanomdm-direct.conf:/etc/nginx/conf.d/default.conf:ro
+    ports:
+      - "${MDM_DIRECT_PORT:-9001}:8080"
+    depends_on:
+      nanomdm:
+        condition: service_started
     restart: unless-stopped
 
   # Runs once to upload the APNs push certificate to NanoMDM from base64 env vars.
@@ -131,7 +239,7 @@ services:
         fi
         echo "$$PUSH_CERT_PEM_B64" | base64 -d > /tmp/push.pem
         echo "$$PUSH_KEY_PEM_B64"  | base64 -d > /tmp/push.key
-        echo "apns-init: waiting for nanomdm…"
+        echo "apns-init: waiting for nanomdm..."
         i=0
         until curl -sf -u "nanomdm:$$NANOMDM_API_KEY" http://nanomdm:9000/version >/dev/null 2>&1; do
           i=$$((i+1)); [ $$i -gt 30 ] && { echo "apns-init: nanomdm unreachable"; exit 1; }; sleep 2
@@ -149,13 +257,21 @@ services:
   yaml-init:
     image: ${CONTROLLER_IMAGE:-ghcr.io/liemeldert/micromanage_2-controller:stable}
     user: "0:0"
-    command: ["sh", "-c", "mkdir -p /app/yaml-configs/tenants && chown -R 1000:1000 /app/yaml-configs"]
+    command: [ "sh", "-c", "mkdir -p /app/yaml-configs/tenants && chown -R 1000:1000 /app/yaml-configs" ]
     volumes:
       - yaml_configs:/app/yaml-configs
     restart: "no"
 
   controller:
     image: ${CONTROLLER_IMAGE:-ghcr.io/liemeldert/micromanage_2-controller:stable}
+    # supervisord stops its three programs one at a time, waiting for each
+    # before it starts the next (see the note at the top of supervisord.conf),
+    # so the worst case is the SUM of their stopwaitsecs: 30 userapi + 30
+    # webhook + 30 controller = 90s. Each of those windows is a shutdown drain
+    # (in-flight API handlers, deferred webhook fan-out, in-flight task
+    # handlers), and a grace period under the sum kills the container with the
+    # last of them still draining.
+    stop_grace_period: 100s
     environment:
       DATABASE_URL: postgres://postgres:${DB_PASSWORD}@postgres:5432/mdm_iac
       NANOMDM_URL: http://nanomdm:9000
@@ -166,6 +282,11 @@ services:
       JWT_ISSUER: ${JWT_ISSUER:-micromanage-controller}
       JWT_AUDIENCE: ${JWT_AUDIENCE:-micromanage-api}
       WEBHOOK_SECRET: ${WEBHOOK_SECRET:?set WEBHOOK_SECRET}
+      # Key for the body HMAC NanoMDM puts on every webhook call
+      # (-webhook-hmac-key above). Same fallback on both sides, so the signer
+      # and the verifier cannot end up with different values: unset means both
+      # use WEBHOOK_SECRET.
+      WEBHOOK_HMAC_KEY: ${WEBHOOK_HMAC_KEY:-}
       CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS:-https://${MDM_HOSTNAME}}
       PUBLIC_API_URL: ${PUBLIC_API_URL:?set PUBLIC_API_URL}
       # Enrollment profile generation
@@ -175,18 +296,81 @@ services:
       SCEP_URL: ${SCEP_URL:-}
       SCEP_NAME: ${SCEP_NAME:-mdm_device_scep}
       SCEP_CHALLENGE: ${SCEP_CHALLENGE:-}
+      # Migration escape hatch: accept the old, unsigned ?tenant= on the MDM
+      # ServerURL. Leave false. See .env.prod.example.
+      MDM_ALLOW_UNSIGNED_TENANT_CLAIM: ${MDM_ALLOW_UNSIGNED_TENANT_CLAIM:-false}
+      # Only let pre-provisioned (ADE/placeholder) serials become devices.
+      MDM_ENROLL_REQUIRE_KNOWN_SERIAL: ${MDM_ENROLL_REQUIRE_KNOWN_SERIAL:-false}
+      # Post-migration hardening: refuse a known device's check-in if it carries
+      # no tenant+tsig at all. Leave false until the whole fleet is re-enrolled
+      # onto post-fix profiles. See .env.prod.example and DEPLOY.md.
+      MDM_REQUIRE_SIGNED_TENANT_CLAIM: ${MDM_REQUIRE_SIGNED_TENANT_CLAIM:-false}
       # First-run admin (set on first deploy so you can log in, then remove)
       CONTROLLER_BOOTSTRAP_ADMIN_EMAIL: ${CONTROLLER_BOOTSTRAP_ADMIN_EMAIL:-}
       CONTROLLER_BOOTSTRAP_ADMIN_PASSWORD: ${CONTROLLER_BOOTSTRAP_ADMIN_PASSWORD:-}
       CONTROLLER_BOOTSTRAP_TENANT: ${CONTROLLER_BOOTSTRAP_TENANT:-default}
-      # S3 / object store (for apps packages)
+      # S3 / object store (for app packages). use_ssl/path_style aren't env vars;
+      # set those per-tenant in config.yaml's s3 block if you need them.
       AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-}
       AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-}
       AWS_DEFAULT_REGION: ${AWS_DEFAULT_REGION:-us-east-1}
       AWS_S3_ENDPOINT_URL: ${AWS_S3_ENDPOINT_URL:-}
       AWS_S3_BUCKET: ${AWS_S3_BUCKET:-}
-      AWS_S3_USE_SSL: ${AWS_S3_USE_SSL:-true}
-      AWS_S3_PATH_STYLE: ${AWS_S3_PATH_STYLE:-false}
+      # Ceiling on what one tenant may keep in its object store prefix, in
+      # bytes, for tenants that have no quota of their own (tenant_cli tenant
+      # set-quota). Empty or 0 means no ceiling. Uploads over it are refused.
+      MDM_DEFAULT_STORAGE_QUOTA_BYTES: ${MDM_DEFAULT_STORAGE_QUOTA_BYTES:-}
+      # DEP/ADE (Apple Business/School Manager) + declarative device management
+      SECRET_ENCRYPTION_KEY: ${SECRET_ENCRYPTION_KEY:-}
+      DEP_SYNC_INTERVAL_MINUTES: ${DEP_SYNC_INTERVAL_MINUTES:-60}
+      DEP_BASE_URL: ${DEP_BASE_URL:-}
+      # X-Server-Protocol-Version DEP requests send; nanodep's default. Override
+      # only if Apple moves the number.
+      DEP_SERVER_PROTOCOL_VERSION: ${DEP_SERVER_PROTOCOL_VERSION:-7}
+      DEP_ADE_REQUIRE_APPLE_SIGNATURE: ${DEP_ADE_REQUIRE_APPLE_SIGNATURE:-false}
+      DEP_APPLE_ANCHOR_CERTS: ${DEP_APPLE_ANCHOR_CERTS:-}
+      DDM_HMAC_SECRET: ${DDM_HMAC_SECRET:-}
+      # Tuning. Raise the pool and the task cap together: the reconcile fan-out
+      # is bounded by MDM_MAX_CONCURRENT_TASKS, and each in-flight task wants a
+      # connection. Flow runs are the heaviest thing retention deletes.
+      DB_POOL_MAX_SIZE: ${DB_POOL_MAX_SIZE:-20}
+      DB_POOL_MIN_SIZE: ${DB_POOL_MIN_SIZE:-2}
+      MDM_MAX_CONCURRENT_TASKS: ${MDM_MAX_CONCURRENT_TASKS:-25}
+      # A failed app/profile deployment retries starting MDM_COMMAND_RETRY_MINUTES
+      # after the failure and backs off further each time, capped at
+      # MDM_COMMAND_RETRY_MAX_MINUTES. See DEPLOY.md's "Command retry backoff".
+      MDM_COMMAND_RETRY_MINUTES: ${MDM_COMMAND_RETRY_MINUTES:-30}
+      MDM_COMMAND_RETRY_MAX_MINUTES: ${MDM_COMMAND_RETRY_MAX_MINUTES:-1440}
+      # How long an app install may sit unconfirmed before it is recorded as
+      # failed. The device acknowledges the command the moment it takes it and
+      # says nothing about the app, so only an inventory report naming the
+      # bundle id confirms it (reconciler._fail_unconfirmed_apps).
+      MDM_APP_CONFIRM_MINUTES: ${MDM_APP_CONFIRM_MINUTES:-60}
+      # How often the poller re-asks a device what it has installed while that
+      # device holds an app install nobody has confirmed yet. This is what
+      # produces the report the line above waits for, so raising it past
+      # MDM_APP_CONFIRM_MINUTES means installs time out before anything asks.
+      # 0 or less turns the pass off (poller._awaiting_app_confirmation).
+      APP_CONFIRM_POLL_MINUTES: ${APP_CONFIRM_POLL_MINUTES:-5}
+      # Alert webhooks are refused for private, loopback and link-local
+      # targets by default (an SSRF guard; the cloud metadata address is one
+      # of the ones it covers). List an internal collector here instead of
+      # turning the guard off: comma-separated hostnames, IPs or CIDRs,
+      # matched after the target's address is resolved. See DEPLOY.md's
+      # "Alerts and notifications".
+      DISPATCHER_WEBHOOK_PRIVATE_ALLOWLIST: ${DISPATCHER_WEBHOOK_PRIVATE_ALLOWLIST:-}
+      # Deprecated: replaced by the allowlist above. true turns the SSRF
+      # guard off for every tenant and target at once.
+      DISPATCHER_WEBHOOK_ALLOW_PRIVATE: ${DISPATCHER_WEBHOOK_ALLOW_PRIVATE:-false}
+      RETENTION_INTERVAL_HOURS: ${RETENTION_INTERVAL_HOURS:-24}
+      TASK_RETENTION_DAYS: ${TASK_RETENTION_DAYS:-30}
+      ALERT_RETENTION_DAYS: ${ALERT_RETENTION_DAYS:-90}
+      FLOW_RUN_RETENTION_DAYS: ${FLOW_RUN_RETENTION_DAYS:-30}
+      # Audit log: 0 keeps every row forever (the default). See DEPLOY.md's
+      # "Audit log retention" section: a positive value here only prunes
+      # machine-attributed rows, never a human-caused one.
+      AUDIT_LOG_RETENTION_DAYS: ${AUDIT_LOG_RETENTION_DAYS:-0}
+      AUDIT_LOG_SIZE_WARNING_ROWS: ${AUDIT_LOG_SIZE_WARNING_ROWS:-100000}
     volumes:
       - yaml_configs:/app/yaml-configs
     ports:
@@ -196,13 +380,22 @@ services:
         condition: service_healthy
       yaml-init:
         condition: service_completed_successfully
+    # All three supervisord programs, not just the container: the API and the
+    # webhook answer /health (with a DB round trip), the scheduler touches a
+    # heartbeat file. supervisord keeps the container up with a program in
+    # FATAL, so without this a dead API looks like a healthy container.
+    healthcheck:
+      test: [ "CMD", "python", "/app/healthcheck.py" ]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
     restart: unless-stopped
 
   webui:
     image: ${WEBUI_IMAGE:-ghcr.io/liemeldert/micromanage_2-webui:stable}
     environment:
       CONTROLLER_URL: http://controller:8001
-      NEXT_PUBLIC_APP_NAME: ${APP_NAME:-MicromanageIAC}
     ports:
       - "${WEBUI_PORT:-3000}:3000"
     depends_on:

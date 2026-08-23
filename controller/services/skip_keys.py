@@ -1,80 +1,71 @@
-"""Apple ADE Setup-Assistant SkipKeys registry (the valid ``skip_setup_items``).
+"""Setup Assistant panes an ADE profile can skip (skip_setup_items).
 
-Curated from Apple's machine-readable list
-(https://github.com/apple/device-management/blob/release/other/skipkeys.yaml) and the
-``SkipKeys`` doc. Published to the UI via ``GET /api/v1/dep/skip-keys`` so the DEP
-profile editor offers a labelled picker.
-
-Apple adds keys per OS release; the validator therefore *warns* on an unknown key
-rather than erroring (a newer key must not block a valid profile). ``filter_valid_skip_keys``
-keeps only known keys when building the Apple /profile payload, so an unknown key is
-silently dropped there (Apple would reject the whole profile otherwise).
+Curated from https://github.com/apple/device-management/blob/release/other/skipkeys.yaml and served at GET
+/api/v1/dep/skip-keys. See https://developer.apple.com/documentation/devicemanagement/define-profile for context.
 """
 
 from typing import Dict, List, Tuple
 
 # name -> (label, platform hint, deprecated)
 _SKIP_KEYS: Dict[str, Tuple[str, str, bool]] = {
-    "Accessibility": ("Accessibility", "iOS, tvOS", False),
-    "AccessibilityAppearance": ("Accessibility Appearance", "iOS", False),
-    "ActionButton": ("Action Button", "iOS", False),
-    "Android": ("Migrate from Android", "iOS", False),
-    "Appearance": ("Appearance (Light/Dark)", "iOS, macOS", False),
+    "Accessibility": ("Accessibility (new user only)", "macOS 11+", False),
+    "ActionButton": ("Action Button", "iOS 17+", False),
+    "Android": ("Migrate from Android", "iOS 9+", False),
+    "Appearance": ("Appearance (Light/Dark)", "iOS 13+, macOS 10.14+", False),
     "AppleID": ("Apple ID sign-in", "iOS, macOS, tvOS", False),
-    "AppStore": ("App Store", "macOS", False),
-    "Biometric": ("Touch ID / Face ID", "iOS, macOS", False),
-    "CameraButton": ("Camera Button", "iOS", False),
-    "DeviceToDeviceMigration": ("Device-to-Device Migration", "iOS", False),
+    "AppStore": ("App Store", "iOS 14.3+, macOS 11.1+", False),
+    "Biometric": ("Touch ID / Face ID", "iOS 8.1+, macOS 10.12.4+", False),
+    "CameraButton": ("Camera Control", "iOS 18+", False),
+    "DeviceToDeviceMigration": ("Device-to-Device Migration", "iOS 12.4+", False),
     "Diagnostics": ("Diagnostics / Analytics", "iOS, macOS, tvOS", False),
-    "DisplayTone": ("Display Tone", "iOS", True),
-    "EnableLockdownMode": ("Enable Lockdown Mode", "iOS", False),
-    "FileVault": ("FileVault", "macOS", False),
-    "HomeButtonSensitivity": ("Home Button Sensitivity", "iOS", True),
-    "iCloudDiagnostics": ("iCloud Analytics", "iOS, macOS", False),
-    "iCloudStorage": ("iCloud Documents & Desktop", "iOS, macOS", False),
-    "iMessageAndFaceTime": ("iMessage & FaceTime", "iOS", False),
-    "Intelligence": ("Apple Intelligence", "iOS, macOS", False),
-    "Keyboard": ("Keyboard", "iOS", False),
-    "LiquidGlass": ("Liquid Glass", "iOS, macOS", False),
-    "Location": ("Location Services", "iOS, macOS, tvOS", False),
-    "MessagingActivationUsingPhoneNumber": ("Messaging Activation", "iOS", False),
-    "Multitasking": ("Multitasking (iPad)", "iOS", False),
-    "OnBoarding": ("Onboarding", "iOS", True),
-    "OSShowcase": ("OS Showcase", "iOS, macOS", False),
+    "DisplayTone": ("Display Tone", "iOS 9.3.2+, macOS 10.13.6+", True),
+    "EnableLockdownMode": ("Enable Lockdown Mode", "iOS 17.1+, macOS 14+", False),
+    "FileVault": ("FileVault", "macOS 10.10+", False),
+    "HomeButtonSensitivity": ("Home Button Sensitivity", "iOS 10+", True),
+    "iCloudDiagnostics": ("iCloud Analytics", "macOS 10.12.4+", False),
+    "iCloudStorage": ("iCloud Documents & Desktop", "macOS 10.13.4+", False),
+    "iMessageAndFaceTime": ("iMessage & FaceTime", "iOS 12+", False),
+    "Intelligence": ("Apple Intelligence", "iOS 18+, macOS 15+", False),
+    "Keyboard": ("Keyboard", "iOS 13+", False),
+    "Location": ("Location Services", "iOS, macOS 10.11+, tvOS", False),
+    "MessagingActivationUsingPhoneNumber": ("Messaging Activation", "iOS 10+", False),
+    "Multitasking": ("Multitasking (iPad)", "iOS 26+", False),
+    "OnBoarding": ("Onboarding", "iOS 11+", True),
+    "OSShowcase": ("OS Showcase", "iOS 26+, macOS 26.1+", False),
     "Passcode": ("Passcode / Lock", "iOS, macOS", False),
-    "Payment": ("Apple Pay", "iOS, macOS", False),
-    "Privacy": ("Privacy", "iOS, macOS, tvOS", False),
+    "Payment": ("Apple Pay", "iOS 8.1+, macOS 10.12.4+", False),
+    "Privacy": ("Privacy", "iOS 11.3+, macOS 10.13.4+, tvOS 11.3+", False),
     "Restore": ("Apps & Data / Restore", "iOS, macOS", False),
-    "RestoreCompleted": ("Restore Completed", "iOS", False),
-    "Safety": ("Safety", "iOS", False),
-    "SafetyAndHandling": ("Safety and Handling", "iOS", False),
+    "RestoreCompleted": ("Restore Completed", "iOS 14+", False),
+    "Safety": ("Safety", "iOS 16+", False),
+    "SafetyAndHandling": ("Safety and Handling", "iOS 18.4+", False),
     "ScreenSaver": ("Screen Saver", "tvOS", False),
-    "ScreenTime": ("Screen Time", "iOS, macOS", False),
-    "SIMSetup": ("SIM Setup", "iOS", False),
-    "Siri": ("Siri", "iOS, macOS, tvOS", False),
-    "SoftwareUpdate": ("Mandatory Software Update", "iOS", False),
-    "SpokenLanguage": ("Spoken Language", "iOS", False),
+    "ScreenTime": ("Screen Time", "iOS 12+, macOS 10.15+", False),
+    "SIMSetup": ("SIM Setup", "iOS 12+", False),
+    "Siri": ("Siri", "iOS, macOS 10.12+, tvOS", False),
+    "SoftwareUpdate": ("Mandatory Software Update", "iOS 12+, macOS 15.4+", False),
+    "SpokenLanguage": ("Spoken Language", "iOS 13+", False),
     "TapToSetup": ("Tap to Set Up", "tvOS", False),
-    "TermsOfAddress": ("Terms of Address", "iOS, macOS", False),
-    "Tips": ("Tips", "iOS", False),
+    "TermsOfAddress": ("Terms of Address", "iOS 16+, macOS 13+", False),
+    "Tips": ("Tips", "visionOS 26+", False),
     "TOS": ("Terms of Service", "iOS, macOS, tvOS", False),
-    "TVHomeScreenSync": ("TV Home Screen Sync", "tvOS", False),
-    "TVProviderSignIn": ("TV Provider Sign-In", "tvOS", False),
-    "TVRoom": ("TV Room", "tvOS", False),
-    "UnlockWithWatch": ("Unlock with Apple Watch", "macOS", False),
-    "UpdateCompleted": ("Update Completed", "iOS", False),
-    "Wallpaper": ("Wallpaper", "iOS", True),
-    "WatchMigration": ("Watch Migration", "iOS", False),
-    "WebContentFiltering": ("Web Content Filtering", "iOS", False),
-    "Welcome": ("Welcome / Get Started", "iOS, macOS", False),
-    "Zoom": ("Zoom", "iOS", True),
+    "TVHomeScreenSync": ("TV Home Screen Sync", "tvOS 11+", False),
+    "TVProviderSignIn": ("TV Provider Sign-In", "tvOS 11+", False),
+    "TVRoom": ("TV Room", "tvOS 11.4+", False),
+    "UnlockWithWatch": ("Unlock with Apple Watch", "macOS 15+", False),
+    "UpdateCompleted": ("Update Completed", "iOS 14+, macOS 26.1+", False),
+    "Wallpaper": ("Wallpaper", "macOS 14.1+, gone in macOS 26", True),
+    "WatchMigration": ("Watch Migration", "iOS 11+", False),
+    "WebContentFiltering": ("Web Content Filtering", "iOS 18.2+", False),
+    "Welcome": ("Welcome / Get Started", "iOS 13+, macOS 15+", False),
+    "Zoom": ("Zoom", "iOS 8.3+", True),
 }
 
 VALID_SKIP_KEYS = frozenset(_SKIP_KEYS.keys())
 
 
 def catalog() -> List[Dict[str, object]]:
-    """The published SkipKeys catalog for the UI picker."""
+    """Every known skip key with its label, platform hint and deprecation flag, sorted by name."""
     return [
         {"name": name, "label": label, "platforms": platforms, "deprecated": dep}
         for name, (label, platforms, dep) in sorted(_SKIP_KEYS.items())
@@ -82,8 +73,7 @@ def catalog() -> List[Dict[str, object]]:
 
 
 def filter_valid_skip_keys(keys: List[str]) -> Tuple[List[str], List[str]]:
-    """Split a requested skip-key list into (valid, unknown), de-duplicated and in
-    input order."""
+    """Split a requested skip-key list into (valid, unknown), de-duplicated and in input order."""
     valid, unknown, seen = [], [], set()
     for k in keys:
         if k in seen:

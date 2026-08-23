@@ -1,29 +1,23 @@
 """API for Automated Device Enrollment (ADE/DEP) + ABM/ASM.
 
-Admin-only management endpoints (link a server token, sync devices, define/assign
-enrollment profiles) plus the ONE unauthenticated, device-facing endpoint the ADE
-Setup Assistant contacts. Mounted on the app in controller.api.main.
-
-Security posture (docs/specs/dep-ade-spec.md):
-  * DepServer.to_dict() is already a non-secret projection; token/key material never
-    leaves the server.
-  * Every management endpoint is scoped to ``admin.tenant`` -- a DepServer is fetched
-    with ``tenant=admin.tenant`` so one tenant can never touch another's link.
-  * Admin actions are recorded in the audit log with NO secret detail.
+Admin-only management endpoints plus the unauthenticated endpoint that Setup Assistant contacts on devices.
 """
 
+import base64
 import logging
-import os
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
-from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, Response, UploadFile
-from pydantic import BaseModel
-
+import yaml
+from controller.api.ids import require_uuid
 from controller.auth.dependencies import Principal, require_admin
 from controller.models.tenant import DepProfile, DepServer, Device, Tenant
-from controller.services import dep_manager, enrollment as enrollment_svc, skip_keys
+from controller.services import (
+    dep_manager, enrollment as enrollment_svc, readiness, skip_keys, tenant_config,
+)
 from controller.services.audit import record_audit
 from controller.services.dep_client import DepError
+from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, Response, UploadFile
+from pydantic import BaseModel
 
 logger = logging.getLogger(__name__)
 
@@ -32,6 +26,20 @@ router = APIRouter(prefix="/api/v1/dep", tags=["dep"])
 # A DEP server name: slug-safe, short.
 _NAME_MAX = 100
 _TOKEN_MAX_BYTES = 256 * 1024  # a .p7m is a few KB; cap to reject junk uploads.
+# That endpoint is unauthenticated apart from the enrollment token; cap what it will buffer, like the upload above.
+_MACHINE_INFO_MAX_BYTES = 64 * 1024
+# Long enough to be nonsense: Device.serial_number holds 20 characters, so a longer one cannot match a row anyway.
+_SERIAL_MAX = 20
+
+
+def _require_ade_ready() -> None:
+    """Refuse an admin action that would push a URL nothing can authenticate.
+
+    Raises 503 with the readiness reason, from the same predicate the readiness endpoint uses.
+    """
+    status = readiness.check(readiness.ADE)
+    if not status.ready:
+        raise HTTPException(status_code=503, detail=status.reason)
 
 
 class DepServerCreate(BaseModel):
@@ -47,7 +55,11 @@ class SerialsBody(BaseModel):
 
 
 async def _get_server(server_id: str, admin: Principal) -> DepServer:
-    """Fetch a DepServer scoped to the admin's tenant (404 otherwise)."""
+    """Fetch a DepServer scoped to the admin's tenant (404 otherwise).
+
+    Every management endpoint below resolves its server through here, so the malformed-id guard covers all of them.
+    """
+    require_uuid(server_id, "DEP server not found")
     server = await DepServer.get_or_none(id=server_id, tenant=admin.tenant)
     if server is None:
         raise HTTPException(status_code=404, detail="DEP server not found")
@@ -65,8 +77,8 @@ async def list_servers(admin: Principal = Depends(require_admin)) -> Dict[str, A
 @router.post("/servers", status_code=201)
 async def create_server(body: DepServerCreate,
                         admin: Principal = Depends(require_admin)) -> Dict[str, Any]:
-    """Begin linking: create/reset a DepServer and generate its PKI keypair. Returns
-    the public certificate the admin uploads to ABM/ASM."""
+    """Begin linking: create/reset a DepServer and generate its PKI keypair. Returns the public certificate the admin
+    uploads to ABM/ASM."""
     name = (body.name or "").strip()
     if not name or len(name) > _NAME_MAX:
         raise HTTPException(status_code=400, detail="A 1-100 char name is required")
@@ -112,8 +124,8 @@ async def download_public_key(server_id: str,
 async def upload_token(server_id: str,
                        file: UploadFile = File(...),
                        admin: Principal = Depends(require_admin)) -> Dict[str, Any]:
-    """Complete linking (or renew): decrypt the uploaded .p7m server token, verify it
-    against Apple, and store it encrypted."""
+    """Complete linking (or renew): decrypt the uploaded .p7m server token, verify it against Apple, and store it
+    encrypted."""
     server = await _get_server(server_id, admin)
     data = await file.read(_TOKEN_MAX_BYTES + 1)
     if not data:
@@ -131,24 +143,50 @@ async def upload_token(server_id: str,
     await record_audit(admin, "dep.server.link", target_type="dep_server",
                        target_id=str(server.id),
                        detail={"org_name": (server.account_detail or {}).get("org_name")})
-    # Mirror the token expiry onto the tenant renewal-reminder field for the
-    # existing Enrollment/Settings surfaces (best-effort).
+    # A linked token means DEP is live for this tenant, so mirror the flag and the token expiry onto the Tenant row.
+    # Best-effort: the link itself already succeeded.
     try:
+        fields = ["dep_enabled", "updated_at"]
+        admin.tenant.dep_enabled = True
         if server.token_expires_at:
             admin.tenant.dep_token_expires_at = server.token_expires_at
-            admin.tenant.dep_enabled = True
-            await admin.tenant.save(update_fields=["dep_token_expires_at", "dep_enabled", "updated_at"])
+            fields.append("dep_token_expires_at")
+        await admin.tenant.save(update_fields=fields)
+        _mirror_dep_enabled(str(admin.tenant.id), True)
     except Exception:
-        logger.exception("DEP: mirroring token expiry to tenant failed")
+        logger.exception("DEP: mirroring the link onto tenant %s failed", admin.tenant.id)
     return server.to_dict()
+
+
+def _mirror_dep_enabled(tenant_id: str, enabled: bool) -> None:
+    """Write tenant.dep.enabled back into the tenant's config.yaml.
+
+    config.yaml wins: sync_tenant re-reads this key every few minutes, so a DB-only flag reverts. A tenant with no
+    config file on disk is left alone.
+    """
+    path = tenant_config.tenant_dir(tenant_id) / "config.yaml"
+    if not path.exists():
+        return
+    with open(path, "r") as fh:
+        config = yaml.safe_load(fh) or {}
+    if not isinstance(config.get("tenant"), dict):
+        config["tenant"] = {}
+    if not isinstance(config["tenant"].get("dep"), dict):
+        config["tenant"]["dep"] = {}
+    if config["tenant"]["dep"].get("enabled") == enabled:
+        return
+    config["tenant"]["dep"]["enabled"] = enabled
+    # Imported here (not at module level) because api.main imports this router at load time.
+    from controller.api.main import _atomic_write_yaml, _config_document_text
+    _atomic_write_yaml(path, config, text=_config_document_text(path, config))
 
 
 @router.delete("/servers/{server_id}")
 async def unlink_server(server_id: str,
                         purge: bool = Query(False),
                         admin: Principal = Depends(require_admin)) -> Dict[str, Any]:
-    """Unlink (wipe secrets, keep the row + synced devices) or, with ``?purge=true``,
-    remove the connection entirely -- for one that was never finished or is retired."""
+    """Unlink, wiping the secrets but keeping the row and its synced devices. With ?purge=true, drop the connection
+    entirely, for one that was never finished or has been retired."""
     server = await _get_server(server_id, admin)
     if purge:
         await dep_manager.remove(server)
@@ -214,10 +252,8 @@ async def set_default_profile(server_id: str, body: DefaultProfileBody,
 async def push_profile(server_id: str, profile_id: str,
                        admin: Principal = Depends(require_admin)) -> Dict[str, Any]:
     server = await _get_server(server_id, admin)
+    _require_ade_ready()
     enroll_url = enrollment_svc.ade_enroll_url(str(admin.tenant.id))
-    if not enroll_url:
-        raise HTTPException(status_code=503,
-                            detail="PUBLIC_API_URL is not configured; the DEP profile needs an enrollment URL")
     try:
         mapping = await dep_manager.push_profile(server, profile_id, enroll_url)
     except DepError as exc:
@@ -235,17 +271,21 @@ async def assign_profile(server_id: str, body: Dict[str, Any],
     serials = [str(s).strip() for s in (body.get("serials") or []) if str(s).strip()]
     if not profile_id or not serials:
         raise HTTPException(status_code=400, detail="profile_id and serials are required")
+    _require_ade_ready()
     enroll_url = enrollment_svc.ade_enroll_url(str(admin.tenant.id))
-    if not enroll_url:
-        raise HTTPException(status_code=503, detail="PUBLIC_API_URL is not configured")
     try:
-        results = await dep_manager.assign_profile(server, profile_id, serials, enroll_url)
+        outcome = await dep_manager.assign_profile(server, profile_id, serials, enroll_url)
     except DepError as exc:
         raise HTTPException(status_code=400, detail=f"{exc.code}: {exc}")
     await record_audit(admin, "dep.profile.assign", target_type="dep_server",
                        target_id=str(server.id),
                        detail={"profile_id": profile_id, "count": len(serials)})
-    return {"results": results}
+    # results is the per-serial map; retry_after_seconds rides alongside it when Apple throttled part of the batch (see
+    # dep_manager.assign_profile).
+    out: Dict[str, Any] = {"results": outcome.get("results") or {}}
+    if outcome.get("retry_after_seconds") is not None:
+        out["retry_after_seconds"] = outcome["retry_after_seconds"]
+    return out
 
 
 @router.post("/servers/{server_id}/unassign")
@@ -292,48 +332,57 @@ async def get_skip_keys(admin: Principal = Depends(require_admin)) -> Dict[str, 
 async def ade_enroll(tenant_id: str, token: str, request: Request) -> Response:
     """The URL an ADE device's Setup Assistant POSTs to during enrollment.
 
-    Unauthenticated by JWT (the device holds none), but gated by the same
-    per-tenant enrollment token as the OTA download link: the token is baked into
-    the DEP profile's ``url`` (enrollment_svc.ade_enroll_url), which Apple only
-    delivers to devices assigned to this MDM server. This prevents an anonymous
-    caller from harvesting the tenant's enrollment .mobileconfig -- which embeds
-    the SCEP challenge -- just by guessing the tenant id.
-
-    Returns the tenant's enrollment .mobileconfig (SCEP + MDM). The device's signed
-    MachineInfo header is parsed best-effort for observability + placeholder
-    pre-stamping; enrollment does not depend on it. The reliable ADE-origin marker
-    is applied at webhook adoption from the device's DEP linkage.
+    No JWT: the request carries the same per-tenant enrollment token baked into the DEP profile url Apple delivers.
+    Returns the tenant's enrollment .mobileconfig. Unknown tenant and bad token both answer 404, so an anonymous
+    caller cannot learn which tenant ids exist; the real reason goes to the log via enrollment.log_token_refusal.
     """
+    remote = request.client.host if request.client else None
     tenant = await Tenant.get_or_none(id=tenant_id)
     if not tenant or not tenant.is_active:
+        enrollment_svc.log_token_refusal(
+            "ADE enroll", tenant_id, "no such active tenant", remote)
         raise HTTPException(status_code=404, detail="Not found")
-    if not enrollment_svc.verify_enrollment_token(tenant_id, token):
-        raise HTTPException(status_code=403, detail="Forbidden")
 
-    # Refuse to hand back a structurally-valid but dead profile.
+    if not enrollment_svc.verify_enrollment_token(tenant_id, token):
+        # Also covers an unset JWT_SECRET; that reason stays out of this anonymous-facing 404 (see readiness).
+        enrollment_svc.log_token_refusal(
+            "ADE enroll", tenant_id, "the enrollment token did not verify", remote)
+        raise HTTPException(status_code=404, detail="Not found")
+
+    # Refuse to hand back a structurally-valid but dead profile, past the token check.
     details = enrollment_svc.enrollment_details(tenant)
     if not details["configured"]:
         raise HTTPException(
             status_code=503,
-            detail=f"Enrollment is not fully configured; missing: {', '.join(details['missing'])}",
+            detail="Enrollment is not fully configured; check: "
+                   f"{readiness.settings_to_check(details)}",
         )
 
-    # Parse + verify the signed MachineInfo. Verification proves the request came
-    # from an Apple device; enforcement is opt-in because the exact Apple anchor a
-    # device chains to is OS/hardware-dependent and can't be validated without real
-    # hardware -- operators confirm it verifies in staging, then flip the flag on.
+    # Parse and verify the signed MachineInfo, proving the request came from a real Apple device. Enforcement is
+    # opt-in (see _require_apple_signature).
+    body = await _read_capped_body(request, _MACHINE_INFO_MAX_BYTES)
     header = request.headers.get("x-apple-aspen-deviceinfo")
     verified = False
     serial = ""
+    source = "nothing"
     try:
-        info, verified = enrollment_svc.parse_machine_info(header)
-        serial = str(info.get("SERIAL") or "").strip()
+        info, verified, source = _machine_info(body, header)
+        serial = _clean_serial(info.get("SERIAL"))
     except Exception:
         logger.exception("ADE: machine-info handling failed for tenant %s", tenant_id)
 
     if _require_apple_signature() and not verified:
-        logger.warning("ADE: rejecting unverified enrollment for tenant %s (serial=%s)",
-                       tenant_id, serial or "?")
+        if source == "nothing":
+            missing = ("no MachineInfo in the request: the POST body was empty and "
+                       "no x-apple-aspen-deviceinfo header was sent")
+        else:
+            missing = (f"the MachineInfo from the {source} did not verify: its CMS "
+                       f"signature or its chain to an Apple anchor failed (see the "
+                       f"preceding machine-info verification log line)")
+        logger.warning("ADE: rejecting enrollment for tenant %s (serial=%s): %s "
+                       "[body=%d bytes, header=%s, DEP_ADE_REQUIRE_APPLE_SIGNATURE=on]",
+                       tenant_id, serial or "?", missing, len(body),
+                       "present" if header else "absent")
         raise HTTPException(status_code=403, detail="Device signature verification failed")
 
     if serial:
@@ -346,24 +395,86 @@ async def ade_enroll(tenant_id: str, token: str, request: Request) -> Response:
     return Response(content=data, media_type="application/x-apple-aspen-config")
 
 
+async def _read_capped_body(request: Request, limit: int) -> bytes:
+    """The request body, refusing anything past limit rather than buffering it.
+
+    Cut off at the ceiling while streaming even if Content-Length understates the size. Returns empty for a body
+    this endpoint cannot read at all, which the caller treats as "no MachineInfo".
+    """
+    too_large = HTTPException(status_code=413, detail="Request body is too large")
+    declared = (request.headers.get("content-length") or "").strip()
+    if declared.isdigit() and int(declared) > limit:
+        raise too_large
+    chunks: List[bytes] = []
+    total = 0
+    try:
+        async for chunk in request.stream():
+            total += len(chunk)
+            if total > limit:
+                raise too_large
+            chunks.append(chunk)
+    except HTTPException:
+        raise
+    except Exception:
+        logger.exception("ADE: reading the request body failed")
+        return b""
+    return b"".join(chunks)
+
+
+def _clean_serial(value: Any) -> str:
+    """A serial from an as-yet-unverified MachineInfo, or empty.
+
+    Attacker-supplied until the signature is checked; a control character or an over-length value is discarded.
+    """
+    text = str(value or "").strip()
+    if not text or len(text) > _SERIAL_MAX:
+        return ""
+    if any(ch < " " or ch == "\x7f" for ch in text):
+        return ""
+    return text
+
+
+def _machine_info(body: bytes,
+                  header: Optional[str]) -> Tuple[Dict[str, Any], bool, str]:
+    """The device's MachineInfo for this request, as (info, verified, source).
+
+    The body wins over the x-apple-aspen-deviceinfo header (web-view flow), and a body that fails to verify is
+    never retried against the header, which would let an unsigned body ride in on a replayed header. See
+    https://developer.apple.com/documentation/devicemanagement/authenticating-through-web-views
+    """
+    if body:
+        info, verified = enrollment_svc.parse_machine_info(
+            base64.b64encode(body).decode())
+        return info, verified, "body"
+    if header:
+        info, verified = enrollment_svc.parse_machine_info(header)
+        return info, verified, "header"
+    return {}, False, "nothing"
+
+
 def _require_apple_signature() -> bool:
-    """Whether the ADE endpoint rejects requests whose MachineInfo signature does
-    not verify against an Apple anchor. Off by default (advisory) -- see dep_verify."""
-    return os.getenv("DEP_ADE_REQUIRE_APPLE_SIGNATURE", "false").strip().lower() in (
-        "1", "true", "yes", "on")
+    """Whether the ADE endpoint rejects a MachineInfo signature that does not verify against an Apple anchor.
+
+    Off by default, so advisory; see dep_verify.
+    """
+    return readiness.dep_ade_require_apple_signature()
 
 
 async def _prestamp_ade(tenant: Tenant, serial: str, verified: bool) -> None:
-    """Mark a synced placeholder as ADE-origin at profile-fetch time (belt-and-
-    suspenders with the webhook adoption stamp), recording whether the device's
-    MachineInfo signature verified against an Apple anchor."""
+    """Mark a synced placeholder as ADE-origin at profile-fetch time, recording MachineInfo signature verification.
+
+    A recorded verification is only ever raised, never lowered, since anyone who can reach this endpoint can name
+    any serial with enforcement off.
+    """
     device = await Device.filter(tenant=tenant, serial_number=serial).first()
     if device is None:
         return
     attrs = dict(device.attributes or {})
-    if attrs.get("enrollment_source") == "ade" and attrs.get("ade_signature_verified") == verified:
+    updated = dict(attrs)
+    updated["enrollment_source"] = "ade"
+    if verified or not updated.get("ade_signature_verified"):
+        updated["ade_signature_verified"] = verified
+    if updated == attrs:
         return
-    attrs["enrollment_source"] = "ade"
-    attrs["ade_signature_verified"] = verified
-    device.attributes = attrs
+    device.attributes = updated
     await device.save(update_fields=["attributes"])

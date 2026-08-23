@@ -1,26 +1,6 @@
-"""Verify the CMS signature on an ADE device's ``x-apple-aspen-deviceinfo``.
+"""Verify the CMS signature on an ADE device's x-apple-aspen-deviceinfo.
 
-During Automated Device Enrollment the device POSTs a CMS/PKCS#7 SignedData blob
-(base64 in the header) whose eContent is the MachineInfo plist, signed by the
-device's identity certificate, which chains to Apple's device CA
-("Apple iPhone Device CA" -> ... -> "Apple Root CA"). Verifying it proves the
-request genuinely came from an Apple device and lets us trust the MachineInfo
-fields (serial/udid/product).
-
-Two things are checked (RFC 5652):
-  1. **Signature** -- the SignerInfo signature over the content (via signed
-     attributes when present, incl. the messageDigest binding to the eContent).
-  2. **Trust chain** -- the signer certificate chains to a bundled Apple anchor.
-     Per Apple's guidance, certificate **validity dates are IGNORED** (device
-     certs may be expired); ``verify_directly_issued_by`` checks issuer +
-     signature only, not notBefore/notAfter.
-
-Anchors: ``controller/data/apple_ca_anchors.pem`` plus any file named by
-``DEP_APPLE_ANCHOR_CERTS`` (the exact anchor a device chains to is OS/hardware-
-dependent, so operators can supplement the bundle). The verifier NEVER raises --
-it returns ``(content, verified, detail)`` so the caller decides policy; a parse
-failure degrades to ``verified=False`` with the content still best-effort
-extracted, so enrollment is never broken by a verification bug.
+Returns (content, verified, detail); never raises. See docs for protocol details and anchor sources.
 """
 
 import logging
@@ -62,9 +42,26 @@ def _fp(cert: x509.Certificate) -> bytes:
     return cert.fingerprint(hashes.SHA256())
 
 
+def _is_ca(cert: x509.Certificate) -> bool:
+    """Whether this certificate may issue other certificates. Prevents forged chains from leaf certs."""
+    try:
+        if not cert.extensions.get_extension_for_class(x509.BasicConstraints).value.ca:
+            return False
+    except x509.ExtensionNotFound:
+        return False
+    except Exception:
+        return False
+    try:
+        return bool(cert.extensions.get_extension_for_class(x509.KeyUsage).value.key_cert_sign)
+    except x509.ExtensionNotFound:
+        return True
+    except Exception:
+        return False
+
+
 def _chain_trusted(leaf: x509.Certificate, pool: List[x509.Certificate]) -> bool:
-    """Does ``leaf`` chain to a bundled Apple anchor? Ignores validity dates
-    (``verify_directly_issued_by`` checks issuer + signature only)."""
+    """Whether leaf chains to a bundled Apple anchor. Validity dates are ignored (verify_directly_issued_by checks
+    issuer and signature only), but every intermediate has to be a CA."""
     anchors = _anchors()
     if not anchors:
         return False
@@ -86,6 +83,9 @@ def _chain_trusted(leaf: x509.Certificate, pool: List[x509.Certificate]) -> bool
         for cand in by_subject.get(current.issuer.public_bytes(), []):
             if _fp(cand) == cur_fp:
                 continue  # skip self (non-anchor self-signed can't be trusted)
+            # A configured anchor is trusted because the operator pinned it; anything else in the path has to be a CA.
+            if _fp(cand) not in anchor_fps and not _is_ca(cand):
+                continue
             try:
                 current.verify_directly_issued_by(cand)
                 issued = cand
@@ -109,8 +109,8 @@ def _to_crypto_cert(asn1_cert) -> Optional[x509.Certificate]:
 
 def _verify_signature(signer_cert: x509.Certificate, signed_bytes: bytes,
                       signature: bytes, hash_alg) -> bool:
-    """Verify a SignerInfo signature with the signer's public key (RSA PKCS1v15 or
-    ECDSA). Returns False on any mismatch/error."""
+    """Verify a SignerInfo signature with the signer's public key (RSA PKCS1v15 or ECDSA). Returns False on any
+    mismatch/error."""
     pub = signer_cert.public_key()
     try:
         if isinstance(pub, ec.EllipticCurvePublicKey):
@@ -133,9 +133,7 @@ _HASH_BY_OID = {
 def verify_cms(cms_der: bytes) -> Tuple[Optional[bytes], bool, str]:
     """Verify an ADE MachineInfo CMS SignedData blob.
 
-    Returns ``(content, verified, detail)``: ``content`` is the eContent bytes
-    (the MachineInfo plist) when extractable, ``verified`` is True only when BOTH
-    the signature and the Apple trust chain check out. Never raises."""
+    Returns (content, verified, detail). Never raises."""
     try:
         from asn1crypto import cms as asn1_cms
     except Exception:
@@ -173,11 +171,10 @@ def verify_cms(cms_der: bytes) -> Tuple[Optional[bytes], bool, str]:
             return content, False, f"unsupported digest {digest_alg}"
         hash_alg = hash_cls()
 
-        # What the signature covers: the DER of signed_attrs (re-tagged SET) when
-        # present, else the eContent directly.
+        # What the signature covers: the DER of signed_attrs (re-tagged SET) when present, else the eContent directly.
         signed_attrs = si["signed_attrs"]
         if signed_attrs is not None and len(signed_attrs) > 0:
-            # messageDigest attr MUST equal digest(eContent).
+            # The messageDigest attr has to equal digest(eContent).
             if content is None:
                 return None, False, "signed_attrs without content"
             md = _attr_value(signed_attrs, "message_digest")
@@ -207,13 +204,16 @@ def verify_cms(cms_der: bytes) -> Tuple[Optional[bytes], bool, str]:
 
 
 def _find_signer_cert(si, certs: List[x509.Certificate]) -> Optional[x509.Certificate]:
+    """The certificate the SignerInfo names, or None."""
     sid = si["sid"]
     if sid.name == "issuer_and_serial_number":
         serial = sid.chosen["serial_number"].native
+        issuer_der = sid.chosen["issuer"].dump()
         for c in certs:
-            if c.serial_number == serial:
+            if c.serial_number == serial and c.issuer.public_bytes() == issuer_der:
                 return c
-    elif sid.name == "subject_key_identifier":
+        return None
+    if sid.name == "subject_key_identifier":
         want = sid.chosen.native
         for c in certs:
             try:
@@ -222,6 +222,7 @@ def _find_signer_cert(si, certs: List[x509.Certificate]) -> Optional[x509.Certif
                     return c
             except x509.ExtensionNotFound:
                 continue
+        return None
     return certs[0] if len(certs) == 1 else None
 
 

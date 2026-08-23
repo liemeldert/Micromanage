@@ -16,6 +16,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy application
 COPY controller/ /app/controller/
+COPY deploy/healthcheck.py /app/healthcheck.py
 
 # Create supervisor config
 RUN mkdir -p /etc/supervisor/conf.d

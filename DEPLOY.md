@@ -1,133 +1,92 @@
-# Deploying MicromanageIAC (Portainer / Docker Compose)
+# Deploying Micromanage (Portainer / Docker Compose)
 
-A fully compose-based deployment -- no `setup.sh`. The stack pulls prebuilt images
-from GHCR and uploads the APNs push cert from environment variables; TLS is
-terminated by your reverse proxy (§6). Use [`docker-compose.prod.yml`](docker-compose.prod.yml)
-and the variables from [`.env.prod.example`](.env.prod.example).
+This is for a fully compose-based deployment, which is my preference. The stack pulls prebuilt images from GHCR and
+uploads the APNs push cert from environment variables. TLS is handled by your own reverse proxy (see section 6). You
+want
+[`docker-compose.prod.yml`](docker-compose.prod.yml) and the variables from
+[`.env.example`](.env.example).
+
+The deployment resulting from `./setup.sh dev` exists mostly for development and testing on my part, so I wouldn't
+recommend using that for anything important.
+
+While I have attempted to provide a reasonable defaults, you should review the compose file and environments first, and
+determine if what it is doing is appropriate for your environment. The compose file is intended to be a starting point,
+and you should modify it as needed, especially regarding SCEP.
 
 ## 1. Prerequisites
 
 - A DNS record for `MDM_HOSTNAME` pointing at the server.
-- These host ports reachable by your devices: `443` (MDM), `8001` (app manifests +
-  enrollment download), `9443` (step-ca SCEP). The web UI (`3000`) only needs to be
-  reachable by admins. Postgres and the NanoMDM management API are never exposed.
-- Images: this repo's GitHub Action publishes `…-controller` and `…-webui` to GHCR.
-  If the packages are **private**, add your GHCR registry credentials in Portainer
-  (Registries → add `ghcr.io` with a PAT that has `read:packages`), or make the
-  packages public in your GitHub repo's package settings.
+- These ports reachable by your devices: `443` (MDM), `8001` (app manifests and the enrollment download), `9443`
+  (step-ca SCEP). The web UI is on `3000` by default, but does not *need* to be client-device-accessible.
+- APN certificate (Be it through apple or another means)
+- Devices to enroll (of course)
+- Patience (A virtue, I hear)
 
 ## 2. Generate secrets
 
 ```sh
-openssl rand -hex 32   # run once each for DB_PASSWORD, NANOMDM_API_KEY, JWT_SECRET, WEBHOOK_SECRET
+./setup.sh env`
 ```
 
-## 3. Get the APNs push certificate (the one manual Apple step)
-
-Apple requires a push certificate; this can't be fully automated. Get one via
-[mdmcert.download](https://mdmcert.download) or
-[identity.apple.com/pushcert](https://identity.apple.com/pushcert), then base64 the
-PEM files and set them as env vars -- the `apns-init` service uploads them on deploy:
+**OR:**
 
 ```sh
-base64 -w0 MDM_Certificate.pem   # -> PUSH_CERT_PEM_B64
-base64 -w0 push.key              # -> PUSH_KEY_PEM_B64
+openssl rand -hex 32   # run once each for secret needed, then set them in .env
 ```
 
-Set `MDM_TOPIC` to the topic embedded in that cert (`com.apple.mgmt.External.<uuid>`).
-You can leave the APNs vars blank to bring the stack up first and add push later.
+Optionally, you can generate secrets for `WEBHOOK_HMAC_KEY` and `DDM_HMAC_SECRET`. They are just `WEBHOOK_SECRET`
+by default, but if you want to rotate them independently, generate them too. Setup.sh generates them as well.
 
-## 4. Deploy in Portainer
+## 3. Acquire an APNs push certificate
 
-**Stacks → Add stack**, then either:
+APNs push certificates require a MDM vendor CSR, which are only issued on request.
+However, [MacTechs](http://www.mactechs.com/)
+provides a service, [mdmcert.download](https://mdmcert.download) that will issue push certificates to legally recognized
+businesses, institutions, and organizations, as stipulated by Apple's terms. I have no affiliation to this project, so
+make sure you are authorized to use this service by its terms. Since I too have a vendor CSR, I may eventually provide a
+similar service as well.
 
-- **From this Git repo** -- set the compose path to `docker-compose.prod.yml`, or
-- **Web editor** -- paste the contents of `docker-compose.prod.yml` (it uses named
-  volumes only, so the editor works without the repo on disk).
+The implementation of this was pulled from MicroMDM.
 
-Under **Environment variables**, add the values from `.env.prod.example`. At minimum:
-`DB_PASSWORD`, `NANOMDM_API_KEY`, `JWT_SECRET`, `WEBHOOK_SECRET`, `MDM_HOSTNAME`,
-`PUBLIC_API_URL`, and (recommended for first login) `CONTROLLER_BOOTSTRAP_ADMIN_EMAIL`
-+ `CONTROLLER_BOOTSTRAP_ADMIN_PASSWORD`. Set `CONTROLLER_IMAGE` / `WEBUI_IMAGE` if
-your GHCR path differs from the defaults.
+First, you must register on [mdmcert.download](https://mdmcert.download), then run these two commands:
 
-Deploy the stack. On first boot: step-ca initialises its CA, the controller creates
-the bootstrap admin, and `apns-init` uploads the push cert (if provided).
+```sh
+./setup.sh apns request you@example.com
+# ...check your email
+./setup.sh apns decrypt ~/Downloads/mdm_signed_request.*.plist.b64.p7
+```
 
-## 5. First login & enrollment
+That provides `certs/apns/push.req`. Upload it at [identity.apple.com/pushcert](https://identity.apple.com/pushcert)
+("Create a Certificate"), download the certificate Apple gives back, and save it as `certs/apns/MDM_Certificate.pem`
+Then either run `./setup.sh push-cert` (it uploads to NanoMDM and writes `MDM_TOPIC` into `.env` for you)
+or base64 the PEM files and set them as env vars so `apns-init` uploads them on deploy:
 
-- Open `http://<server>:3000`, sign in with the bootstrap admin. Then create real
-  users under **Settings/Users** (or the CLI below) and clear the bootstrap vars and
-  redeploy.
-- Go to **Enrollment** to view the auto-generated profile, download it, or scan the
-  QR to enroll a device. It will flag any missing config (`MDM_TOPIC`,
-  `SCEP_CHALLENGE`, …).
+```sh
+base64 < certs/apns/MDM_Certificate.pem | tr -d '\n'
+base64 < certs/apns/push.key             | tr -d '\n'
+```
 
-Provision users without the bootstrap vars:
+Set `MDM_TOPIC` to the topic embedded in the certificate
+(`openssl x509 -in certs/apns/MDM_Certificate.pem -noout -subject` shows it as `UID=com.apple.mgmt.External.<uuid>`).
+You can leave the APNs vars blank to get the stack up first and add push later. However, you cannot issue commands to
+devices without that certificate. It's also something I haven't tested.
+
+## 4. Deploy stack
+
+- First, before doing anything else, review .env.example and your .env file to make sure you didn't miss anything.
+- Then, deploy docker-compose.prod.yml
+- On first boot, step-ca initialises its CA, the controller creates a bootstrap admin account, and `apns-init`
+  uploads the push cert if you gave it one.
+-
 
 ```sh
 docker compose -f docker-compose.prod.yml exec controller \
   python -m controller.tenant_cli user add default you@example.com --role admin --password '...'
 ```
 
-## 6. Production topology (TLS + SCEP)
+## 5. First login and enrollment
 
-Apple requires **HTTPS** for every device-facing endpoint. Every service here serves
-**plain HTTP** (NanoMDM included -- it has no built-in TLS), so put a **TLS-terminating
-reverse proxy** (Traefik/Caddy/nginx/NPM) in front and route your public hostname to:
-
-| Public path/host | Internal target |
-| --- | --- |
-| MDM endpoint (`/mdm`, `/checkin`) | `nanomdm:9000` (plain HTTP -- proxy passes headers through) |
-| App manifests + enrollment (`/api/...`) | `controller:8001` |
-| SCEP (`/scep/...`) | `step-ca:9000` |
-| Admin web UI | `webui:3000` |
-
-No client-cert / mTLS config is needed at the proxy: the enrollment profile sets
-`SignMessage=true`, so each device signs its check-ins and NanoMDM reads the identity
-cert from the `Mdm-Signature` header, validating it against step-ca's CA (wired via
-`-ca`/`-intermediate`). Just forward the request headers (proxies do by default).
-
-Then set `PUBLIC_API_URL`, `MDM_SERVER_URL`, and `SCEP_URL` to those **public HTTPS**
-URLs.
-
-**SCEP provisioner:** created automatically on step-ca's first boot from `SCEP_NAME`
-/ `SCEP_CHALLENGE` (step-ca also initialises an RSA CA chain, which SCEP requires). No
-manual step. To change the challenge later, run:
-
-```sh
-docker compose -f docker-compose.prod.yml exec step-ca \
-  step ca provisioner update mdm_device_scep --challenge "$NEW_CHALLENGE"
-# then restart step-ca, and update SCEP_CHALLENGE in the controller env to match
-```
-
-The Enrollment page shows exactly which of these values are still missing.
-
-## Declarative Device Management (DDM)
-
-DDM lets supported devices (iOS/iPadOS/tvOS 16+, macOS 13+, watchOS 10+) apply
-and enforce configuration autonomously and stream status back, instead of
-polling with MDMv1 commands. NanoMDM proxies the device's DDM check-ins to the
-controller via the `-dm "http://controller:8000/ddm/"` flag (trailing slash
-required) with `-dm-send-hmac-key` set to `WEBHOOK_SECRET` so the controller
-can authenticate the calls (`DDM_HMAC_SECRET` overrides the key if you want
-them separate).
-
-DDM is off until a tenant admin enables the tenant toggle; declarations are
-authored in the tenant's `declarations.yaml` (see the commented example in
-`yaml-configs/tenants/default/declarations.yaml`).
-
-Related to DDM, MDMv1 software-update commands stop working on the 27.0-era OSes. the
-`com.apple.configuration.softwareupdate.enforcement.specific` declaration is
-Apple's replacement for enforcing updates. 
-
-## Image tags
-
-The GitHub Action publishes:
-
-| Trigger | Tags |
-| --- | --- |
-| push to default branch | `:dev`, `:sha-<commit>` |
-| published release | `:stable`, `:latest`, `:<version>`, `:<major>.<minor>` |
-
-Pin `CONTROLLER_IMAGE` / `WEBUI_IMAGE` to `:stable` for production or `:dev` to track latest.
+- Open `http://<server>:3000` and sign in as the account from before.
+- Then, create the actual users under **Settings/Users**
+- Go to **Enrollment** to see the auto-generated enrollment profile
+- It also provides warnings if you missed anything.
