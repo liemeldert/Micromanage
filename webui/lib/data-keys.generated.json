@@ -1,0 +1,130 @@
+{
+  "com.apple.MCX.FileVault2": {
+    "containers": [],
+    "keys": [
+      "Certificate"
+    ]
+  },
+  "com.apple.applicationaccess.new": {
+    "containers": [
+      "subApps",
+      "whiteList"
+    ],
+    "keys": [
+      "detachedSignature"
+    ]
+  },
+  "com.apple.eas.account": {
+    "containers": [],
+    "keys": [
+      "Certificate"
+    ]
+  },
+  "com.apple.font": {
+    "containers": [],
+    "keys": [
+      "Font"
+    ]
+  },
+  "com.apple.relay.managed": {
+    "containers": [
+      "Relays"
+    ],
+    "keys": [
+      "RawPublicKeys"
+    ]
+  },
+  "com.apple.security.certificaterevocation": {
+    "containers": [
+      "EnabledForCerts"
+    ],
+    "keys": [
+      "Hash"
+    ]
+  },
+  "com.apple.security.certificatetransparency": {
+    "containers": [
+      "DisabledForCerts"
+    ],
+    "keys": [
+      "Hash"
+    ]
+  },
+  "com.apple.security.pem": {
+    "containers": [],
+    "keys": [
+      "PayloadContent"
+    ]
+  },
+  "com.apple.security.pkcs1": {
+    "containers": [],
+    "keys": [
+      "PayloadContent"
+    ]
+  },
+  "com.apple.security.pkcs12": {
+    "containers": [],
+    "keys": [
+      "PayloadContent"
+    ]
+  },
+  "com.apple.security.root": {
+    "containers": [],
+    "keys": [
+      "PayloadContent"
+    ]
+  },
+  "com.apple.security.scep": {
+    "containers": [
+      "PayloadContent"
+    ],
+    "keys": [
+      "CAFingerprint"
+    ]
+  },
+  "com.apple.systempolicy.rule": {
+    "containers": [],
+    "keys": [
+      "LeafCertificate"
+    ]
+  },
+  "com.apple.webClip.managed": {
+    "containers": [],
+    "keys": [
+      "Icon"
+    ]
+  },
+  "com.barebones.bbedit": {
+    "containers": [],
+    "keys": [
+      "BBEditorFont",
+      "BBPrintingFont"
+    ]
+  },
+  "com.jamf.connect.sync": {
+    "containers": [],
+    "keys": [
+      "LicenseFile"
+    ]
+  },
+  "com.twocanoes.xcreds": {
+    "containers": [],
+    "keys": [
+      "menuItemIconCheckedData",
+      "menuItemIconData"
+    ]
+  },
+  "menu.nomad.NoMADPro": {
+    "containers": [],
+    "keys": [
+      "LicenseFile"
+    ]
+  },
+  "menu.nomad.login.ad": {
+    "containers": [],
+    "keys": [
+      "BackgroundImageData",
+      "LoginLogoData"
+    ]
+  }
+}

@@ -1,2 +1,1182 @@
-*, *::before, *::after { box-sizing: border-box; }
-body { margin: 0; }
+:root {
+    /* How long a press is held before the peek gesture opens. components/ui/peek-core.ts holds the same
+       number, and the press animation runs for that long. */
+    --mm-hold-duration: 450ms;
+
+    /* Pile / stacked-card animation properties (set per-element via JS/inline styles) */
+    --mm-pile-drafts: 0;
+    --mm-pile-i: 0;
+
+    /* Unstack animation properties */
+    --mm-unstack-dx: 0px;
+    --mm-unstack-dy: 0px;
+    --mm-unstack-shift: 0px;
+    --mm-unstack-delay: 0ms;
+
+    /* Generic animation helpers */
+    --mm-delay: 0ms;
+    --mm-tx: 0px;
+    --mm-ty: 0px;
+    --mm-rot: 0deg;
+
+    /* Glass / frosted-panel layout */
+    --mm-glass-px: 0px;
+    --mm-glass-lean-x: 0deg;
+    --mm-glass-lean-y: 0deg;
+
+    /* Swipe gesture feedback */
+    --mm-swipe-tint: transparent;
+    --mm-swipe-hint-reach: 0px;
+    --mm-swipe-hint-left: 0px;
+    --mm-swipe-hint-right: 0px;
+}
+
+*, *::before, *::after {
+    box-sizing: border-box;
+}
+
+body {
+    margin: 0;
+}
+
+/*  Sidebar  */
+
+/* Dark in both colour schemes, since it is the frame the app sits in rather than part of the page. */
+.mm-nav-surface {
+    background: var(--mantine-color-dark-8, #1a1b1e);
+    border-right: none;
+    border-bottom: none;
+}
+
+.mm-nav-search {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    width: 100%;
+    padding: 7px 10px;
+    border-radius: var(--mantine-radius-sm);
+    color: var(--mantine-color-dark-2);
+    background: var(--mantine-color-dark-7);
+    border: 1px solid var(--mantine-color-dark-5);
+    transition: background 120ms ease, border-color 120ms ease;
+}
+
+.mm-nav-search:hover {
+    background: var(--mantine-color-dark-6);
+    border-color: var(--mantine-color-dark-4);
+}
+
+.mm-nav-kbd {
+    padding: 1px 5px;
+    border-radius: var(--mantine-radius-xs);
+    color: var(--mantine-color-dark-2);
+    background: var(--mantine-color-dark-6);
+}
+
+.mm-nav-link {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    width: 100%;
+    padding: 7px 10px;
+    margin-bottom: 2px;
+    border-radius: var(--mantine-radius-sm);
+    color: var(--mantine-color-dark-1);
+    text-decoration: none;
+    transition: background 120ms ease, color 120ms ease;
+}
+
+.mm-nav-link:hover {
+    background: var(--mantine-color-dark-6);
+    color: #fff;
+}
+
+.mm-nav-link[data-active] {
+    color: #fff;
+    background: light-dark(
+        color-mix(in srgb, var(--mantine-color-blue-6) 26%, transparent),
+        color-mix(in srgb, var(--mantine-color-blue-5) 22%, transparent)
+    );
+}
+
+.mm-nav-link[data-active] .mm-nav-icon {
+    color: var(--mantine-color-blue-3);
+}
+
+/* A collapsed section holding the current page. Lighter than an active row, since the page is inside the
+   section rather than on this row. */
+.mm-nav-group[data-holds-here] {
+    color: #fff;
+}
+
+.mm-nav-group[data-holds-here] .mm-nav-icon {
+    color: var(--mantine-color-blue-3);
+}
+
+.mm-nav-icon {
+    flex-shrink: 0;
+}
+
+.mm-nav-chevron {
+    flex-shrink: 0;
+    transition: transform 150ms ease;
+}
+
+.mm-nav-chevron[data-expanded] {
+    transform: rotate(90deg);
+}
+
+/* Children hang off a hairline rail, so a long open section still reads as one thing beside another. */
+.mm-nav-children {
+    margin: 2px 0 4px 19px;
+    padding-left: 9px;
+    border-left: 1px solid var(--mantine-color-dark-5);
+}
+
+.mm-nav-link[data-child]:not([data-active]) {
+    padding: 5px 8px;
+    gap: 8px;
+    color: var(--mantine-color-dark-2);
+}
+
+.mm-nav-link[data-child][data-active] {
+    padding: 5px 8px;
+    gap: 8px;
+}
+
+.mm-nav-footer {
+    border-top: 1px solid var(--mantine-color-dark-6);
+}
+
+/* The sidebar is dark in both colour schemes, so Mantine's light-scheme scrollbar puts a black thumb on a
+   near-black navbar and turns the track white on hover. Both take the dark-scheme colours here. */
+.mantine-AppShell-navbar .mantine-ScrollArea-thumb,
+.mantine-AppShell-navbar .mantine-ScrollArea-scrollbar:hover .mantine-ScrollArea-thumb {
+    background-color: rgba(255, 255, 255, 0.4);
+}
+
+.mantine-AppShell-navbar .mantine-ScrollArea-scrollbar:hover {
+    background-color: var(--mantine-color-dark-6);
+}
+
+/* Reusable translucent material for overlays, palettes and side panels. Modal and Drawer pick it up from the
+   component defaults in lib/theme.ts; the command palette, flow switcher and inspector flyout name it. */
+.mm-glass-surface {
+    --mm-glass-fill: 76%;
+    --mm-glass-blur: 10px;
+    --mm-glass-saturation: 125%;
+    --mm-glass-border: 62%;
+    --mm-glass-shadow: 0 16px 36px rgba(0, 0, 0, 0.16);
+    border: 1px solid color-mix(in srgb, var(--mantine-color-default-border) var(--mm-glass-border), transparent);
+    background: color-mix(in srgb, var(--mantine-color-body) var(--mm-glass-fill), transparent);
+    backdrop-filter: saturate(var(--mm-glass-saturation)) blur(var(--mm-glass-blur));
+    box-shadow: var(--mm-glass-tone-shadow, 0 0 0 0 transparent), var(--mm-glass-shadow),
+    inset 0 1px 0 rgba(255, 255, 255, 0.3);
+}
+
+.mm-glass-surface-soft {
+    --mm-glass-fill: 68%;
+    --mm-glass-blur: 8px;
+    --mm-glass-saturation: 118%;
+    --mm-glass-border: 55%;
+    --mm-glass-shadow: 0 10px 26px rgba(0, 0, 0, 0.12);
+}
+
+.mm-glass-input {
+    --mm-glass-fill: 82%;
+    --mm-glass-blur: 8px;
+    --mm-glass-saturation: 120%;
+    --mm-glass-border: 68%;
+    border: 1px solid color-mix(in srgb, var(--mantine-color-default-border) var(--mm-glass-border), transparent);
+    background: color-mix(in srgb, var(--mantine-color-body) var(--mm-glass-fill), transparent);
+    backdrop-filter: saturate(var(--mm-glass-saturation)) blur(var(--mm-glass-blur));
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.42);
+}
+
+.mm-palette-inner {
+    align-items: center;
+    padding-top: 1.5rem;
+    padding-bottom: 1.5rem;
+}
+
+.mm-palette-overlay {
+    animation: mm-palette-overlay-in 220ms cubic-bezier(0.16, 1, 0.3, 1);
+    backdrop-filter: blur(4px);
+    background: rgba(6, 10, 18, 0.14);
+}
+
+.mm-palette-content {
+    border-radius: 22px;
+    overflow: hidden;
+    animation: mm-palette-content-in 220ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.mm-palette-search {
+    --mm-glass-fill: 85%;
+    --mm-glass-blur: 7px;
+    --mm-glass-saturation: 116%;
+    --mm-glass-border: 72%;
+    min-height: 60px;
+    border-radius: 20px;
+    margin: 0.65rem;
+    width: calc(100% - 1.3rem);
+    box-sizing: border-box;
+    overflow: hidden;
+    padding-inline-start: 3.4rem;
+}
+
+/* The icon section anchors to the wrapper, not the pill, and the pill starts a
+   margin further in; without this shift the icon presses into the curved edge. */
+.mantine-Input-wrapper:has(> .mm-palette-search) > .mantine-Input-section[data-position="left"] {
+    inset-inline-start: 0.65rem;
+    width: 3rem;
+}
+
+/* Modals and drawers, through the component defaults in lib/theme.ts. The header gives up its own background
+   or it paints an opaque band across the top of a translucent surface. */
+.mm-overlay-content {
+    border-radius: var(--mantine-radius-lg);
+    overflow: hidden;
+}
+
+.mm-overlay-header {
+    background: transparent;
+}
+
+/* One row height for every entry in an overlay list, so a badge on one row cannot
+   make it taller than its neighbours. */
+.mm-palette-row {
+    min-height: 52px;
+}
+
+/* A draft is listed under the flow it drafts, indented so it reads as a child of that row. */
+.mm-flow-child {
+    margin-inline-start: 1.5rem;
+    /* The row is full width by default, so the indent has to come off its width too. */
+    width: calc(100% - 1.5rem);
+}
+
+/* A flow with drafts reads as a pile of cards on the overview grid, each draft lying over the lower part of
+   the card it drafts. Clicking the pile is what opens it. */
+.mm-flow-pile {
+    position: relative;
+    display: grid;
+    cursor: pointer;
+    /* Room under the base card for the drafts lying across it. Tight, so the pile reads as one object. */
+    padding-bottom: calc(2.75rem + (var(--mm-pile-drafts, 1) - 1) * 0.9rem);
+}
+
+.mm-flow-pile-card {
+    /* Every card in the same grid cell, so the pile is as tall as one card. */
+    grid-area: 1 / 1;
+}
+
+/* Each draft sits just far enough down to show the card beneath it. */
+.mm-flow-pile-card + .mm-flow-pile-card {
+    transform: translate3d(calc(var(--mm-pile-i, 1) * 0.4rem), calc(var(--mm-pile-i, 1) * 2.25rem), 0);
+}
+
+.mm-flow-pile-count {
+    position: absolute;
+    inset-block-end: 0.35rem;
+    inset-inline-end: 0.35rem;
+    z-index: 30;
+}
+
+/* A faint orange wash marks a draft card. Doubled so it outweighs the Card component's own
+   background, which carries the same specificity. */
+.mm-flow-card-draft.mm-flow-card-draft.mm-flow-card-draft {
+    --mm-glass-glow-tint: var(--mantine-color-orange-5);
+    --mm-glass-peak: 20%;
+    /* Mixed into the glass fill rather than replacing it, so a draft card stays translucent. */
+    background-color: color-mix(in srgb, var(--mantine-color-orange-5) 9%,
+    color-mix(in srgb, var(--mantine-color-body) var(--mm-glass-fill, 42%), transparent));
+    border-color: color-mix(in srgb, var(--mantine-color-orange-5) 45%, var(--mantine-color-default-border));
+}
+
+[data-mantine-color-scheme="dark"] .mm-flow-card-draft.mm-flow-card-draft {
+    background-color: color-mix(in srgb, var(--mantine-color-orange-5) 14%,
+    color-mix(in srgb, var(--mantine-color-body) var(--mm-glass-fill, 42%), transparent));
+}
+
+/* Clicking a pile moves it to the centre of the page and separates the cards into a column, staggered so
+   they arrive one after another. Closing runs the same offsets in reverse. */
+.mm-flow-unstack-layer {
+    position: fixed;
+    inset: 0;
+    z-index: 10000;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.mm-flow-unstack-scrim {
+    position: absolute;
+    inset: 0;
+    /* A button element, so the browser's own chrome has to be cleared before it reads as a backdrop. */
+    border: none;
+    padding: 0;
+    cursor: default;
+    background: rgba(6, 10, 18, 0.3);
+    backdrop-filter: blur(3px);
+    opacity: 0;
+    transition: opacity 240ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.mm-flow-unstack-layer[data-state="open"] .mm-flow-unstack-scrim {
+    opacity: 1;
+}
+
+.mm-flow-unstack-column {
+    position: relative;
+    z-index: 1;
+    display: flex;
+    flex-direction: column;
+    gap: 0.75rem;
+    width: min(560px, calc(100vw - 3rem));
+    max-height: calc(100vh - 3rem);
+    overflow-y: auto;
+    padding: 0.25rem;
+}
+
+/* The card itself is a flow card; this wrapper only carries the movement. The shift is the distance
+   back to the top card, so the untransitioned state is the pile. */
+.mm-flow-unstack-card {
+    flex: 0 0 auto;
+    opacity: 0;
+    transform: translate3d(var(--mm-unstack-dx, 0px), calc(var(--mm-unstack-dy, 0px) + var(--mm-unstack-shift, 0px)), 0) scale(0.94);
+    transition: transform 240ms cubic-bezier(0.16, 1, 0.3, 1) var(--mm-unstack-delay, 0ms),
+    opacity 240ms cubic-bezier(0.16, 1, 0.3, 1) var(--mm-unstack-delay, 0ms);
+}
+
+.mm-flow-unstack-layer[data-state="open"] .mm-flow-unstack-card {
+    opacity: 1;
+    transform: translate3d(0, 0, 0);
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .mm-flow-unstack-card {
+        transform: none;
+        transition: none;
+    }
+
+    .mm-flow-unstack-scrim {
+        transition: none;
+    }
+}
+
+@keyframes mm-palette-overlay-in {
+    from {
+        backdrop-filter: blur(0);
+        background: rgba(6, 10, 18, 0);
+    }
+    to {
+        backdrop-filter: blur(4px);
+        background: rgba(6, 10, 18, 0.14);
+    }
+}
+
+@keyframes mm-palette-content-in {
+    from {
+        opacity: 0;
+        transform: translateY(-22px) scale(0.97);
+    }
+    to {
+        opacity: 1;
+        transform: translateY(0) scale(1);
+    }
+}
+
+.atc-inspector-flyout {
+    animation: atc-flyout-in 170ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+@keyframes atc-flyout-in {
+    from {
+        opacity: 0;
+        transform: translateX(20px);
+    }
+    to {
+        opacity: 1;
+        transform: translateX(0);
+    }
+}
+
+/* Flow editor palette. It stays mounted so opening and closing use the same slide, matching the
+   inspector flyout. The visibility transition holds the panel on screen until the slide finishes. */
+
+.atc-palette-panel,
+.atc-palette-reveal {
+    transition: opacity 170ms cubic-bezier(0.16, 1, 0.3, 1),
+    transform 170ms cubic-bezier(0.16, 1, 0.3, 1),
+    visibility 170ms;
+}
+
+/* Closed and peeking both slide the panel off the left edge; only the distance differs. The peek stops with
+   the block names in view and the rest of the canvas still clear. */
+
+.atc-palette-panel[data-state="closed"] {
+    opacity: 0;
+    transform: translateX(calc(-100% - 8px));
+    visibility: hidden;
+    pointer-events: none;
+}
+
+.atc-palette-panel[data-state="peek"] {
+    transform: translateX(-45%);
+}
+
+/* The hover strip is invisible and only a few pixels wide, so it claims pointer events over nothing else.
+   It stands down once the palette is fully out, leaving the panel's own left edge clickable. */
+
+.atc-palette-edge[data-armed="false"] {
+    pointer-events: none;
+}
+
+/* The collapsed reveal button sits where the panel was, so it fades rather than slides. */
+
+.atc-palette-reveal[data-shown="false"] {
+    opacity: 0;
+    visibility: hidden;
+    pointer-events: none;
+}
+
+/* Read-only live flow. A faint inset glow marks the edges of the canvas without drawing a border or tinting
+   the surface, and it fades in so switching tabs does not flash. */
+
+.atc-readonly-vignette {
+    border-radius: inherit;
+    box-shadow: inset 0 0 46px rgba(232, 89, 12, 0.16), inset 0 0 0 1px rgba(232, 89, 12, 0.1);
+    animation: atc-vignette-in 220ms ease both;
+}
+
+@keyframes atc-vignette-in {
+    from {
+        opacity: 0;
+    }
+    to {
+        opacity: 1;
+    }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .atc-readonly-vignette {
+        animation: none;
+    }
+
+    .atc-inspector-flyout {
+        animation: none;
+    }
+
+    .atc-palette-panel,
+    .atc-palette-reveal {
+        transition: none;
+    }
+}
+
+
+/* Recovery credential reveal, drawn as a pane of glass over a key that breaks to get at it. */
+
+.mm-shatter {
+    position: relative;
+    width: 220px;
+    height: 150px;
+    margin: 0 auto;
+    display: grid;
+    place-items: center;
+}
+
+.mm-shatter-key {
+    position: absolute;
+    inset: 0;
+    display: grid;
+    place-items: center;
+    color: var(--mantine-color-orange-6);
+    opacity: 0.5;
+    transform: scale(0.94);
+    transition: opacity 260ms ease, transform 260ms ease;
+}
+
+.mm-shatter-key-lit {
+    opacity: 1;
+    transform: scale(1);
+    filter: drop-shadow(0 0 14px color-mix(in srgb, var(--mantine-color-orange-5) 55%, transparent));
+}
+
+.mm-shatter-pane {
+    position: absolute;
+    inset: 0;
+    margin: auto;
+    filter: drop-shadow(0 6px 14px rgba(0, 0, 0, 0.18));
+}
+
+.mm-shatter-shard {
+    transform-box: fill-box;
+    transform-origin: center;
+}
+
+.mm-shatter-shard-flying {
+    animation: mm-shatter-fly 780ms cubic-bezier(0.22, 0.68, 0.28, 1) var(--mm-delay) both;
+}
+
+@keyframes mm-shatter-fly {
+    0% {
+        transform: translate(0, 0) rotate(0deg) scale(1);
+        opacity: 1;
+    }
+    12% {
+        transform: translate(calc(var(--mm-tx) * -0.05), calc(var(--mm-ty) * -0.05)) scale(1.03);
+        opacity: 1;
+    }
+    100% {
+        transform: translate(var(--mm-tx), var(--mm-ty)) rotate(var(--mm-rot)) scale(0.8);
+        opacity: 0;
+    }
+}
+
+.mm-shatter-flash {
+    position: absolute;
+    inset: 0;
+    margin: auto;
+    width: 220px;
+    height: 150px;
+    background: radial-gradient(circle at 50% 50%, rgba(255, 255, 255, 0.9), transparent 62%);
+    animation: mm-shatter-flash 420ms ease-out both;
+    pointer-events: none;
+}
+
+@keyframes mm-shatter-flash {
+    0% {
+        opacity: 0;
+    }
+    12% {
+        opacity: 0.85;
+    }
+    100% {
+        opacity: 0;
+    }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .mm-shatter-shard-flying,
+    .mm-shatter-flash {
+        animation: none;
+        opacity: 0;
+    }
+
+    .mm-shatter-key {
+        transition: none;
+    }
+}
+
+/* Copy button that stays out of the way until the row is hovered or focused. */
+
+.mm-copy-value-button {
+    opacity: 0;
+    transition: opacity 120ms ease;
+}
+
+.mm-copy-value:hover .mm-copy-value-button,
+.mm-copy-value:focus-within .mm-copy-value-button {
+    opacity: 1;
+}
+
+/* No hover on touch, so the button would never appear. */
+@media (hover: none) {
+    .mm-copy-value-button {
+        opacity: 1;
+    }
+}
+
+/* Opening a modal locks page scrolling. Reserving the gutter keeps the layout still whether or not a
+   scrollbar is showing. */
+html {
+    scrollbar-gutter: stable;
+}
+
+/* Thinner glass for surfaces laid over the flow canvas, where the standard fill would hide the graph. */
+.mm-glass-thin {
+    --mm-glass-fill: 42%;
+    --mm-glass-blur: 14px;
+    --mm-glass-saturation: 135%;
+    --mm-glass-border: 55%;
+    /* Thin glass still has to sit above the canvas rather than lie flat on it. */
+    --mm-glass-shadow: 0 6px 18px rgba(0, 0, 0, 0.13);
+}
+
+/* A band of light around a surface's edge in the colour of its state, brighter the further from neutral.
+   Neutral draws nothing. --mm-tone-level runs 0 to 1 and is set per element by components/ui/glass.ts. */
+@property --mm-tone-level {
+    syntax: "<number>";
+    inherits: false;
+    initial-value: 0;
+}
+
+.mm-glass-tone {
+    border-color: color-mix(in srgb, var(--mm-tone) calc(var(--mm-tone-level) * 55%),
+    var(--mantine-color-default-border));
+    --mm-glass-tone-shadow: 0 0 0 1px color-mix(in srgb, var(--mm-tone) calc(var(--mm-tone-level) * 42%), transparent),
+    0 0 calc(var(--mm-tone-level) * 22px) color-mix(in srgb, var(--mm-tone) calc(var(--mm-tone-level) * 55%), transparent);
+    transition: --mm-tone-level 320ms ease, border-color 320ms ease, box-shadow 320ms ease;
+}
+
+/* A card in a state blooms in that state's colour. Tripled, because both the class setting the default tint
+   and the dark scheme's white tint are declared further down and would otherwise win. */
+.mm-glass-tone.mm-glass-tone.mm-glass-tone {
+    --mm-glass-glow-tint: var(--mm-tone);
+}
+
+/* A card holding things with colours of their own keeps the default tint, so a state colour cannot drown out
+   whichever of them the pointer is over. Tripled to outrank the rule above. */
+.mm-glass-tone-plain.mm-glass-tone-plain.mm-glass-tone-plain {
+    --mm-glass-glow-tint: var(--mantine-primary-color-filled);
+}
+
+/* A surface built from the glass classes folds the tone into its own shadow; anything else, a table row for
+   instance, needs it applied directly. */
+.mm-glass-tone:not(.mm-glass-surface) {
+    box-shadow: var(--mm-glass-tone-shadow);
+}
+
+.mm-glass-tone-positive {
+    --mm-tone: var(--mantine-color-teal-6);
+}
+
+.mm-glass-tone-warning {
+    --mm-tone: var(--mantine-color-orange-6);
+}
+
+.mm-glass-tone-negative {
+    --mm-tone: var(--mantine-color-red-6);
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .mm-glass-tone {
+        transition: none;
+    }
+}
+
+/* A highlight that follows the pointer. components/ui/glass-pointer.tsx writes the cursor position and a 0
+   to 1 nearness into the element. Declared after the glass classes so it wins the background-image. */
+@property --mm-glass-near {
+    syntax: "<number>";
+    inherits: false;
+    initial-value: 0;
+}
+
+@property --mm-glass-spread {
+    syntax: "<number>";
+    inherits: false;
+    initial-value: 0;
+}
+
+@property --mm-glass-wash {
+    syntax: "<number>";
+    inherits: false;
+    initial-value: 0;
+}
+
+/* How far a press has swelled the glow, 0 to 1, and how brightly it is still burning. Held apart so the
+   release can fade the light without pulling the reach back in. */
+@property --mm-glass-press {
+    syntax: "<number>";
+    inherits: false;
+    initial-value: 0;
+}
+
+@property --mm-glass-press-glow {
+    syntax: "<number>";
+    inherits: false;
+    initial-value: 0;
+}
+
+.mm-glass-reactive {
+    /* Tinted rather than white, since a white bloom on a light card is invisible. Dark mode swaps to white
+       below, where a tint would read as a colour change instead of a highlight. */
+    --mm-glass-glow-tint: var(--mantine-primary-color-filled);
+    --mm-glass-peak: 6%;
+    /* A press on something that is only being read still moves the light, just barely. Anything interactive
+       raises both of these below. */
+    --mm-glass-press-reach: 6rem;
+    --mm-glass-press-peak: 2.5%;
+    transition: --mm-glass-press-glow 460ms ease;
+    /* Two layers. The bloom tracks the cursor; under it a flat wash covers the whole surface, which is what
+       keeps a row as wide as the window readable at a glance. */
+    background-image: /* A press swells this same glow out from the point pressed and brightens it. The size only ever
+           grows, since a ring shrinking back to the cursor reads as a mistake. */ radial-gradient(
+        calc(16rem + var(--mm-glass-spread) * 34rem
+        + var(--mm-glass-press) * var(--mm-glass-press-reach, 13rem)) circle at var(--mm-glass-px, 50%) var(--mm-glass-py, -30%),
+        color-mix(in srgb, var(--mm-glass-glow-tint) calc(var(--mm-glass-near) * (var(--mm-glass-peak) + var(--mm-glass-spread) * 5%
+        + var(--mm-glass-press-glow) * var(--mm-glass-press) * var(--mm-glass-press-peak, 7%))),
+        transparent),
+        transparent 70%
+    ),
+    radial-gradient(
+        circle calc(var(--mm-glass-wash) * 2600px) at var(--mm-glass-px, 50%) var(--mm-glass-py, 50%),
+        color-mix(in srgb, var(--mm-glass-glow-tint) var(--mm-glass-wash-strength, 4.5%),
+        transparent) 0%,
+        color-mix(in srgb, var(--mm-glass-glow-tint) var(--mm-glass-wash-strength, 4.5%),
+        transparent) 99%,
+        transparent 100%
+    );
+}
+
+/* A card that does something when clicked answers with a highlight growing from a spot under the cursor to a
+   wash over the whole surface, deepening again while the button is held. */
+.mm-glass-interactive {
+    cursor: pointer;
+    /* Centre of the surface, for a row the pointer tracker does not paint. Where it does, its inline
+       position wins over this. */
+    --mm-glass-py: 50%;
+    --mm-glass-press-reach: 13rem;
+    --mm-glass-press-peak: 7%;
+    transition: --mm-glass-spread 260ms cubic-bezier(0.16, 1, 0.3, 1), --mm-glass-near 200ms ease,
+    --mm-glass-wash 190ms cubic-bezier(0.22, 1, 0.36, 1), --mm-glass-press-glow 460ms ease;
+}
+
+.mm-glass-interactive:hover,
+.mm-glass-interactive:focus-visible,
+.mm-glass-interactive:focus-within {
+    --mm-glass-spread: 1;
+    /* Arrives almost at once, so the row under the pointer is readable before the bloom has finished. */
+    --mm-glass-wash: 1;
+    /* As with the position above, the tracker's inline value wins wherever there is one. */
+    --mm-glass-near: 1;
+}
+
+/* Held rather than clicked, the wash keeps growing for as long as the press-and-hold gesture runs, so the
+   surface shows the hold filling up. Linear, since it is reporting progress. */
+.mm-glass-interactive:active {
+    --mm-glass-spread: 2.4;
+    --mm-glass-wash: 1.7;
+    transition: --mm-glass-spread var(--mm-hold-duration, 450ms) linear, --mm-glass-near 90ms ease;
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .mm-glass-interactive {
+        transition: none;
+    }
+}
+
+[data-mantine-color-scheme="dark"] .mm-glass-reactive {
+    --mm-glass-glow-tint: #fff;
+    --mm-glass-peak: 8%;
+}
+
+/* Alert colour mixed into the glass fill rather than painted over it, so the surface stays translucent and
+   the severity still reads. Mantine puts the solid colour on --alert-color and the tint on --alert-bg. */
+.mm-glass-alert,
+[data-mantine-color-scheme="dark"] .mm-glass-alert {
+    background-color: color-mix(in srgb, var(--alert-color) 11%,
+    color-mix(in srgb, var(--mantine-color-body) var(--mm-glass-fill), transparent));
+    border-color: color-mix(in srgb, var(--alert-color) 16%, var(--mantine-color-default-border));
+    /* A surface that already carries a colour blooms in that colour. The default primary tint would put blue
+       light on a yellow warning. */
+    --mm-glass-glow-tint: var(--alert-color);
+    --mm-glass-peak: 22%;
+}
+
+/* Recharts washes the hovered band in grey, which sits under the card's own blue highlight and turns the two
+   into a muddy overlay. Same tint as the highlight, so hovering a bar reads as one thing rather than two. */
+.mantine-BarChart-root,
+.mantine-AreaChart-root,
+.mantine-LineChart-root {
+    --chart-cursor-fill: color-mix(in srgb, var(--mantine-primary-color-filled) 10%, transparent);
+}
+
+[data-mantine-color-scheme="dark"] .mantine-BarChart-root,
+[data-mantine-color-scheme="dark"] .mantine-AreaChart-root,
+[data-mantine-color-scheme="dark"] .mantine-LineChart-root {
+    --chart-cursor-fill: color-mix(in srgb, #fff 8%, transparent);
+}
+
+/* The palette's filter bar slides out of the search box once a query names an attribute to filter by. */
+.mm-palette-filterbar {
+    display: grid;
+    grid-template-rows: 0fr;
+    opacity: 0;
+    transition: grid-template-rows 200ms cubic-bezier(0.16, 1, 0.3, 1), opacity 160ms ease;
+}
+
+.mm-palette-filterbar-open {
+    grid-template-rows: 1fr;
+    opacity: 1;
+}
+
+.mm-palette-filterbar > * {
+    overflow: hidden;
+}
+
+.mm-palette-filterbar-button {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.75rem;
+    width: 100%;
+    padding: 8px 16px;
+    border-bottom: 1px solid var(--mantine-color-default-border);
+}
+
+.mm-palette-filterbar-button:hover {
+    background-color: color-mix(in srgb, var(--mantine-primary-color-filled) 10%, transparent);
+}
+
+/* While a press is held its glow is driven frame by frame, so it must not also be chasing a transition. */
+.mm-glass-pressing {
+    transition: none;
+}
+
+/* Sits after the caret and fades in once the typing stops, rather than flickering behind a moving caret. */
+.mm-search-hint {
+    flex-shrink: 0;
+    white-space: nowrap;
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 220ms ease;
+}
+
+.mm-search-hint-visible {
+    opacity: 0.7;
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .mm-search-hint {
+        transition: none;
+    }
+}
+
+/* Suggestions under the device search box. A positioned element rather than a Popover, so the box can sit in
+   a table toolbar without depending on the overlay stack. */
+.mm-search-suggestions {
+    position: absolute;
+    top: calc(100% + 4px);
+    left: 0;
+    right: 0;
+    z-index: 30;
+    padding: 4px;
+    border-radius: var(--mantine-radius-md);
+    max-height: 18rem;
+    overflow-y: auto;
+}
+
+.mm-search-suggestion {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 0.75rem;
+    padding: 6px 10px;
+    border-radius: var(--mantine-radius-sm);
+    cursor: pointer;
+}
+
+/* Nothing to pick, so it does not offer itself as a row. */
+.mm-search-suggestion-empty {
+    cursor: default;
+    color: var(--mantine-color-dimmed);
+}
+
+.mm-search-suggestion[data-active] {
+    background-color: color-mix(in srgb, var(--mantine-primary-color-filled) 12%, transparent);
+}
+
+/* The search box holds its chips and its caret on one row, so a filter reads as part of the query rather than
+   as a control beside it. Styled to match a Mantine input, since it is not one. */
+.mm-device-search-box {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    min-height: 36px;
+    padding: 3px 10px;
+    border: 1px solid var(--mantine-color-default-border);
+    border-radius: var(--mantine-radius-md);
+    background-color: var(--mantine-color-default);
+    cursor: text;
+    overflow-x: auto;
+    scrollbar-width: none;
+}
+
+.mm-device-search-box::-webkit-scrollbar {
+    display: none;
+}
+
+.mm-device-search-box:focus-within {
+    border-color: var(--mantine-primary-color-filled);
+}
+
+.mm-device-search-box input {
+    flex: 1;
+    min-width: 8rem;
+    border: none;
+    outline: none;
+    background: transparent;
+    color: inherit;
+    font-size: var(--mantine-font-size-sm);
+    font-family: inherit;
+}
+
+.mm-device-search-box input::placeholder {
+    color: var(--mantine-color-placeholder);
+}
+
+/* A card that does something when clicked rises toward the reader and leans after the pointer, the way a
+   focused target does on iPadOS. The lean is written per frame by glass-pointer; the rise is the hover. */
+.mm-glass-lift {
+    transform: translate3d(var(--mm-glass-lean-x, 0), var(--mm-glass-lean-y, 0), 0) scale(var(--mm-glass-lift-scale, 1));
+    /* Short, so the lean keeps up with the pointer rather than trailing it. */
+    transition: transform 130ms ease-out, box-shadow 220ms ease;
+}
+
+.mm-glass-lift:hover,
+.mm-glass-lift:focus-visible,
+.mm-glass-lift:focus-within {
+    /* Hover raises it; pressure raises it further, so leaning on the trackpad pushes the card up at you. */
+    --mm-glass-lift-scale: calc(1.008 + var(--mm-glass-press) * 0.013);
+    box-shadow: var(--mm-glass-tone-shadow, 0 0 0 0 transparent),
+    0 8px 20px rgba(0, 0, 0, 0.12),
+    inset 0 1px 0 rgba(255, 255, 255, 0.3);
+}
+
+/* A large surface carries text, so it answers the pointer with less movement and a fainter tint than a small
+   card does. */
+.mm-glass-lift-quiet:hover,
+.mm-glass-lift-quiet:focus-visible,
+.mm-glass-lift-quiet:focus-within {
+    --mm-glass-lift-scale: calc(1.003 + var(--mm-glass-press) * 0.006);
+    --mm-glass-peak: 3.5%;
+    --mm-glass-wash-strength: 2.5%;
+    box-shadow: var(--mm-glass-tone-shadow, 0 0 0 0 transparent),
+    0 5px 14px rgba(0, 0, 0, 0.09),
+    inset 0 1px 0 rgba(255, 255, 255, 0.3);
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .mm-glass-lift {
+        transform: none;
+        transition: box-shadow 220ms ease;
+    }
+}
+
+/* A surface with an action behind each edge. Two boxes: an outer one that is not clipped, so the edge hints
+   can shine outwards, and an inner one that is, so the actions stay hidden until a drag uncovers them.
+   overscroll-behavior stops the browser reading the same two-finger gesture as back or forward. */
+.mm-swipe {
+    position: relative;
+    width: 100%;
+    min-width: 0;
+}
+
+.mm-swipe-clip {
+    position: relative;
+    overflow: hidden;
+    min-width: 0;
+    border-radius: var(--mantine-radius-md) var(--mantine-radius-md) var(--mantine-radius-sm) var(--mantine-radius-sm);
+    overscroll-behavior-x: contain;
+}
+
+.mm-swipe-surface {
+    position: relative;
+    z-index: 1;
+    min-width: 0;
+    background-color: var(--mantine-color-body);
+    touch-action: pan-y;
+    transition: transform 240ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.mm-swipe-action {
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    width: 6rem;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: var(--mm-swipe-tint);
+    background-color: color-mix(in srgb, var(--mm-swipe-tint) 22%, transparent);
+}
+
+.mm-swipe-action-left {
+    left: 0;
+}
+
+.mm-swipe-action-right {
+    right: 0;
+}
+
+/* The hint that there is something behind each edge. Each action's colour leaves a point at the middle of
+   its own side and fans outwards, never along the top, where it would read as the surface being active. */
+.mm-swipe::before,
+.mm-swipe::after {
+    content: "";
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    /* Whatever the row sits in has to leave at least this much side padding, or the fan is clipped
+       mid-fade and reads as a block of colour. */
+    width: var(--mm-swipe-hint-reach, 0.75rem);
+    pointer-events: none;
+    opacity: 0;
+    transition: opacity 220ms ease;
+}
+
+/* Reaching transparent at exactly the far edge is what keeps it a glow rather than a cut-off shape. */
+.mm-swipe::before {
+    right: 100%;
+    background: radial-gradient(ellipse 100% 46% at 100% 50%,
+    color-mix(in srgb, var(--mm-swipe-hint-left, transparent) 50%, transparent), transparent 100%);
+}
+
+.mm-swipe::after {
+    left: 100%;
+    background: radial-gradient(ellipse 100% 46% at 0 50%,
+    color-mix(in srgb, var(--mm-swipe-hint-right, transparent) 50%, transparent), transparent 100%);
+}
+
+.mm-swipe:hover::before,
+.mm-swipe:hover::after,
+.mm-swipe:focus-within::before,
+.mm-swipe:focus-within::after {
+    opacity: 1;
+}
+
+/* Dragging or held open, the hint has done its job and would only be in the way. */
+.mm-swipe[data-dragging]::before,
+.mm-swipe[data-dragging]::after,
+.mm-swipe[data-open]::before,
+.mm-swipe[data-open]::after {
+    opacity: 0;
+}
+
+/* Cleared rather than opened: the surface leaves and the row collapses, so the ones under it come up to
+   fill the gap instead of a hole being left behind. */
+.mm-swipe[data-clearing] {
+    max-height: 0;
+    opacity: 0;
+    margin-bottom: -4px;
+    overflow: hidden;
+    transition: max-height 260ms ease, opacity 200ms ease, margin-bottom 260ms ease;
+}
+
+.mm-swipe:not([data-clearing]) {
+    max-height: 12rem;
+    transition: max-height 260ms ease;
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .mm-swipe-surface,
+    .mm-swipe[data-clearing] {
+        transition: none;
+    }
+}
+
+/* The way back to alerts already acknowledged, kept small since it is a footnote to the board above it. */
+.mm-acked-toggle {
+    align-self: flex-start;
+    padding: 2px 6px;
+    border-radius: var(--mantine-radius-sm);
+}
+
+.mm-acked-toggle:hover {
+    background-color: color-mix(in srgb, var(--mantine-primary-color-filled) 10%, transparent);
+}
+
+/* One alert in the panel's list. Layout only; how it answers the pointer comes from mm-glass-nested. */
+.mm-alert-row {
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+    padding: 6px 8px;
+    /* Lets a long summary shorten to the column instead of widening it. */
+    min-width: 0;
+}
+
+/* One severity in the alerts panel, a count that also opens that column on the alerts page. Layout only,
+   plus the colour it answers in, which is its own severity rather than the app accent. */
+.mm-severity-cell {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    padding: 6px 8px;
+}
+
+.mm-severity-dark.mm-severity-dark {
+    --mm-glass-glow-tint: var(--mantine-color-gray-5);
+}
+
+[data-mantine-color-scheme="dark"] .mm-severity-dark.mm-severity-dark {
+    --mm-glass-glow-tint: #fff;
+}
+
+.mm-severity-red.mm-severity-red {
+    --mm-glass-glow-tint: var(--mantine-color-red-6);
+}
+
+.mm-severity-yellow.mm-severity-yellow {
+    --mm-glass-glow-tint: var(--mantine-color-yellow-6);
+}
+
+.mm-severity-green.mm-severity-green {
+    --mm-glass-glow-tint: var(--mantine-color-green-6);
+}
+
+/* Something interactive inside something else interactive. It answers with a lifted top edge rather than an
+   outline, and is rounder at the top than the bottom so it reads as lifting. */
+/* Doubled so its own peak survives the dark scheme's, which is written at the same weight. */
+.mm-glass-nested.mm-glass-nested {
+    position: relative;
+    border-radius: var(--mantine-radius-md) var(--mantine-radius-md) var(--mantine-radius-sm) var(--mantine-radius-sm);
+    cursor: pointer;
+    min-width: 0;
+    --mm-glass-peak: 7%;
+    --mm-glass-wash-strength: 8%;
+    --mm-glass-press-reach: 7rem;
+    transition: box-shadow 140ms ease;
+}
+
+.mm-glass-nested:hover,
+.mm-glass-nested:focus-visible {
+    z-index: 1;
+    box-shadow: inset 0 1px 0 color-mix(in srgb, var(--mm-glass-glow-tint) 20%, transparent);
+}
+
+/* A value in a table row that also names a filter. Small enough that a ring reads better than a top edge, so
+   it overrides that one thing and inherits the rest from mm-glass-nested. */
+/* Doubled for the same reason as .mm-glass-nested. */
+.mm-filter-chip.mm-filter-chip {
+    display: inline-flex;
+    align-items: center;
+    padding: 2px 6px;
+    border-radius: var(--mantine-radius-sm);
+    --mm-glass-peak: 11%;
+    --mm-glass-wash-strength: 11%;
+    --mm-glass-press-reach: 4.5rem;
+    --mm-glass-press-peak: 9%;
+}
+
+.mm-filter-chip:hover,
+.mm-filter-chip:focus-visible {
+    box-shadow: 0 0 0 2px color-mix(in srgb, var(--mm-glass-glow-tint) 38%, transparent);
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .mm-swipe-surface {
+        transition: none;
+    }
+}
+
+/* Delete stays out of the way until the row is hovered or focused. */
+.mm-flow-delete {
+    opacity: 0;
+    transition: opacity 120ms ease;
+}
+
+[class*="Spotlight-action"]:hover .mm-flow-delete,
+[class*="Spotlight-action"][data-selected] .mm-flow-delete,
+.mm-flow-delete:focus-visible {
+    opacity: 1;
+}
+
+@media (hover: none) {
+    .mm-flow-delete {
+        opacity: 1;
+    }
+}

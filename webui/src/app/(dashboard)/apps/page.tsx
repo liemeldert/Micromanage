@@ -1,348 +1,189 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import {useEffect, useMemo, useState} from "react";
+import {useRouter} from "next/navigation";
+import {Alert, Box, Button, SimpleGrid, Stack, Text, Tooltip,} from "@mantine/core";
+import {IconApps, IconHistory, IconInfoCircle, IconPlus} from "@tabler/icons-react";
+import {api, type Device} from "../../../../lib/api";
+import {useAuth} from "../../../../lib/auth-context";
+import {useReadiness} from "../../../../lib/readiness";
 import {
-  ActionIcon,
-  Badge,
-  Box,
-  Button,
-  Card,
-  Code,
-  Group,
-  Loader,
-  Modal,
-  Stack,
-  Table,
-  Text,
-  TextInput,
-  Title,
-  Tooltip,
-} from "@mantine/core";
-import { modals } from "@mantine/modals";
-import {
-  IconApps,
-  IconHistory,
-  IconPencil,
-  IconPlus,
-  IconTrash,
-} from "@tabler/icons-react";
-import { api, type Device } from "../../../../lib/api";
-import { useAuth } from "../../../../lib/auth-context";
-import {
-  BUNDLE_ID_RE,
-  useConfigResource,
-  type App,
-  type AppsConfig,
-  type AppVersion,
-  type Group as GroupDef,
+    type App,
+    type AppsConfig,
+    type AppVersion,
+    type Group as GroupDef,
+    useConfigResource,
 } from "../../../../lib/config";
-import { AppWizard } from "../../../components/config/AppWizard";
-import { ConfigHistoryDrawer } from "../../../components/config/ConfigHistoryDrawer";
+import {PageSkeleton} from "@/components/layout/PageSkeleton";
+import {PageHeader} from "@/components/layout/PageHeader";
+import {AppWizard} from "@/components/config/AppWizard";
+import {AppCard} from "@/components/config/AppCard";
+import {AppPeekModal} from "@/components/config/AppPeekModal";
+import {ConfigHistoryDrawer} from "@/components/config/ConfigHistoryDrawer";
+import {RolloutCountedNote} from "@/components/config/RolloutStatus";
+import {toCounts, useRolloutStats} from "../../../../lib/rollout";
+import {GlassCard} from "@/components/ui/GlassCard";
+
+const ADMIN_ONLY_REASON =
+    "Editing apps is restricted to administrators.";
 
 export default function AppsPage() {
-  const { token } = useAuth();
-  const { data, loading, saving, save, reload, currentDocText } = useConfigResource<AppsConfig>(
-    "apps",
-    { apps: [] },
-  );
-  const [historyOpen, setHistoryOpen] = useState(false);
+    const {token, isAdmin} = useAuth();
+    const router = useRouter();
+    const {data, loading, save, reload, currentDocText, version} =
+        useConfigResource<AppsConfig>("apps", {apps: []});
+    const [historyOpen, setHistoryOpen] = useState(false);
+    const rollout = useRolloutStats("app");
 
-  const [groupNames, setGroupNames] = useState<string[]>([]);
-  const [allGroups, setAllGroups] = useState<GroupDef[]>([]);
-  const [devices, setDevices] = useState<Device[]>([]);
-  const [s3Configured, setS3Configured] = useState(false);
+    const [allGroups, setAllGroups] = useState<GroupDef[]>([]);
+    const [devices, setDevices] = useState<Device[]>([]);
 
-  const [wizardOpen, setWizardOpen] = useState(false);
-  const [wizardApp, setWizardApp] = useState<App | undefined>(undefined);
+    const {readiness} = useReadiness();
+    const appInstall = readiness?.capabilities.find((c) => c.capability === "app_install");
+    const uploadBlockedReason = appInstall && !appInstall.ready ? appInstall.reason : null;
 
-  const [editApp, setEditApp] = useState<{ index: number; name: string; bundle_id: string } | null>(
-    null,
-  );
+    const [wizardOpen, setWizardOpen] = useState(false);
+    const [peekAppId, setPeekAppId] = useState<string | null>(null);
 
-  useEffect(() => {
-    if (!token) return;
-    api
-      .getConfig(token, "groups")
-      .then((g) => {
-        const gs = (g as { groups?: GroupDef[] }).groups ?? [];
-        setAllGroups(gs);
-        setGroupNames(gs.map((x) => x.name));
-      })
-      .catch(() => {});
-    api
-      .listDevices(token, { state: "enrolled", limit: 500 })
-      .then((r) => setDevices(r.devices))
-      .catch(() => {});
-    api
-      .getTenant(token)
-      .then((t) => setS3Configured(!!(t.s3_config && (t.s3_config as { bucket?: string }).bucket)))
-      .catch(() => {});
-  }, [token]);
+    useEffect(() => {
+        if (!token) return;
+        api.getConfig(token, "groups")
+            .then((g) => setAllGroups((g as { groups?: GroupDef[] }).groups ?? []))
+            .catch(() => {
+            });
+        api.listDevices(token, {state: "enrolled", limit: 500})
+            .then((r) => setDevices(r.devices))
+            .catch(() => {
+            });
+    }, [token]);
 
-  const apps = data?.apps ?? [];
+    const apps = useMemo(() => data?.apps ?? [], [data]);
+    const peekApp = apps.find((a) => a.id === peekAppId) ?? null;
+    const openEditor = (app: App) => router.push(`/apps/editor?app=${encodeURIComponent(app.id)}`);
 
-  async function handleFinish(
-    result:
-      | { kind: "app"; app: App }
-      | { kind: "version"; appId: string; version: AppVersion },
-  ): Promise<boolean> {
-    if (result.kind === "app") {
-      return save({ apps: [...apps, result.app] });
-    }
-    const next = apps.map((a) =>
-      a.id === result.appId ? { ...a, versions: [...a.versions, result.version] } : a,
-    );
-    return save({ apps: next });
-  }
-
-  function openNewApp() {
-    setWizardApp(undefined);
-    setWizardOpen(true);
-  }
-  function openAddVersion(app: App) {
-    setWizardApp(app);
-    setWizardOpen(true);
-  }
-
-  function deleteApp(i: number) {
-    modals.openConfirmModal({
-      title: "Delete app",
-      children: (
-        <Text size="sm">
-          Delete <b>{apps[i].name}</b> and all its versions? Devices will not be told to remove it
-          automatically.
-        </Text>
-      ),
-      labels: { confirm: "Delete", cancel: "Cancel" },
-      confirmProps: { color: "red" },
-      onConfirm: () => save({ apps: apps.filter((_, idx) => idx !== i) }),
-    });
-  }
-
-  function deleteVersion(appIdx: number, versionIdx: number) {
-    const app = apps[appIdx];
-    modals.openConfirmModal({
-      title: "Delete version",
-      children: (
-        <Text size="sm">
-          Remove version <b>{app.versions[versionIdx].version}</b> of {app.name}?
-        </Text>
-      ),
-      labels: { confirm: "Delete", cancel: "Cancel" },
-      confirmProps: { color: "red" },
-      onConfirm: () => {
-        const next = apps.map((a, i) =>
-          i === appIdx ? { ...a, versions: a.versions.filter((_, vi) => vi !== versionIdx) } : a,
+    async function handleFinish(
+        result:
+            | { kind: "app"; app: App }
+            | { kind: "version"; appId: string; version: AppVersion },
+    ): Promise<boolean> {
+        // Only the new-app path runs from this page; versions are added in the editor. The wizard reports both
+        // results, so both are handled.
+        if (result.kind === "app") {
+            return save({apps: [...apps, result.app]});
+        }
+        const next = apps.map((a) =>
+            a.id === result.appId ? {...a, versions: [...a.versions, result.version]} : a,
         );
-        save({ apps: next });
-      },
-    });
-  }
+        return save({apps: next});
+    }
 
-  async function saveEdit() {
-    if (!editApp) return;
-    if (!BUNDLE_ID_RE.test(editApp.bundle_id) || !editApp.name.trim()) return;
-    const next = apps.map((a, i) =>
-      i === editApp.index ? { ...a, name: editApp.name.trim(), bundle_id: editApp.bundle_id.trim() } : a,
-    );
-    const ok = await save({ apps: next });
-    if (ok) setEditApp(null);
-  }
+    return (
+        <Stack gap="lg">
+            <PageHeader
+                description="" // I see no need for a description here.
+                actions={
+                    <>
+                        <Button
+                            variant="light"
+                            leftSection={<IconHistory size={14}/>}
+                            onClick={() => setHistoryOpen(true)}
+                            disabled={loading}
+                        >
+                            History
+                        </Button>
+                        <Tooltip label={ADMIN_ONLY_REASON} withArrow disabled={isAdmin}>
+                            <Box>
+                                <Button
+                                    leftSection={<IconPlus size={16}/>}
+                                    onClick={() => setWizardOpen(true)}
+                                    disabled={loading || !isAdmin}
+                                >
+                                    Add app
+                                </Button>
+                            </Box>
+                        </Tooltip>
+                    </>
+                }
+            />
 
-  return (
-    <Stack gap="lg">
-      <Group justify="space-between" align="flex-start">
-        <Stack gap={0}>
-          <Title order={2}>Apps</Title>
-          <Text fz="sm" c="dimmed">
-            Managed app packages and the device groups each version installs on.
-          </Text>
-        </Stack>
-        <Group gap="xs">
-          <Button
-            variant="light"
-            leftSection={<IconHistory size={14} />}
-            onClick={() => setHistoryOpen(true)}
-            disabled={loading}
-          >
-            History
-          </Button>
-          <Button leftSection={<IconPlus size={16} />} onClick={openNewApp} disabled={loading}>
-            Add app
-          </Button>
-        </Group>
-      </Group>
+            {!isAdmin && (
+                <Alert color="yellow" icon={<IconInfoCircle size={16}/>}>
+                    {ADMIN_ONLY_REASON} You can view them here.
+                </Alert>
+            )}
 
-      {loading ? (
-        <Box py={80} ta="center">
-          <Loader />
-        </Box>
-      ) : apps.length === 0 ? (
-        <Card withBorder radius="md" py={48}>
-          <Stack align="center" gap="xs">
-            <IconApps size={36} opacity={0.4} />
-            <Text c="dimmed">No apps defined yet.</Text>
-            <Button variant="light" leftSection={<IconPlus size={16} />} onClick={openNewApp}>
-              Add your first app
-            </Button>
-          </Stack>
-        </Card>
-      ) : (
-        <Stack gap="sm">
-          {apps.map((app, i) => (
-            <Card key={app.id} withBorder radius="md" padding="md">
-              <Group justify="space-between" align="flex-start" wrap="nowrap" mb="sm">
-                <Stack gap={2}>
-                  <Group gap="xs">
-                    <Text fw={600}>{app.name}</Text>
-                    <Badge variant="light" color="gray" size="sm">
-                      {app.versions.length} version{app.versions.length === 1 ? "" : "s"}
-                    </Badge>
-                  </Group>
-                  <Text fz="xs" c="dimmed">
-                    <Code>{app.bundle_id}</Code> · id <Code>{app.id}</Code>
-                  </Text>
-                </Stack>
-                <Group gap={4}>
-                  <Button
-                    variant="subtle"
-                    size="xs"
-                    leftSection={<IconPlus size={14} />}
-                    onClick={() => openAddVersion(app)}
-                  >
-                    Add version
-                  </Button>
-                  <Tooltip label="Edit name / bundle id" withArrow>
-                    <ActionIcon variant="subtle" color="gray" onClick={() =>
-                      setEditApp({ index: i, name: app.name, bundle_id: app.bundle_id })
-                    }>
-                      <IconPencil size={16} />
-                    </ActionIcon>
-                  </Tooltip>
-                  <Tooltip label="Delete app" withArrow>
-                    <ActionIcon variant="subtle" color="red" onClick={() => deleteApp(i)}>
-                      <IconTrash size={16} />
-                    </ActionIcon>
-                  </Tooltip>
-                </Group>
-              </Group>
+            <RolloutCountedNote
+                countedAt={rollout.stats?.counted_at}
+                devicesEnrolled={rollout.stats?.devices_enrolled}
+                error={rollout.error}
+            />
 
-              {app.versions.length > 0 && (
-                <Table verticalSpacing={6} fz="sm">
-                  <Table.Thead>
-                    <Table.Tr>
-                      <Table.Th>Version</Table.Th>
-                      <Table.Th>Groups</Table.Th>
-                      <Table.Th>Constraints</Table.Th>
-                      <Table.Th>Integrity</Table.Th>
-                      <Table.Th />
-                    </Table.Tr>
-                  </Table.Thead>
-                  <Table.Tbody>
-                    {app.versions.map((v, vi) => (
-                      <Table.Tr key={v.version}>
-                        <Table.Td>
-                          <Badge variant="light">v{v.version}</Badge>
-                        </Table.Td>
-                        <Table.Td>
-                          <Group gap={4} wrap="wrap">
-                            {v.groups.map((g) => (
-                              <Badge key={g} variant="dot" size="xs" color="blue">
-                                {g}
-                              </Badge>
-                            ))}
-                          </Group>
-                        </Table.Td>
-                        <Table.Td>
-                          {v.conditions?.length ? (
-                            v.conditions.map((c, ci) => (
-                              <Text key={ci} fz="xs" c="dimmed">
-                                OS {c.operator} {String(c.value)}
-                              </Text>
-                            ))
-                          ) : (
-                            <Text fz="xs" c="dimmed">
-                              --
-                            </Text>
-                          )}
-                        </Table.Td>
-                        <Table.Td>
-                          <Tooltip label={v.sha256} withArrow>
-                            <Code>{v.sha256.slice(0, 10)}…</Code>
-                          </Tooltip>
-                        </Table.Td>
-                        <Table.Td>
-                          <ActionIcon
-                            variant="subtle"
-                            color="red"
-                            size="sm"
-                            onClick={() => deleteVersion(i, vi)}
-                          >
-                            <IconTrash size={14} />
-                          </ActionIcon>
-                        </Table.Td>
-                      </Table.Tr>
+            {loading ? (
+                <PageSkeleton variant="grid"/>
+            ) : apps.length === 0 ? (
+                <GlassCard withBorder py={48}>
+                    <Stack align="center" gap="xs">
+                        <IconApps size={36} opacity={0.4}/>
+                        <Text c="dimmed">No apps defined yet.</Text>
+                        <Tooltip label={ADMIN_ONLY_REASON} withArrow disabled={isAdmin}>
+                            <Box>
+                                <Button
+                                    variant="light"
+                                    leftSection={<IconPlus size={16}/>}
+                                    onClick={() => setWizardOpen(true)}
+                                    disabled={!isAdmin}
+                                >
+                                    Add your first app
+                                </Button>
+                            </Box>
+                        </Tooltip>
+                    </Stack>
+                </GlassCard>
+            ) : (
+                <SimpleGrid cols={{base: 1, sm: 2, lg: 3}} spacing="md">
+                    {apps.map((app) => (
+                        <AppCard
+                            key={app.id}
+                            app={app}
+                            counts={toCounts(rollout.stats?.items[app.id])}
+                            hasStats={rollout.stats !== null}
+                            onPeek={() => setPeekAppId(app.id)}
+                            onEdit={() => openEditor(app)}
+                        />
                     ))}
-                  </Table.Tbody>
-                </Table>
-              )}
-            </Card>
-          ))}
+                </SimpleGrid>
+            )}
+
+            <AppPeekModal
+                app={peekApp}
+                stats={peekApp ? rollout.stats?.items[peekApp.id] : undefined}
+                opened={peekApp !== null}
+                onClose={() => setPeekAppId(null)}
+                onEdit={openEditor}
+            />
+
+            {isAdmin && (
+                <AppWizard
+                    opened={wizardOpen}
+                    onClose={() => setWizardOpen(false)}
+                    token={token ?? ""}
+                    allGroups={allGroups}
+                    devices={devices}
+                    uploadBlockedReason={uploadBlockedReason}
+                    takenIds={apps.map((a) => a.id)}
+                    usedKeys={apps.flatMap((a) => a.versions.map((v) => v.s3_key))}
+                    onFinish={handleFinish}
+                />
+            )}
+
+            <ConfigHistoryDrawer
+                opened={historyOpen}
+                onClose={() => setHistoryOpen(false)}
+                type="apps"
+                currentDoc={currentDocText}
+                currentVersion={version}
+                onRestored={reload}
+            />
         </Stack>
-      )}
-
-      <AppWizard
-        opened={wizardOpen}
-        onClose={() => setWizardOpen(false)}
-        token={token ?? ""}
-        groupNames={groupNames}
-        allGroups={allGroups}
-        devices={devices}
-        s3Configured={s3Configured}
-        takenIds={apps.map((a) => a.id)}
-        existingApp={wizardApp}
-        onFinish={handleFinish}
-      />
-
-      <Modal opened={!!editApp} onClose={() => setEditApp(null)} title="Edit app" size="md">
-        {editApp && (
-          <Stack gap="md">
-            <TextInput
-              label="Display name"
-              value={editApp.name}
-              onChange={(e) => setEditApp({ ...editApp, name: e.currentTarget.value })}
-              withAsterisk
-            />
-            <TextInput
-              label="Bundle ID"
-              value={editApp.bundle_id}
-              onChange={(e) => setEditApp({ ...editApp, bundle_id: e.currentTarget.value })}
-              error={
-                editApp.bundle_id && !BUNDLE_ID_RE.test(editApp.bundle_id)
-                  ? "Invalid bundle identifier"
-                  : null
-              }
-              withAsterisk
-            />
-            <Group justify="flex-end">
-              <Button variant="default" onClick={() => setEditApp(null)}>
-                Cancel
-              </Button>
-              <Button onClick={saveEdit} loading={saving}>
-                Save
-              </Button>
-            </Group>
-          </Stack>
-        )}
-      </Modal>
-
-      <ConfigHistoryDrawer
-        opened={historyOpen}
-        onClose={() => setHistoryOpen(false)}
-        type="apps"
-        currentDoc={currentDocText}
-        onRestored={reload}
-      />
-    </Stack>
-  );
+    );
 }
