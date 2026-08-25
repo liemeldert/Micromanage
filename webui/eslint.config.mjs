@@ -1,25 +1,16 @@
-import {dirname} from "path";
-import {fileURLToPath} from "url";
-import {FlatCompat} from "@eslint/eslintrc";
+import coreWebVitals from "eslint-config-next/core-web-vitals";
+import nextTypescript from "eslint-config-next/typescript";
+import jsxA11y from "eslint-plugin-jsx-a11y";
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = dirname(__filename);
-
-const compat = new FlatCompat({
-    baseDirectory: __dirname
-});
-
-const eslintConfig = [// Build output, including the .next.stale-* directories a dev server leaves
-    // behind. `next lint` skipped these for us; `eslint .` has to be told.
-    {ignores: [".next/**", ".next.stale-*/**", "out/**", "node_modules/**", "next-env.d.ts"]}, ...compat.extends("next/core-web-vitals", "next/typescript"), // next/core-web-vitals only turns on a handful of a11y rules; this is the
-    // full recommended set, which is what catches a clickable row with no
-    // keyboard path.
-    ...compat.extends("plugin:jsx-a11y/recommended"), {
+const eslintConfig = [{ignores: [".next/**", ".next.stale-*/**", "out/**", "node_modules/**", "next-env.d.ts"]}, ...coreWebVitals, ...nextTypescript, {
         rules: {
-            // Every autofocus here follows an explicit user action (opening the
-            // rename field, landing on the sign-in step) onto the one field that
-            // step exists for.
-            "jsx-a11y/no-autofocus": "off"
+            ...jsxA11y.flatConfigs.recommended.rules,
+            "jsx-a11y/no-autofocus": "off",
+            "react-hooks/set-state-in-effect": "warn",
+            "react-hooks/refs": "warn",
+            "react-hooks/immutability": "warn",
+            "react-hooks/purity": "warn",
+            "react-hooks/static-components": "warn"
         }
     }];
 

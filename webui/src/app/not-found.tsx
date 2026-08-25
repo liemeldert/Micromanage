@@ -10,9 +10,9 @@ export default function NotFound() {
                     <Text fz="sm" c="dimmed" ta="center">
                         Nothing lives at this address.
                     </Text>
-                    <Button component={Link} href="/dashboard">
-                        Back to dashboard
-                    </Button>
+                    <Link href="/dashboard" style={{textDecoration: "none"}}>
+                        <Button>Back to dashboard</Button>
+                    </Link>
                 </Stack>
             </Paper>
         </Stack>

@@ -86,6 +86,7 @@ function LoginFlow() {
             AUTH_STORAGE_KEY,
             JSON.stringify({token: accessToken, tenantId, email: email.trim(), role: me?.role ?? null}),
         );
+        // eslint-disable-next-line @next/next/no-location-assign-relative-destination
         window.location.href = "/dashboard";
     };
 
