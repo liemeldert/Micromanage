@@ -378,28 +378,40 @@ def legacy_document_checks():
 
 
 def setup_script_checks():
-    """setup.sh scaffolds flows.yaml with a literal heredoc, because it runs before there is a controller to ask. That
-    makes it a second source of truth for the default enrollment flow, and it has drifted before: one copy carried a
-    dead gate key and offered a "Keep waiting" option wired to the release step, which would have released the device.
+    """Scaffolding writes flows.yaml before there is a controller to ask, so every copy of the default enrollment flow
+    outside the catalog is a second source of truth, and they have drifted before: one copy carried a dead gate key and
+    offered a "Keep waiting" option wired to the release step, which would have released the device.
+
+    Two copies exist. `setup.sh cmd_tenant` still writes a literal heredoc for a newly created tenant, and the example
+    tenant `_scaffold_dev_tenant` installs now lives in deploy/tenant-template/default/ so CI can validate it (it used
+    to be a third heredoc, but yaml-configs/ is gitignored, so the file it produced never reached a checkout).
     """
-    print("\n12) setup.sh scaffolds exactly the generated default flow")
+    print("\n12) every scaffolded copy is exactly the generated default flow")
     import re
 
     from controller.services.flow_step_catalog import default_enrollment_flow
 
-    src = (Path(__file__).resolve().parent.parent / "setup.sh").read_text()
+    root = Path(__file__).resolve().parent.parent
+    src = (root / "setup.sh").read_text()
     blocks = re.findall(
         r"cat > \"\$\{?\w+\}?/flows\.yaml\"\s*<< 'EOF'\n(.*?)\nEOF", src, re.S)
-    check("setup.sh scaffolds flows.yaml in both tenant paths", len(blocks) == 2)
+    check("setup.sh scaffolds flows.yaml for a new tenant", len(blocks) == 1)
+
+    template = root / "deploy" / "tenant-template" / "default" / "flows.yaml"
+    check("the example tenant's flows.yaml is tracked in the repo", template.is_file())
+
+    sources = [(f"setup.sh heredoc {i}", block) for i, block in enumerate(blocks)]
+    if template.is_file():
+        sources.append(("deploy/tenant-template/default/flows.yaml", template.read_text()))
+
     expected = {"version": 2, "flows": [default_enrollment_flow()]}
-    for i, block in enumerate(blocks):
+    for label, block in sources:
         try:
             parsed = yaml.safe_load(block)
         except yaml.YAMLError as exc:
-            check(f"setup.sh heredoc {i} parses", False, str(exc))
+            check(f"{label} parses", False, str(exc))
             continue
-        check(f"setup.sh heredoc {i} is the generated default flow",
-              parsed == expected)
+        check(f"{label} is the generated default flow", parsed == expected)
 
 
 async def engine_checks():

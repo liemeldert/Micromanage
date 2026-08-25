@@ -15,6 +15,8 @@ from controller.utils.yaml_validator import Profile, YAMLValidator
 
 PASS, FAIL = [], []
 
+SEEDED_TENANT = Path(__file__).resolve().parents[1] / "deploy" / "tenant-template" / "default"
+
 
 def check(label, cond):
     (PASS if cond else FAIL).append(label)
@@ -960,9 +962,8 @@ def bundle_quiet_checks():
     for w in fw:
         print(f"     unexpected: [{w['code']}] on {w['node_id']}: {w['message']}")
 
-    # Path from this file, not from the cwd: the suite runner does not promise which directory a suite starts in.
     print("36) the seeded default tenant still validates with no flow warnings")
-    seeded = Path(__file__).resolve().parents[1] / "yaml-configs" / "tenants" / "default"
+    seeded = SEEDED_TENANT
     v = YAMLValidator(seeded)
     valid, errors, warnings = v.validate_all()
     check("the seeded tenant is on disk and validates",
@@ -1129,7 +1130,7 @@ def payload_type_warning_checks():
     check("a DEP profile draws no payload-type warning", not payload_warns(warnings))
 
     print("38g) the seeded default tenant draws no payload-type warning")
-    seeded = Path(__file__).resolve().parents[1] / "yaml-configs" / "tenants" / "default"
+    seeded = SEEDED_TENANT
     valid, errors, warnings = YAMLValidator(seeded).validate_all()
     check("the tenant shipped with the product stays quiet",
           seeded.is_dir() and valid and not payload_warns(warnings))

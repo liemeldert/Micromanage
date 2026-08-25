@@ -540,117 +540,12 @@ cmd_interactive() {
 
 _scaffold_dev_tenant() {
   local dir="yaml-configs/tenants/default"
+  local template="${SCRIPT_DIR}/deploy/tenant-template/default"
+
+  [[ -d "$template" ]] || die "Missing ${template}; cannot create the example tenant."
+
   mkdir -p "$dir"
-
-  cat > "${dir}/config.yaml" << 'EOF'
-tenant:
-  id: "default"
-  name: "Default (dev)"
-  allowed_users:
-    - "admin@localhost.dev"
-  dep:
-    enabled: false
-    default_profile: ""
-EOF
-
-  cat > "${dir}/groups.yaml" << 'EOF'
-groups:
-  - name: "all-devices"
-    description: "All enrolled devices"
-    conditions:
-      - type: "device_model"
-        operator: "regex"
-        value: ".*"
-
-  - name: "macbooks"
-    description: "All MacBook devices"
-    conditions:
-      - type: "device_model"
-        operator: "regex"
-        value: "^MacBook.*"
-
-  - name: "ipads"
-    description: "All iPad devices"
-    conditions:
-      - type: "device_model"
-        operator: "regex"
-        value: "^iPad.*"
-EOF
-
-  cat > "${dir}/apps.yaml"     << 'EOF'
-apps: []
-EOF
-  cat > "${dir}/profiles.yaml" << 'EOF'
-profiles: []
-EOF
-  cat > "${dir}/flows.yaml"    << 'EOF'
-version: 2
-flows:
-- id: enrollment
-  name: Device enrollment
-  description: Runs when a device enrolls. Waits for the device to report itself,
-    then releases it from Setup Assistant. Add your profiles, apps and account setup
-    between the two.
-  enabled: true
-  permanent: true
-  nodes:
-  - id: start-dep
-    type: start
-    params:
-      kind: enroll_dep
-      match: {}
-    ui:
-      x: -260
-      y: -80
-    next: await-info
-  - id: start-ota
-    type: start
-    params:
-      kind: enroll_profile
-      match: {}
-    ui:
-      x: -260
-      y: 80
-    next: await-info
-  - id: await-info
-    type: wait_for
-    params:
-      signal: device_info
-      timeout_minutes: 30
-    ui:
-      x: 0
-      y: 0
-    next: release
-    on_timeout: gate-stuck
-  - id: gate-stuck
-    type: manual_gate
-    params:
-      summary: Device has not reported in since it enrolled
-      severity: yellow
-      options:
-      - label: Release it from Setup Assistant
-        edge: on_release
-      - label: Stop this run
-        edge: on_cancel
-    ui:
-      x: 0
-      y: 240
-    on_release: release
-    on_cancel: done
-  - id: release
-    type: release_device
-    params: {}
-    ui:
-      x: 280
-      y: 0
-    next: done
-  - id: done
-    type: end
-    params: {}
-    ui:
-      x: 520
-      y: 0
-EOF
+  cp "${template}"/*.yaml "$dir"/
 
   ok "Created example yaml-configs/tenants/default/"
   echo -e "  Login with: tenant ${GRN}default${NC} / email ${GRN}admin@localhost.dev${NC}"
