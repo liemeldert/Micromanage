@@ -188,7 +188,7 @@ export default function DashboardLayout({children}: { children: React.ReactNode 
                                             data-expanded={expanded ? true : undefined}
                                         />
                                     </UnstyledButton>
-                                    <Collapse in={expanded}>
+                                    <Collapse expanded={expanded}>
                                         <Box className="mm-nav-children">
                                             {entry.items.map((item) => (
                                                 <NavItem

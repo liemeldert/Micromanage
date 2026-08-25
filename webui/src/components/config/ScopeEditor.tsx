@@ -123,7 +123,7 @@ export function ScopeEditor({
                     </Text>
                 </Group>
             </UnstyledButton>
-            <Collapse in={advancedOpen}>
+            <Collapse expanded={advancedOpen}>
                 <Group grow align="flex-start" gap="md">
                     <Box>
                         <Text fz="xs" fw={600} c="teal" mb={4}>

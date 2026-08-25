@@ -476,7 +476,7 @@ export default function DashboardPage() {
 
             </SimpleGrid>
 
-            <Grid gutter="md">
+            <Grid gap="md">
                 <Grid.Col span={{base: 12, md: 8}}>
                     <ComplianceBreakdown
                         alerts={compliance?.alerts ?? []}

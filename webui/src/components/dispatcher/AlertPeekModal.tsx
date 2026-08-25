@@ -1,7 +1,3 @@
-// A held or force-clicked alert, with the three things worth doing to it without leaving the page. Resolve
-// ends an alert, so a break-glass record sends it to the compliance page instead, where closing one asks
-// for a reason and is audited.
-
 import {Badge, Button, Divider, Group, Modal, Stack, Text} from "@mantine/core";
 import {IconArrowBackUp, IconArrowRight, IconCheck, IconDeviceLaptop} from "@tabler/icons-react";
 import {type DispatcherAlert, isBreakGlassAlert} from "../../../lib/api";

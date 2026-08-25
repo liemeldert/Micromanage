@@ -420,7 +420,7 @@ export default function GroupsPage() {
                                 </Text>
                             </Group>
                         </UnstyledButton>
-                        <Collapse in={cherryOpen}>
+                        <Collapse expanded={cherryOpen}>
                             <Group grow align="flex-start" gap="md" mt="xs">
                                 <Box>
                                     <Text fz="xs" fw={600} c="teal" mb={4}>Always include</Text>
