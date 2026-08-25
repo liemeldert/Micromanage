@@ -1,5 +1,3 @@
-"use client";
-
 // What a route's error boundary renders. A centered dialog rather than a page of text, so a failure
 // reads as something that happened to the app rather than as the page the reader asked for. The glass
 // surface and radius come from the Modal defaults in lib/theme.ts.

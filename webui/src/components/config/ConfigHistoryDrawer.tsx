@@ -1,5 +1,3 @@
-"use client";
-
 import {useCallback, useEffect, useState} from "react";
 import {Badge, Box, Button, Drawer, Group, Loader, ScrollArea, Stack, Text,} from "@mantine/core";
 import {modals} from "@mantine/modals";

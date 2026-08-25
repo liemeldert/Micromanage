@@ -1,5 +1,3 @@
-"use client";
-
 // The device query, with undo and redo over the filters. Only a filter change adds a step; typing free text
 // updates the current entry in place, so undo does not walk back through a search term one keystroke at a time.
 

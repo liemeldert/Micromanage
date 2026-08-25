@@ -1,5 +1,3 @@
-"use client";
-
 // Page heading. The icon and the default title come from the destination table in lib/palette, so the nav and the
 // page cannot disagree. A route missing from that table renders the title it passes, and no icon unless it names one.
 

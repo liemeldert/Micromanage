@@ -1,5 +1,3 @@
-"use client";
-
 // Admin card for the tenant's FileVault recovery-key escrow keypair. The private key never leaves the server, so this
 // card offers only the certificate; a recovery key itself is revealed by breaking the glass on a device page.
 

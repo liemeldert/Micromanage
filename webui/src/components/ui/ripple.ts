@@ -1,5 +1,3 @@
-"use client";
-
 // The glow a press leaves on the surface under it. It grows with hold time and with trackpad force where
 // there is any, so a tap barely marks the surface and a deliberate hold swells to full size.
 //

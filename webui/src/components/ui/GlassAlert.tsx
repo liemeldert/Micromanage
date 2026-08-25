@@ -1,5 +1,3 @@
-"use client";
-
 // Alert on the same material as the cards, with its colour mixed into the glass rather than painted over it,
 // so a yellow warning still reads as yellow while staying translucent.
 

@@ -1,5 +1,3 @@
-"use client";
-
 // One flow: what starts it, a still picture of its graph, and how often it has run. The card and the pencil both open
 // the flow in the editor.
 

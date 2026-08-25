@@ -1,5 +1,3 @@
-"use client";
-
 import {useState} from "react";
 import {Alert, Badge, Button, Card, Checkbox, Divider, Group, Modal, Stack, Text,} from "@mantine/core";
 import {IconAlertTriangle, IconGitMerge,} from "@tabler/icons-react";

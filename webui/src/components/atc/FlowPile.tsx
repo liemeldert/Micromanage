@@ -1,5 +1,3 @@
-"use client";
-
 // A flow and its drafts, as one pile in the overview grid. The drafts lie across the lower part of the
 // flow they draft; hovering spreads them, and clicking takes the pile to the centre of the page and
 // unstacks it into a column of readable cards.

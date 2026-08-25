@@ -1,5 +1,3 @@
-"use client";
-
 // Task detail drawer shared by the Tasks page and the device detail page.
 
 import {Badge, Button, Code, Divider, Drawer, Group, Progress, Stack, Text,} from "@mantine/core";

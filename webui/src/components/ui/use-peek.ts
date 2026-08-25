@@ -1,5 +1,3 @@
-"use client";
-
 // Press and hold, or force click on a Mac trackpad, to peek at one thing. Attached per element rather than
 // per container, so anything can take the gesture by spreading what this returns.
 //

@@ -1,5 +1,3 @@
-"use client";
-
 import {ActionIcon, Badge, Box, Divider, Group, Paper, ScrollArea, Text, Tooltip,} from "@mantine/core";
 import {IconCircleFilled, IconFilePlus, IconGitBranch, IconLock, IconSearch, IconX,} from "@tabler/icons-react";
 import type {FlowDoc} from "../../../lib/api";

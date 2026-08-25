@@ -1,5 +1,3 @@
-"use client";
-
 // The flow switcher: mod+P, or the "All flows" control on the editor toolbar. Tabs are the working
 // set, this is the whole list. Built on the same Spotlight primitive and classes as the command
 // palette (mod+K), which also keeps every row at one height and one hit area. Badges point at dead

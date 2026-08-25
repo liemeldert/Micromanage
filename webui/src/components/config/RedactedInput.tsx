@@ -1,5 +1,3 @@
-"use client";
-
 import {useState} from "react";
 import {Button, PasswordInput, Stack, TextInput} from "@mantine/core";
 

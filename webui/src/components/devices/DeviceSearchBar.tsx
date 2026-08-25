@@ -1,5 +1,3 @@
-"use client";
-
 // The device list's one filter control. Committed filters sit in the box as removable chips, and whatever is
 // still being typed stays plain text beside them. A named attribute with a value narrows the list as it is
 // typed; Space, Enter or picking a suggestion turns it into a chip.

@@ -1,5 +1,3 @@
-"use client";
-
 // Per-item rollout counts from GET /api/v1/stats/rollout (lib/rollout.ts), so an item failing across the fleet shows
 // up in the list rather than only on each device's page.
 

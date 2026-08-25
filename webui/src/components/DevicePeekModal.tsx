@@ -1,5 +1,3 @@
-"use client";
-
 // Read-only summary of one device, opened by holding or force clicking its row in the list. Everything shown
 // comes from the row the list already has, so the modal opens without a request.
 

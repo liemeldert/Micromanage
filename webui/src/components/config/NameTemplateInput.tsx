@@ -1,5 +1,3 @@
-"use client";
-
 import {useRef, useState} from "react";
 import {Combobox, Text, TextInput, useCombobox} from "@mantine/core";
 import {NAME_VARIABLES} from "../../../lib/config";

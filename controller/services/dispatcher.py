@@ -28,7 +28,7 @@ from controller.models.tenant import (
 from controller.services import tenant_config
 from controller.services.compliance_catalog import evaluate_check
 from controller.services.scoping import device_in_rollout, evaluate_scope
-from controller.services.severity import RANK, escalate as _escalate_severity
+from controller.services.severity import escalate as _escalate_severity, RANK
 
 logger = logging.getLogger(__name__)
 

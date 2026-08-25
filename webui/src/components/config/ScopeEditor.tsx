@@ -1,5 +1,3 @@
-"use client";
-
 import {useMemo, useState} from "react";
 import {Alert, Badge, Box, Collapse, Group, MultiSelect, Stack, Text, UnstyledButton,} from "@mantine/core";
 import {IconChevronRight, IconDevices2, IconTargetArrow} from "@tabler/icons-react";

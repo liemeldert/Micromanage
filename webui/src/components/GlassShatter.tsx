@@ -1,5 +1,3 @@
-"use client";
-
 // A pane of glass over a key, broken to get at what is behind it. Decorative only, and it never holds up
 // the reveal, since prefers-reduced-motion skips straight to the broken state and onBroken still runs.
 

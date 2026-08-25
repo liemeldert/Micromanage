@@ -1,5 +1,3 @@
-"use client";
-
 // Read-only breakdown of one app's rollout by state, targeted version and device model, opened
 // from an app card. Version management stays in the editor. Modal styling comes from lib/theme.ts.
 

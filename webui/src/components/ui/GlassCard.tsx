@@ -1,5 +1,3 @@
-"use client";
-
 // Card on the app's glass material. The behaviour comes from glass.ts, so this is only the Mantine binding.
 
 import {Card, type CardProps, type ElementProps} from "@mantine/core";

@@ -1,5 +1,3 @@
-"use client";
-
 // A value with a copy button that appears on hover or keyboard focus, for identifiers people retype (UDID, serial,
 // bundle id) where a button on every row would clutter a dense table. Touch has no hover, so it stays visible there.
 

@@ -1,5 +1,3 @@
-"use client";
-
 // Admin console for tenant users. Each action is its own API call and takes effect at once, unlike
 // the YAML-backed config editors, where edits are collected into one save.
 

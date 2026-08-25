@@ -1,5 +1,3 @@
-"use client";
-
 // Timer, drift and click-swallowing behind usePeek and usePeekGesture. Internal to those two hooks; nothing
 // else imports it.
 

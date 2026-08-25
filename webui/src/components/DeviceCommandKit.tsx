@@ -1,5 +1,3 @@
-"use client";
-
 // Device command UI driven by the server's command catalog (GET /api/v1/commands/catalog) rather than a hardcoded
 // list. QuickActionsCard renders the catalog's common commands on the device page's left rail, and CommandsPanel
 // renders every command grouped by category with the role requirement and device constraints from the catalog.

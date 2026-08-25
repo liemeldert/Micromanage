@@ -1,5 +1,3 @@
-"use client";
-
 // Yes I stole the name from EPIC.
 
 import {useEffect, useState} from "react";

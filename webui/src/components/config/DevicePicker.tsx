@@ -1,5 +1,3 @@
-"use client";
-
 import {useMemo, useState} from "react";
 import {Badge, Box, Checkbox, Group, ScrollArea, Text, TextInput,} from "@mantine/core";
 import {IconSearch} from "@tabler/icons-react";

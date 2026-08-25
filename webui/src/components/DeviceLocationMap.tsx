@@ -1,5 +1,3 @@
-"use client";
-
 // Leaflet map whose tiles come from the controller's same-origin tile proxy with the bearer token, rendered as
 // blob: images. The CSP allows img-src 'self' blob: and connect-src 'self', so no third-party tile CDN.
 

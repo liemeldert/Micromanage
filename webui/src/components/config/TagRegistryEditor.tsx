@@ -1,5 +1,3 @@
-"use client";
-
 // Editor for the advisory tag registry (tags.yaml). Free-form tags work without it; registered entries feed the
 // pickers, chip colors and typo warnings. Saves through the standard validated PUT, so history and restore apply.
 

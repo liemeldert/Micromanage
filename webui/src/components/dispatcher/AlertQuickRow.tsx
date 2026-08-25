@@ -1,5 +1,3 @@
-"use client";
-
 // One alert in the dashboard board, built from SwipeActions for the two triage gestures and Interactable for
 // the hover, press and peek.
 //

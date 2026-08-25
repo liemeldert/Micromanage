@@ -1,5 +1,3 @@
-"use client";
-
 // An element that answers the pointer the way the rest of the app does, with the hover wash, the press glow,
 // the lean toward the cursor, and press-and-hold or force click to peek.
 

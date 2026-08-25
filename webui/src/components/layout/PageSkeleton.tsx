@@ -1,5 +1,3 @@
-"use client";
-
 // Placeholders each route shows from its loading.tsx while the first request is out. The variants match
 // the layouts the app actually uses, so the skeleton settles into the real content instead of jumping.
 

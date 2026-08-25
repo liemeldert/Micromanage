@@ -1,5 +1,3 @@
-"use client";
-
 import {useEffect, useState} from "react";
 import {Alert, Button, Checkbox, Group, List, Modal, Stack, Text} from "@mantine/core";
 import {IconAlertTriangle} from "@tabler/icons-react";

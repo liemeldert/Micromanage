@@ -1,5 +1,3 @@
-"use client";
-
 // Press and hold a row, or force click it on a Mac trackpad, to peek at it without leaving the list.
 
 // I cannot believe that I am making a web app with first class Safari support of all things.

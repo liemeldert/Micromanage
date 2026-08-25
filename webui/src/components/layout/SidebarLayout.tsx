@@ -1,5 +1,3 @@
-"use client";
-
 import {Box, ScrollArea} from "@mantine/core";
 import {useMediaQuery} from "@mantine/hooks";
 import type {ReactNode} from "react";

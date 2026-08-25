@@ -1,5 +1,3 @@
-"use client";
-
 // A surface with an action behind each edge, reached by dragging it aside. The drag tracks the pointer the
 // whole way rather than snapping once a threshold is crossed.
 //

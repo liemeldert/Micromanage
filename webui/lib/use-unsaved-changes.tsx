@@ -1,5 +1,3 @@
-"use client";
-
 // Guards for editors holding unsaved work: the browser's leave-the-page prompt, and an in-app confirmation for
 // buttons that discard a draft without unloading the document.
 

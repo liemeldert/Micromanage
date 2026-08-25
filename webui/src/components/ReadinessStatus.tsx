@@ -1,5 +1,3 @@
-"use client";
-
 // GET /api/v1/readiness rendered two ways: a dashboard banner that appears only when something is wrong, and a
 // settings section listing every capability. Both take what the useReadiness hook in lib/readiness.ts returns.
 

@@ -1,5 +1,3 @@
-"use client";
-
 // The command palette, opened with mod+K or the Search row at the top of the sidebar. It merges three sources in
 // the browser: pages from the static registry in lib/palette.ts, devices from the same debounced device search the
 // devices page runs, and groups, profiles, apps and tags filtered in memory from the four config documents.

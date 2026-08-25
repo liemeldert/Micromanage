@@ -1,5 +1,3 @@
-"use client";
-
 // A still picture of a flow's graph: one small rectangle per block at its stored position, thin lines
 // for the edges. Plain SVG, so a page can carry one per card where a real canvas could not.
 

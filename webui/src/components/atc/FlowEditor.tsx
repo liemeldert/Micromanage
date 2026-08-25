@@ -1,5 +1,3 @@
-"use client";
-
 import {type DragEvent, useCallback, useEffect, useMemo, useRef, useState} from "react";
 import {
     addEdge,

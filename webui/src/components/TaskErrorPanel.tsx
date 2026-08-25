@@ -1,5 +1,3 @@
-"use client";
-
 // A failed task's error as a plain cause, a next step, and a link to the page that fixes it. The original text names
 // internal hostnames, so it stays collapsed behind "Technical details".
 

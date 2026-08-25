@@ -1,5 +1,3 @@
-"use client";
-
 import {Alert, Badge, Card, Code, Divider, Drawer, Group, Paper, Stack, Table, Text,} from "@mantine/core";
 import {IconAlertTriangle, IconGitCompare, IconMinus, IconPlus, IconReplace,} from "@tabler/icons-react";
 import type {DraftDiff} from "../../../lib/api";

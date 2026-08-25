@@ -1,5 +1,3 @@
-"use client";
-
 import {useState} from "react";
 import {Alert, Group, NumberInput, Progress, SegmentedControl, Stack, Switch, Text,} from "@mantine/core";
 import {IconInfoCircle} from "@tabler/icons-react";

@@ -1,5 +1,3 @@
-"use client";
-
 import {Alert, Badge, Button, Group, Modal, Paper, ScrollArea, Stack, Text, UnstyledButton} from "@mantine/core";
 import {IconAlertTriangle, IconCircleCheck, IconExclamationCircle} from "@tabler/icons-react";
 import type {FlowWarning} from "../../../lib/api";

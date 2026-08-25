@@ -1,5 +1,3 @@
-"use client";
-
 import {ActionIcon, Badge, Code, Group, RingProgress, Stack, Text, Tooltip} from "@mantine/core";
 import {IconPencil} from "@tabler/icons-react";
 import {type App} from "../../../lib/config";
