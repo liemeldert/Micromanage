@@ -477,9 +477,7 @@ export default function DashboardPage() {
             </SimpleGrid>
 
             <Grid gutter="md">
-                {/* The small tile above counts the alerts; this one breaks them down by severity, so it
-                  belongs with the charts rather than the single numbers. */}
-                <Grid.Col span={{base: 12, md: 6}}>
+                <Grid.Col span={{base: 12, md: 8}}>
                     <ComplianceBreakdown
                         alerts={compliance?.alerts ?? []}
                         failed={complianceFailed}
@@ -496,7 +494,7 @@ export default function DashboardPage() {
                     />
                 </Grid.Col>
 
-                <Grid.Col span={{base: 12, md: 6}}>
+                <Grid.Col span={{base: 12, md: 4}}>
                     <GlassCard withBorder h="100%">
                         <Stack align="center" gap="xs">
                             <Text fw={600} fz="sm">
