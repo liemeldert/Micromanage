@@ -9,13 +9,12 @@ import email
 import json
 import logging
 import re
-from typing import Any, Dict, Optional, Tuple
-
 from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 from cryptography.hazmat.primitives.serialization import pkcs7
 from cryptography.x509.oid import NameOID
+from typing import Any, Dict, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -178,6 +177,7 @@ def _decrypt_enveloped_der(der: bytes, key) -> Optional[bytes]:
     from cryptography.hazmat.primitives import padding as sym_padding
     from cryptography.hazmat.primitives.asymmetric import padding as asym_padding
     from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+    from cryptography.hazmat.decrepit.ciphers.algorithms import TripleDES
 
     info = _cms.ContentInfo.load(der)
     if info["content_type"].native != "enveloped_data":
@@ -223,7 +223,7 @@ def _decrypt_enveloped_der(der: bytes, key) -> Optional[bytes]:
     if algo_name in ("aes128_cbc", "aes192_cbc", "aes256_cbc"):
         alg = algorithms.AES(cek)
     elif algo_name in ("tripledes_3key", "des_ede3_cbc"):
-        alg = algorithms.TripleDES(cek)
+        alg = TripleDES(cek)
     else:
         raise DepTokenError(f"unsupported content cipher {algo_name}")
 
