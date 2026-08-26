@@ -373,7 +373,7 @@ export function SimpleEnrollmentProfileForm({
                     >
                         Advanced options
                     </Button>
-                    <Collapse in={showAdvanced}>
+                    <Collapse expanded={showAdvanced}>
                         <Stack gap="md">
                             <Switch
                                 label="Await final configuration"

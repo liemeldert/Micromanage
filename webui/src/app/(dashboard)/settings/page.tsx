@@ -863,7 +863,7 @@ export default function SettingsPage() {
                         <Text fz="xs" c="dimmed" mt={-8}>
                             Used to remind you as each of these dates approaches.
                         </Text>
-                        <Grid gutter="sm">
+                        <Grid gap="sm">
                             <Grid.Col span={{base: 12, sm: 6}}>
                                 <TextInput
                                     type="date"
@@ -920,7 +920,7 @@ export default function SettingsPage() {
                         </Radio.Group>
 
                         {s3Draft.mode === "tenant" && (
-                            <Grid gutter="sm">
+                            <Grid gap="sm">
                                 <Grid.Col span={{base: 12, sm: 6}}>
                                     <TextInput
                                         label="Bucket"

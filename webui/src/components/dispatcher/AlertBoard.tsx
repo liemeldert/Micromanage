@@ -756,7 +756,7 @@ function AlertRow({
                 )}
             </Group>
 
-            <Collapse in={expanded}>
+            <Collapse expanded={expanded}>
                 <Stack gap="xs" mt="sm" pl={40}>
                     {runFailure && <AtcFailureDetail detail={runFailure} onOpenRun={onOpenRun}/>}
                     {bgDetail && <BreakGlassDetail detail={bgDetail}/>}

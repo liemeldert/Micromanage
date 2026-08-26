@@ -211,7 +211,7 @@ function StructuredFactRow({
         <FactRow
             label={label}
             details={
-                <Collapse in={open}>
+                <Collapse expanded={open}>
                     <Code
                         block
                         mt={4}
@@ -493,7 +493,7 @@ function DdmSection({
                                                 <Table.Tr>
                                                     <Table.Td colSpan={4} p={0}
                                                               style={{border: expanded ? undefined : "none"}}>
-                                                        <Collapse in={expanded}>
+                                                        <Collapse expanded={expanded}>
                                                             <Stack gap={4} p="sm" pl={36}>
                                                                 {reasons.map((r, i) => (
                                                                     <Box key={i}>

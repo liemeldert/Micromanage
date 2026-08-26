@@ -37,13 +37,13 @@ const CHART_SERIES = STATUS_SERIES.map((s) => ({name: s.label, color: s.color}))
 // Recharts lists every series, so a device model sitting at one status showed five zeroes under it and the
 // panel ran past the edge of the dialog. Only the states this bar actually has are worth drawing.
 interface TooltipRow {
-    name?: string;
-    value?: number;
+    name?: string | number;
+    value?: string | number | readonly (string | number)[];
     color?: string;
 }
 
-function ChartTooltip({label, payload}: { label?: string; payload?: TooltipRow[] }) {
-    const rows = (payload ?? []).filter((p) => (p.value ?? 0) > 0);
+function ChartTooltip({label, payload}: { label?: string | number; payload?: readonly TooltipRow[] }) {
+    const rows = (payload ?? []).filter((p) => Number(p.value ?? 0) > 0);
     if (!rows.length) return null;
     return (
         <Paper px="sm" py={6} withBorder shadow="md" radius="sm">
