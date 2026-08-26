@@ -1,7 +1,7 @@
 // Read-only summary of one device, opened by holding or force clicking its row in the list. Everything shown
 // comes from the row the list already has, so the modal opens without a request.
 
-import {Badge, Button, Divider, Group, Modal, SimpleGrid, Stack, Text} from "@mantine/core";
+import {Badge, Button, Divider, Group, type MantineTransition, Modal, SimpleGrid, Stack, Text} from "@mantine/core";
 import {IconArrowRight, IconBrandApple} from "@tabler/icons-react";
 import type {Device} from "../../lib/api";
 import {timeSince} from "../../lib/time";
@@ -17,6 +17,13 @@ function Fact({label, value}: { label: string; value: React.ReactNode }) {
         </Stack>
     );
 }
+
+const PEEK_TRANSITION: MantineTransition = {
+    common: {transformOrigin: "center"},
+    in: {opacity: 1, transform: "scale(1)"},
+    out: {opacity: 0, transform: "scale(0.82)"},
+    transitionProperty: "transform, opacity",
+};
 
 export function DevicePeekModal({
                                     device,
@@ -46,7 +53,21 @@ export function DevicePeekModal({
         : "not scheduled";
 
     return (
-        <Modal opened={opened} onClose={onClose} size="lg" title={
+        <Modal
+            opened={opened}
+            onClose={onClose}
+            size="lg"
+            // A peek should feel like it sprang out of the row that was held. Mantine's own pop starts at 0.9,
+            // which on a dialog this size barely moves; this starts it much smaller and the overshoot in the
+            // timing function carries it past 1 on the way in.
+            transitionProps={{
+                transition: PEEK_TRANSITION,
+                duration: 260,
+                exitDuration: 140,
+                timingFunction: "cubic-bezier(0.2, 1.5, 0.35, 1)",
+            }}
+            classNames={{content: "mm-peek-content"}}
+            title={
             <Group gap="xs" wrap="nowrap">
                 {device.management_type === "apple_mdm" && <IconBrandApple size={16} style={{opacity: 0.6}}/>}
                 <Text fw={600}>{device.display_name || device.serial_number || "Device"}</Text>

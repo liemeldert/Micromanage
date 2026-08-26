@@ -8,6 +8,7 @@
 import {useEffect, useMemo, useRef, useState} from "react";
 import {ActionIcon, Badge, Box, CloseButton, Text, Tooltip} from "@mantine/core";
 import {IconArrowBackUp, IconArrowForwardUp, IconSearch} from "@tabler/icons-react";
+import {glassClassName} from "../ui/glass";
 import {
     DEVICE_FILTER_KEYS,
     DEVICE_FILTER_LABELS,
@@ -306,7 +307,12 @@ export function DeviceSearchBar({
         <Box style={{position: "relative", flex: 1, minWidth: 0}}>
             {/* Hand-rolled rather than a TextInput, so the chips sit inside the border with the caret instead
               of beside the box. */}
-            <Box className="mm-device-search-box" onClick={() => inputRef.current?.focus()}>
+            <Box
+                className={glassClassName({
+                    material: "none", interactive: false, className: "mm-device-search-box mm-glass-field",
+                })}
+                onClick={() => inputRef.current?.focus()}
+            >
                 <IconSearch size={14} style={{flexShrink: 0, opacity: 0.55}}/>
                 {chips.map((key) => (
                     <Badge

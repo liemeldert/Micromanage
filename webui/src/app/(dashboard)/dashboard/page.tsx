@@ -75,6 +75,33 @@ function StatCard({
 }
 
 // Triage order, worst first, matching the alert board's own colours.
+// The two fleet breakdowns sit side by side, so they share a height and an axis. Without that the plot areas end
+// at different heights and the bars in one chart stand on a different line from the bars in the other.
+const FLEET_CHART_HEIGHT = 260;
+
+// Recharts drops x-axis labels it thinks would collide. interval 0 keeps every bar's label, the angle stops model
+// identifiers running into each other, and the height is the room the tilted labels need. The OS chart's labels
+// would fit without any of it. It takes the same axis anyway, so both plot areas end on the same line.
+const FLEET_CHART_X_AXIS = {interval: 0, angle: -30, textAnchor: "end", height: 70} as const;
+
+// Device counts are whole numbers; a small tallest bar otherwise gets 0.5 ticks.
+const FLEET_CHART_Y_AXIS = {allowDecimals: false} as const;
+
+// The second line under an alert's summary. Most summaries already name the device ("FileVault disabled on
+// hana-mac-l4ze"), and repeating it underneath spends the row's second line saying nothing new, so the name
+// only appears when the summary has not already said it.
+function alertDetailLine(alert: {
+    summary: string;
+    opened_at?: string | null;
+    device?: { display_name?: string | null; serial_number?: string | null } | null
+}): string {
+    const name = alert.device?.display_name || alert.device?.serial_number || null;
+    const named = Boolean(name && alert.summary.includes(name));
+    return [named ? null : name, alert.opened_at ? timeSince(alert.opened_at) : null]
+        .filter(Boolean)
+        .join(" · ");
+}
+
 const ALERT_SEVERITIES: { key: string; label: string; color: string }[] = [
     {key: "black", label: "Critical", color: "dark"},
     {key: "red", label: "High", color: "red"},
@@ -185,15 +212,16 @@ function ComplianceBreakdown({
                               others below it. Mantine sizes an autosize area to its widest line, which a long
                               summary turns into a sideways scrollbar, so the content is held to the column. */}
                             <ScrollArea.Autosize
-                                mah={200}
+                                mah={260}
                                 type="auto"
                                 scrollbars="y"
                                 offsetScrollbars="y"
                                 styles={{content: {minWidth: 0}}}
                             >
                                 {/* Matches the swipe hint's reach on both sides, since the column clips
-                                  anything past its padding. */}
-                                <Stack gap={4} px={12}>
+                                  anything past its padding. The rows sit close together: the gap between two
+                                  of them is worth less here than one more alert being readable. */}
+                                <Stack gap={2} px={12} py={2}>
                                     {rows.length === 0 ? (
                                         <Text fz="xs" c="dimmed" px={8}>
                                             {failed ? "--" : "None"}
@@ -203,10 +231,7 @@ function ComplianceBreakdown({
                                             key={alert.id}
                                             severityColor={severity.color}
                                             summary={alert.summary}
-                                            detail={[
-                                                alert.device?.display_name || alert.device?.serial_number,
-                                                alert.opened_at ? timeSince(alert.opened_at) : null,
-                                            ].filter(Boolean).join(" · ")}
+                                            detail={alertDetailLine(alert)}
                                             acknowledged={alert.status === "acknowledged"}
                                             onAcknowledge={() => (alert.status === "acknowledged"
                                                 ? onUnacknowledge(alert.id)
@@ -551,18 +576,14 @@ export default function DashboardPage() {
                         </Text>
                         {byModel.length > 0 ? (
                             <BarChart
-                                h={260}
+                                h={FLEET_CHART_HEIGHT}
                                 data={byModel.map((d) => ({name: d.device_model, Devices: d.count}))}
                                 dataKey="name"
                                 series={[{name: "Devices", color: "blue"}]}
                                 tickLine="none"
                                 gridAxis="x"
-                                // Recharts drops x-axis labels it thinks would collide. interval 0 keeps every
-                                // bar's label, the angle stops model identifiers running into each other, and the
-                                // extra axis height is the room the tilted labels need.
-                                xAxisProps={{interval: 0, angle: -30, textAnchor: "end", height: 70}}
-                                // Device counts are whole numbers; a small tallest bar otherwise gets 0.5 ticks.
-                                yAxisProps={{allowDecimals: false}}
+                                xAxisProps={FLEET_CHART_X_AXIS}
+                                yAxisProps={FLEET_CHART_Y_AXIS}
                             />
                         ) : (
                             <Text fz="sm" c="dimmed" ta="center" py="xl">
@@ -574,12 +595,12 @@ export default function DashboardPage() {
 
                 {byOs.length > 0 && (
                     <Grid.Col span={{base: 12, md: 6}}>
-                        <GlassCard withBorder>
+                        <GlassCard withBorder h="100%">
                             <Text fw={600} fz="sm" mb="md">
                                 Devices by OS version
                             </Text>
                             <BarChart
-                                h={200}
+                                h={FLEET_CHART_HEIGHT}
                                 // A device that has not reported its OS comes back with an empty os_version, which
                                 // would draw a bar with no label at all.
                                 data={byOs.map((d) => ({name: d.os_version || "unknown", Devices: d.count}))}
@@ -587,7 +608,8 @@ export default function DashboardPage() {
                                 series={[{name: "Devices", color: "grape"}]}
                                 tickLine="none"
                                 gridAxis="x"
-                                yAxisProps={{allowDecimals: false}}
+                                xAxisProps={FLEET_CHART_X_AXIS}
+                                yAxisProps={FLEET_CHART_Y_AXIS}
                             />
                         </GlassCard>
                     </Grid.Col>

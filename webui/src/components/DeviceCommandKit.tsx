@@ -34,6 +34,7 @@ import {
     IconMapPin,
     IconPower,
     IconRefresh,
+    IconSettings,
     IconShieldLock,
     IconTerminal2,
     IconUsers,
@@ -118,6 +119,7 @@ const CATEGORY_ICONS: Record<string, React.FC<{ size?: number }>> = {
     Security: IconShieldLock,
     "Lost Mode": IconMapPin,
     Users: IconUsers,
+    Management: IconSettings,
 };
 
 function isMac(device: Device) {
@@ -476,12 +478,16 @@ function CommandModal({
                                     <Stack key={p.name} gap={4}>
                                         <Text fz="sm" fw={500}>{p.label}{need ? "" : " (optional)"}</Text>
                                         {p.help && <Text fz="xs" c="dimmed">{p.help}</Text>}
+                                        {/* Six boxes are a shape rather than a field, so they sit under the
+                                            middle of the dialog instead of against its left edge. */}
                                         <PinInput
                                             length={6}
                                             type="number"
                                             value={values[p.name] ?? ""}
                                             onChange={(v) => setValues((s) => ({...s, [p.name]: v}))}
                                             oneTimeCode={false}
+                                            mt={4}
+                                            style={{justifyContent: "center"}}
                                         />
                                     </Stack>
                                 );
@@ -693,7 +699,9 @@ export function QuickActionsCard({
     const eraseWhy = eraseCmd && unavailable(eraseCmd);
 
     return (
-        <GlassCard withBorder p="md">
+        // The rail's cards float over the page and answer the pointer as one surface; the buttons on them
+        // answer more quietly and lend the card their colour, so hovering Erase blooms the card red.
+        <GlassCard withBorder p="md" lift="quiet">
             <Text fz="sm" fw={600} mb="sm">Quick actions</Text>
             <Stack gap={6}>
                 {/*{(lockCmd || eraseCmd || lostToggle) && (*/}

@@ -1,5 +1,6 @@
 import {useEffect, useState} from "react";
-import {Alert, Button, Checkbox, Group, List, Modal, Stack, Text} from "@mantine/core";
+import {Button, Checkbox, Group, List, Modal, Stack, Text} from "@mantine/core";
+import {GlassAlert} from "../ui/GlassAlert";
 import {IconAlertTriangle} from "@tabler/icons-react";
 import {api, type ScopePreview, type ScopePreviewTriggerKind} from "../../../lib/api";
 import {useAuth} from "../../../lib/auth-context";
@@ -67,11 +68,18 @@ function countSentence(reason: SaveGuardReason, p: ScopePreview): string {
     const matched = count(p.matched, p.truncated);
     const devices = plural(p.matched, "device", "devices");
     if (!p.scope_is_empty) {
-        return `This scope matches ${matched} of the ${p.eligible.toLocaleString()} ${plural(
+        // Says which way the number cuts. "matches 437 of 1,040" left people reading it as a limit the flow
+        // imposes on itself either way round, so the sentence now names what is left out.
+        if (p.matched >= p.eligible) {
+            return `This scope matches all ${p.eligible.toLocaleString()} ${plural(
+                p.eligible, "device", "devices")} this start can reach right now.`;
+        }
+        return `This flow will only run on ${matched} of the ${p.eligible.toLocaleString()} ${plural(
             p.eligible,
             "device",
             "devices",
-        )} it can reach right now.`;
+        )} this start can reach right now. The other ${(p.eligible - p.matched).toLocaleString()} ${plural(
+            p.eligible - p.matched, "device is", "devices are")} out of scope.`;
     }
     if (p.total === 0) return "No devices are enrolled right now.";
     switch (reason.kind) {
@@ -190,7 +198,7 @@ export function FlowSaveConfirmModal({
         >
             <Stack gap="md">
                 {blocked && (
-                    <Alert
+                    <GlassAlert
                         color="red"
                         variant="light"
                         title={`The server will reject this save (${serverErrors.length} ${
@@ -206,13 +214,13 @@ export function FlowSaveConfirmModal({
                                 <List.Item key={`server-error-${i}`}>{e}</List.Item>
                             ))}
                         </List>
-                    </Alert>
+                    </GlassAlert>
                 )}
                 {reasons.map((r, i) => {
                     const p = previews[previewKey(r)];
                     const examples = p ? sampleSentence(p) : null;
                     return (
-                        <Alert key={`${r.nodeId ?? "server"}::${i}`} color="yellow" variant="light">
+                        <GlassAlert key={`${r.nodeId ?? "server"}::${i}`} color="yellow" variant="light">
                             <Text fz="sm">{r.message}</Text>
                             {p && (
                                 <Text fz="sm" fw={600} mt={4}>
@@ -224,7 +232,7 @@ export function FlowSaveConfirmModal({
                                     {examples}
                                 </Text>
                             )}
-                        </Alert>
+                        </GlassAlert>
                     );
                 })}
                 <Text fz="xs" c="dimmed">

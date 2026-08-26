@@ -467,7 +467,7 @@ export function validateFlowClient(flow: FlowDoc, catalog: FlowNodeSpec[]): Flow
         for (const [node, ref] of cycles) {
             errors.push({
                 nodeId: node,
-                message: `This node loops back to "${ref}", so the flow can never finish. Flows must be acyclic.`,
+                message: `This node creates an infinite loop with "${ref}".`,
             });
         }
         if (cycles.length === 0) {

@@ -19,10 +19,11 @@
     --mm-ty: 0px;
     --mm-rot: 0deg;
 
-    /* Glass / frosted-panel layout */
+    /* Glass / frosted-panel layout. The leans are lengths: mm-glass-lift feeds them to translate3d, which
+       rejects the whole declaration if they carry an angle. */
     --mm-glass-px: 0px;
-    --mm-glass-lean-x: 0deg;
-    --mm-glass-lean-y: 0deg;
+    --mm-glass-lean-x: 0px;
+    --mm-glass-lean-y: 0px;
 
     /* Swipe gesture feedback */
     --mm-swipe-tint: transparent;
@@ -40,6 +41,24 @@ body {
 }
 
 /*  Sidebar  */
+
+/* The navbar is dark whatever the page's colour scheme is, so its rows take the dark-scheme highlight rather than
+   the light one, which would put a blue bloom on a near-black surface. Doubled class for the same reason as the
+   controls above: mm-glass-reactive sets these further down the sheet. */
+.mm-nav-surface .mm-glass-reactive.mm-glass-reactive {
+    --mm-glass-glow-tint: #fff;
+    --mm-glass-peak: 9%;
+    --mm-glass-wash-strength: 5%;
+}
+
+.mm-nav-surface .mm-glass-lift-quiet:hover,
+.mm-nav-surface .mm-glass-lift-quiet:focus-visible {
+    /* A nav row leans toward the pointer but casts no shadow: it sits on the navbar rather than over it. */
+    box-shadow: none;
+    --mm-glass-peak: 9%;
+    --mm-glass-wash-strength: 5%;
+}
+
 
 /* Dark in both colour schemes, since it is the frame the app sits in rather than part of the page. */
 .mm-nav-surface {
@@ -157,6 +176,107 @@ body {
 
 .mantine-AppShell-navbar .mantine-ScrollArea-scrollbar:hover {
     background-color: var(--mantine-color-dark-6);
+}
+
+/*  Controls on the material  */
+
+/* Buttons and icon buttons, through the component defaults in lib/theme.ts. The glow rides on the variant's own
+   background rather than replacing it, so a red button stays red and only the way it answers the pointer changes.
+   The gradients paint over background-color, which is what the variants set. */
+/* Text fields, through the component defaults in lib/theme.ts. Quieter than a button: the highlight tracks the
+   pointer across the field and nothing else changes, since a field that lit up on hover would read as clickable.
+   Doubled class for the same source-order reason as the controls below. */
+.mm-glass-field.mm-glass-field {
+    --mm-glass-peak: 7%;
+    --mm-glass-wash-strength: 3%;
+}
+
+/* Doubled class throughout this block: mm-glass-reactive sets the same variables further down the sheet, and at
+   equal specificity the later rule would win. */
+.mm-glass-control.mm-glass-control {
+    /* A control is small, so the bloom has to be tighter and brighter than the one a card gets or it reads as a
+       flat wash across the whole button. */
+    --mm-glass-peak: 12%;
+    --mm-glass-wash-strength: 7%;
+    --mm-glass-press-reach: 5rem;
+    --mm-glass-press-peak: 12%;
+    /* The highlight takes the control's own colour rather than the app's primary one, so a red button glows red
+       and an orange one orange. Mantine publishes that colour per control: --button-color on a Button,
+       --ai-color on an ActionIcon. On a filled control both are white already, which is what a filled button
+       wants over its own fill. */
+    --mm-glass-glow-tint: var(--button-color, var(--ai-color, var(--mantine-primary-color-filled)));
+    isolation: isolate;
+}
+
+/* Doubled class to outweigh .mm-glass-lift-quiet:hover, which tunes the bloom for a large surface. The rise from
+   the quiet lift is right for a button; its faint tint is not. */
+.mm-glass-control.mm-glass-control:hover,
+.mm-glass-control.mm-glass-control:focus-visible,
+.mm-glass-control.mm-glass-control:focus-within {
+    --mm-glass-peak: 12%;
+    --mm-glass-wash-strength: 7%;
+}
+
+.mm-glass-control.mm-glass-control[data-variant="filled"] {
+    --mm-glass-peak: 16%;
+}
+
+/* The neutral variants publish the body text colour, which is black in the light scheme and would read as a
+   smudge rather than a highlight. They take the app's own tint instead. */
+.mm-glass-control.mm-glass-control[data-variant="default"],
+.mm-glass-control.mm-glass-control[data-variant="transparent"] {
+    --mm-glass-glow-tint: var(--mantine-primary-color-filled);
+}
+
+/* The dark scheme turns every reactive surface's highlight white further down this sheet, which would take the
+   colour back off a red or orange control. Controls keep their own colour in both schemes; the neutral variants
+   above still fall through to the app tint, since their selectors outrank this one. */
+[data-mantine-color-scheme="dark"] .mm-glass-control.mm-glass-control {
+    --mm-glass-glow-tint: var(--button-color, var(--ai-color, var(--mantine-primary-color-filled)));
+}
+
+/* A control on a card or a panel is something interactive inside something else interactive, so it answers
+   more quietly and lets the surface under it carry the movement. mm-glass-surface-soft is the discriminator:
+   cards and the flow panels wear it, overlays do not, so a modal's own buttons keep full strength.
+   glass-pointer lends the control's colour up to the surface while the pointer is on it, which is what makes
+   hovering Erase bloom the whole card red.
+
+   Deliberately says nothing about the tint: that is set per scheme further down, and naming it here would
+   take the colour back off a red or orange control in the dark scheme. */
+.mm-glass-surface-soft .mm-glass-control.mm-glass-control {
+    --mm-glass-peak: 7%;
+    --mm-glass-wash-strength: 8%;
+    --mm-glass-press-reach: 7rem;
+    --mm-glass-press-peak: 8%;
+}
+
+/* Four classes deep, to outrank .mm-glass-lift-quiet:hover. The control gives up its own rise and shadow:
+   one surface moves under the pointer, and it is the card. */
+.mm-glass-surface-soft .mm-glass-control.mm-glass-control:hover,
+.mm-glass-surface-soft .mm-glass-control.mm-glass-control:focus-visible,
+.mm-glass-surface-soft .mm-glass-control.mm-glass-control:focus-within {
+    --mm-glass-peak: 7%;
+    --mm-glass-wash-strength: 8%;
+    --mm-glass-lift-scale: 1;
+    box-shadow: none;
+}
+
+/* A control that cannot be pressed does not answer the pointer. */
+.mm-glass-control.mm-glass-control:disabled,
+.mm-glass-control.mm-glass-control[data-disabled],
+.mm-glass-control.mm-glass-control[data-loading] {
+    cursor: default;
+    background-image: none;
+    --mm-glass-lift-scale: 1;
+    --mm-glass-lean-x: 0px;
+    --mm-glass-lean-y: 0px;
+}
+
+/* A disabled control wrapped in a Tooltip keeps the pointer cursor from mm-glass-interactive on the wrapper,
+   which promises a click that does nothing. */
+.mm-glass-control.mm-glass-control:disabled:hover,
+.mm-glass-control.mm-glass-control[data-disabled]:hover {
+    box-shadow: none;
 }
 
 /* Reusable translucent material for overlays, palettes and side panels. Modal and Drawer pick it up from the
@@ -475,6 +595,12 @@ body {
 }
 
 
+/* The peek dialog's own scale comes from its transitionProps, so nothing here competes with the inline styles
+   Mantine writes while that transition runs. This is only the resting look. */
+.mm-peek-content {
+    will-change: transform, opacity;
+}
+
 /* Recovery credential reveal, drawn as a pane of glass over a key that breaks to get at it. */
 
 .mm-shatter {
@@ -571,20 +697,41 @@ body {
 
 /* Copy button that stays out of the way until the row is hovered or focused. */
 
-.mm-copy-value-button {
-    opacity: 0;
-    transition: opacity 120ms ease;
+/* A copyable value. The affordance is the text itself, tinted on hover and for a moment after the copy, so a
+   value that offers to be copied takes up exactly as much room as one that does not and a column of them stays
+   aligned. Nothing here changes the box: no border, no padding, no inline button. */
+.mm-copy-text {
+    cursor: pointer;
+    border-radius: var(--mantine-radius-xs);
+    /* Extends the tint a little past the glyphs without moving them. */
+    box-shadow: 0 0 0 3px transparent;
+    background-color: transparent;
+    transition: background-color 120ms ease, box-shadow 120ms ease, color 120ms ease;
 }
 
-.mm-copy-value:hover .mm-copy-value-button,
-.mm-copy-value:focus-within .mm-copy-value-button {
-    opacity: 1;
+.mm-copy-text:hover {
+    background-color: var(--mantine-color-default-hover);
+    box-shadow: 0 0 0 3px var(--mantine-color-default-hover);
 }
 
-/* No hover on touch, so the button would never appear. */
-@media (hover: none) {
-    .mm-copy-value-button {
-        opacity: 1;
+.mm-copy-text:focus-visible {
+    outline: 2px solid var(--mantine-color-blue-5);
+    outline-offset: 2px;
+}
+
+.mm-copy-text[data-copied] {
+    color: var(--mantine-color-teal-7);
+    background-color: color-mix(in srgb, var(--mantine-color-teal-6) 16%, transparent);
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--mantine-color-teal-6) 16%, transparent);
+}
+
+[data-mantine-color-scheme="dark"] .mm-copy-text[data-copied] {
+    color: var(--mantine-color-teal-3);
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .mm-copy-text {
+        transition: none;
     }
 }
 
@@ -967,7 +1114,12 @@ html {
 
 .mm-swipe-clip {
     position: relative;
-    overflow: hidden;
+    /* Hides the action panels waiting off each side. It has to clip sideways and only sideways: the row inside
+       rises a little under the pointer, and a box the exact size of the row shaved the top and bottom off that
+       as it grew. "clip" rather than "hidden" is what lets the other axis stay visible; hidden on one axis
+       forces the other to auto, which both scrolls and clips. */
+    overflow-x: clip;
+    overflow-y: visible;
     min-width: 0;
     border-radius: var(--mantine-radius-md) var(--mantine-radius-md) var(--mantine-radius-sm) var(--mantine-radius-sm);
     overscroll-behavior-x: contain;
@@ -1083,8 +1235,8 @@ html {
 .mm-alert-row {
     display: flex;
     flex-direction: column;
-    gap: 1px;
-    padding: 6px 8px;
+    gap: 0;
+    padding: 4px 8px;
     /* Lets a long summary shorten to the column instead of widening it. */
     min-width: 0;
 }

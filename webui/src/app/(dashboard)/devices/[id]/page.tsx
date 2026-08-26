@@ -90,8 +90,11 @@ import {useAuth} from "../../../../../lib/auth-context";
 import {TaskDetailDrawer} from "@/components/TaskDetailDrawer";
 import {TaskErrorBody} from "@/components/TaskErrorPanel";
 import {CommandsPanel, QuickActionsCard, RefreshButton} from "@/components/DeviceCommandKit";
-import {DeviceTagsCard} from "@/components/DeviceTagsCard";
-import {CopyValue} from "@/components/CopyValue";
+import {FactRow} from "@/components/ui/FactRow";
+import {GlassAlert} from "@/components/ui/GlassAlert";
+import {glassClassName} from "@/components/ui/glass";
+import {Value} from "@/components/ui/Value";
+import {DeviceTagsField} from "@/components/DeviceTagsField";
 import {PageSkeleton} from "@/components/layout/PageSkeleton";
 import {SidebarLayout} from "@/components/layout/SidebarLayout";
 import {BreakTheGlassCard} from "@/components/BreakTheGlassCard";
@@ -172,33 +175,6 @@ function pick(obj: unknown, ...keys: string[]): string {
 
 //  Small display primitives
 
-// details renders under the label and value line at the row's full width. StructuredFactRow uses it for expanded
-// JSON.
-function FactRow({
-                     label,
-                     children,
-                     details,
-                 }: {
-    label: string;
-    children: React.ReactNode;
-    details?: React.ReactNode;
-}) {
-    return (
-        <Box style={{borderBottom: "1px solid var(--mantine-color-default-border)", padding: "7px 0"}}>
-            <Group justify="space-between" wrap="nowrap" gap="lg" align="flex-start">
-                {/* Inventory keys run past 60 characters with no spaces, so the label wraps and breaks
-                    mid-token rather than overflowing into the next column. */}
-                <Text fz="sm" c="dimmed" style={{minWidth: 0, overflowWrap: "anywhere"}}>{label}</Text>
-                {/* Never shrinks, since a squeezed column truncated a Yes/No badge to "Y...". The cap is
-                    wide enough for a 36 character UDID on one line. */}
-                <div style={{textAlign: "right", flexShrink: 0, maxWidth: "75%", overflowWrap: "anywhere"}}>
-                    {children}
-                </div>
-            </Group>
-            {details}
-        </Box>
-    );
-}
 
 // Structured inventory values. Apple reports arrays and dictionaries for keys like the firewall app exceptions and
 // OSUpdateSettings, which reach the fact tables as one long line of raw JSON. Parsing that text back lets the row
@@ -282,7 +258,7 @@ function BoolOrText({item}: { item: AttrItem }) {
             </Badge>
         );
     }
-    return <Text fz="sm" style={{wordBreak: "break-word"}}>{item.value}</Text>;
+    return <Value label={item.label}>{item.value}</Value>;
 }
 
 function PropertyGrid({items}: { items: AttrItem[] }) {
@@ -1135,6 +1111,14 @@ function isUnrevealedSecrets409(e: ApiError): boolean {
     return /escrowed secret/i.test(e.message);
 }
 
+// The page fills the window and scrolls its two columns rather than itself, so the device's name, its state and
+// whatever it is complaining about stay in view while the detail under them is read. The subtraction is the
+// dashboard layout's own padding (spacing lg, top and bottom).
+const PAGE_HEIGHT = "calc(100vh - var(--mantine-spacing-lg) * 2)";
+
+// Space between the floating banners and the first card under them.
+const BANNER_GAP = 12;
+
 export default function DeviceDetailPage({params}: { params: Promise<{ id: string }> }) {
     const {id} = use(params);
     const {token, isAdmin} = useAuth();
@@ -1370,6 +1354,35 @@ export default function DeviceDetailPage({params}: { params: Promise<{ id: strin
 
     // Single trigger for the lazy sections: opening one, and having one already open when the reset above clears
     // it. A recorded error blocks the refetch so a failure does not retry in a loop; re-entering clears and retries.
+    const bannerRef = useRef<HTMLDivElement | null>(null);
+    const [bannerHeight, setBannerHeight] = useState(0);
+    const [errorDismissed, setErrorDismissed] = useState(false);
+    const [stateDismissed, setStateDismissed] = useState(false);
+
+    // The banners can be put away. A different failure arriving brings the banner back, since dismissing one
+    // says nothing about the next.
+    const errorKey = detail?.device?.last_task_error?.task_id ?? null;
+    useEffect(() => {
+        setErrorDismissed(false);
+    }, [errorKey]);
+
+    // How much of the columns the banners cover, measured rather than assumed: the text wraps to a different
+    // number of lines depending on the window and on what went wrong.
+    useEffect(() => {
+        const el = bannerRef.current;
+        if (!el) {
+            setBannerHeight(0);
+            return;
+        }
+        const measure = () => setBannerHeight(el.getBoundingClientRect().height
+            ? Math.round(el.getBoundingClientRect().height) + BANNER_GAP
+            : 0);
+        measure();
+        const observer = new ResizeObserver(measure);
+        observer.observe(el);
+        return () => observer.disconnect();
+    }, [errorKey, errorDismissed, stateDismissed]);
+
     useEffect(() => {
         if (section === "scope" && !scope && !scopeError && !scopeLoading) loadScope();
         if (section === "declarations" && !ddm && !ddmError && !ddmLoading) loadDdm();
@@ -1600,8 +1613,8 @@ export default function DeviceDetailPage({params}: { params: Promise<{ id: strin
     ];
 
     return (
-        <Stack gap="lg">
-            <Group justify="space-between">
+        <Stack gap="lg" style={{height: PAGE_HEIGHT, minHeight: 0}}>
+            <Group justify="space-between" style={{flexShrink: 0}}>
                 <Group>
                     <ActionIcon variant="subtle" onClick={() => router.push("/devices")}>
                         <IconArrowLeft size={18}/>
@@ -1698,49 +1711,73 @@ export default function DeviceDetailPage({params}: { params: Promise<{ id: strin
                 </Group>
             </Group>
 
-            {/* Explained in plain words. The upstream text names internal service hostnames and links to generic
-          HTTP status docs, so it stays behind "Technical details". */}
-            {device.last_task_error && (
-                <Alert color="red" variant="light" icon={<IconAlertTriangle size={16}/>}>
-                    <Text fz="sm" fw={600}>
-                        {describeTaskType(device.last_task_error.task_type)} failed
-                        {device.last_task_error.completed_at
-                            ? ` ${timeSince(device.last_task_error.completed_at)}`
-                            : device.last_task_error.created_at
-                                ? ` ${timeSince(device.last_task_error.created_at)}`
-                                : ""}
-                    </Text>
-                    {device.last_task_error.error ? (
-                        <TaskErrorBody error={device.last_task_error.error}/>
-                    ) : (
-                        <Text fz="sm">No reason was recorded.</Text>
-                    )}
-                </Alert>
-            )}
-
-            {!enrolled && (
-                <Alert
-                    color={device.enrollment_state === "pending" ? "indigo" : "gray"}
-                    variant="light"
-                    icon={<IconInfoCircle size={16}/>}
+            {/* The banners float over the columns rather than pushing them down the page, and the columns start
+                below them so nothing opens covered. Scrolling then runs the content up behind the glass, which
+                is the point of putting them on it. */}
+            <Box style={{position: "relative", flex: 1, minHeight: 0}}>
+                <Stack
+                    ref={bannerRef}
+                    gap="xs"
+                    style={{position: "absolute", insetInline: 0, top: 0, zIndex: 3, pointerEvents: "none"}}
                 >
-                    {device.enrollment_state === "pending" ? (
-                        <>This device is <b>pre-provisioned</b> and hasn&apos;t enrolled yet. Its saved state
-                            (group membership) will apply automatically when it enrolls. Commands and live
-                            inventory become available after enrollment.</>
-                    ) : (
-                        <>This device is <b>unenrolled</b>
-                            {device.unenrolled_at ? ` (since ${new Date(device.unenrolled_at).toLocaleString()})` : ""}.
-                            Its history and last-known state are retained; if it re-enrolls, everything below is
-                            restored. Commands are unavailable while unenrolled.</>
+                    {/* Explained in plain words. The upstream text names internal service hostnames and links to
+                        generic HTTP status docs, so it stays behind "Technical details". */}
+                    {device.last_task_error && !errorDismissed && (
+                        <GlassAlert
+                            color="red"
+                            variant="light"
+                            icon={<IconAlertTriangle size={16}/>}
+                            withCloseButton
+                            closeButtonLabel="Dismiss this failure"
+                            onClose={() => setErrorDismissed(true)}
+                            style={{pointerEvents: "auto"}}
+                        >
+                            <Text fz="sm" fw={600}>
+                                {describeTaskType(device.last_task_error.task_type)} failed
+                                {device.last_task_error.completed_at
+                                    ? ` ${timeSince(device.last_task_error.completed_at)}`
+                                    : device.last_task_error.created_at
+                                        ? ` ${timeSince(device.last_task_error.created_at)}`
+                                        : ""}
+                            </Text>
+                            {device.last_task_error.error ? (
+                                <TaskErrorBody error={device.last_task_error.error}/>
+                            ) : (
+                                <Text fz="sm">No reason was recorded.</Text>
+                            )}
+                        </GlassAlert>
                     )}
-                </Alert>
-            )}
+
+                    {!enrolled && !stateDismissed && (
+                        <GlassAlert
+                            color={device.enrollment_state === "pending" ? "indigo" : "gray"}
+                            variant="light"
+                            icon={<IconInfoCircle size={16}/>}
+                            withCloseButton
+                            closeButtonLabel="Dismiss this notice"
+                            onClose={() => setStateDismissed(true)}
+                            style={{pointerEvents: "auto"}}
+                        >
+                            {device.enrollment_state === "pending" ? (
+                                <>This device is <b>pre-provisioned</b> and hasn&apos;t enrolled yet. Its saved
+                                    state (group membership) will apply automatically when it enrolls. Commands
+                                    and live inventory become available after enrollment.</>
+                            ) : (
+                                <>This device is <b>unenrolled</b>
+                                    {device.unenrolled_at ? ` (since ${new Date(device.unenrolled_at).toLocaleString()})` : ""}.
+                                    Its history and last-known state are retained; if it re-enrolls, everything
+                                    below is restored. Commands are unavailable while unenrolled.</>
+                            )}
+                        </GlassAlert>
+                    )}
+                </Stack>
 
             <SidebarLayout
+                fill
+                insetTop={bannerHeight}
                 sidebar={
                     <Stack gap="md">
-                        <GlassCard withBorder p="md">
+                        <GlassCard withBorder p="md" lift="quiet">
                             <Group wrap="nowrap" gap="sm">
                                 <ThemeIcon size={54} variant="light">
                                     <DevIcon size={34}/>
@@ -1760,9 +1797,12 @@ export default function DeviceDetailPage({params}: { params: Promise<{ id: strin
                                 {bool(attrs.IsMDMLostModeEnabled) &&
                                     <Badge size="xs" variant="light" color="red">Lost Mode</Badge>}
                             </Group>
+                            <Box mt="sm">
+                                <DeviceTagsField device={device} onChanged={handleDispatched}/>
+                            </Box>
                         </GlassCard>
 
-                        <GlassCard withBorder p={6}>
+                        <GlassCard withBorder p={6} lift="quiet">
                             {SECTIONS.map((s) => (
                                 <NavLink
                                     key={s.value}
@@ -1775,6 +1815,10 @@ export default function DeviceDetailPage({params}: { params: Promise<{ id: strin
                                         if (s.value === "scope") setScopeError(null);
                                         if (s.value === "declarations") setDdmError(null);
                                     }}
+                                    // A row inside a surface that is itself answering the pointer, so it
+                                    // answers more quietly and lends the card its colour rather than
+                                    // competing with it.
+                                    className={glassClassName({material: "none", nested: true})}
                                     style={{borderRadius: "var(--mantine-radius-sm)"}}
                                 />
                             ))}
@@ -1796,37 +1840,35 @@ export default function DeviceDetailPage({params}: { params: Promise<{ id: strin
                         <GlassCard withBorder p="md">
                             <Text fz="sm" fw={600} mb="xs">Details</Text>
                             <SimpleGrid cols={{base: 1, md: 2}} spacing="xl" verticalSpacing={0}>
-                                <FactRow label="Hostname">{device.hostname
-                                    ? <CopyValue value={device.hostname} label="hostname"/>
-                                    : <Text fz="sm">--</Text>}</FactRow>
-                                <FactRow label="Model"><Text
-                                    fz="sm">{pick(attrs, "ModelName", "ProductName") !== "--" ? pick(attrs, "ModelName", "ProductName") : device.device_model}</Text></FactRow>
-                                <FactRow label="Serial">
-                                    <CopyValue value={device.serial_number} mono label="serial number"/>
-                                </FactRow>
+                                <FactRow label="Hostname" value={device.hostname || "--"}/>
+                                <FactRow
+                                    label="Model"
+                                    value={pick(attrs, "ModelName", "ProductName") !== "--"
+                                        ? pick(attrs, "ModelName", "ProductName")
+                                        : device.device_model}
+                                />
+                                <FactRow label="Serial" value={device.serial_number} mono/>
                                 <FactRow label="OS version">
-                                    <Text fz="sm">
-                                        {device.os_version}
-                                        {typeof attrs.BuildVersion === "string" ?
-                                            <Text span fz="xs" c="dimmed"> ({attrs.BuildVersion})</Text> : null}
-                                    </Text>
+                                    <Value label="OS version">{device.os_version}</Value>
+                                    {typeof attrs.BuildVersion === "string" ?
+                                        <Text span fz="xs" c="dimmed"> ({attrs.BuildVersion})</Text> : null}
                                 </FactRow>
-                                <FactRow label="UDID">{device.udid
-                                    ? <CopyValue value={device.udid} mono fz="xs" label="UDID"/>
-                                    : <Text fz="sm">--</Text>}</FactRow>
+                                <FactRow label="UDID" value={device.udid || "--"} mono/>
                                 {/* A pre-provisioned device has never enrolled, so this column holds the date
-                      its record was created. */}
-                                <FactRow label={device.enrollment_state === "pending" ? "Added" : "Enrolled"}>
-                                    <Text fz="sm">{new Date(device.enrollment_date).toLocaleDateString()}</Text>
-                                </FactRow>
+                      its record was created. A date is not something anyone retypes. */}
+                                <FactRow
+                                    label={device.enrollment_state === "pending" ? "Added" : "Enrolled"}
+                                    value={new Date(device.enrollment_date).toLocaleDateString()}
+                                    copyable={false}
+                                />
                                 {/* last_seen, in the header badge, is when the device last spoke on its own.
                       This is the poll schedule, which backs off the longer a device stays
                       quiet. */}
-                                <FactRow label="Last polled">
-                                    <Text fz="sm">
-                                        {timeSince(device.last_polled_at)}, every {device.poll_interval_minutes} min
-                                    </Text>
-                                </FactRow>
+                                <FactRow
+                                    label="Last polled"
+                                    value={`${timeSince(device.last_polled_at)}, every ${device.poll_interval_minutes} min`}
+                                    copyable={false}
+                                />
                                 <CheckRow label="Supervised" value={bool(attrs.IsSupervised)}/>
                                 <FactRow label="Member of">
                                     <Group gap={4} justify="flex-end">
@@ -1838,8 +1880,6 @@ export default function DeviceDetailPage({params}: { params: Promise<{ id: strin
                                 </FactRow>
                             </SimpleGrid>
                         </GlassCard>
-
-                        <DeviceTagsCard device={device} onChanged={handleDispatched}/>
 
                         {isAdmin && <BreakTheGlassCard deviceId={device.id}/>}
 
@@ -2184,6 +2224,7 @@ export default function DeviceDetailPage({params}: { params: Promise<{ id: strin
                     />
                 )}
             </SidebarLayout>
+            </Box>
 
             <TaskDetailDrawer
                 task={selectedTask}

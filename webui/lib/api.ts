@@ -1063,10 +1063,13 @@ export interface DiscoveredTenant {
 export interface CommandParam {
     name: string;
     label: string;
-    type: "string" | "text" | "pin";
+    // "list" takes several of options below, comma separated; the server refuses a value outside them.
+    type: "string" | "text" | "pin" | "list";
     required: boolean | "mac"; // "mac" = required when the target device is a Mac
     secret?: boolean;
     help?: string;
+    // The values a "list" param accepts, published so the form can refuse one before the command is sent.
+    options?: string[];
 }
 
 export interface CatalogCommand {
@@ -1635,7 +1638,10 @@ export interface FlowNodeParamSpec {
     type: string;
     required?: boolean;
     help?: string;
-    options?: { value: string; label: string; description?: string }[];
+    // Warns the editor to say this value lands in plain-text, versioned yaml.
+    secret?: boolean;
+    // scope rides along on the start node's trigger options, which are the start kinds.
+    options?: { value: string; label: string; description?: string; scope?: string }[];
 }
 
 export interface FlowNodeSpec {

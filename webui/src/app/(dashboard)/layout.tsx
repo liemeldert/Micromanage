@@ -21,6 +21,7 @@ import {IconChevronRight, IconLogout, IconMoon, IconSearch, IconSun} from "@tabl
 import {useAuth} from "../../../lib/auth-context";
 import {SHOW_YAML_STORAGE_KEY} from "../../../lib/preferences";
 import {activeHref, NAV_GROUPS, type PaletteDestination, sidebarTree} from "../../../lib/palette";
+import {glassClassName} from "@/components/ui/glass";
 import {CommandPalette, commandPalette} from "@/components/CommandPalette";
 
 const BRAND_GRADIENT: React.CSSProperties = {
@@ -138,7 +139,9 @@ export default function DashboardLayout({children}: { children: React.ReactNode 
 
                     <AppShell.Section px="xs" pb="xs">
                         <UnstyledButton
-                            className="mm-nav-search"
+                            className={glassClassName({
+                                material: "none", interactive: true, lift: "quiet", className: "mm-nav-search",
+                            })}
                             onClick={() => {
                                 close();
                                 commandPalette.open();
@@ -171,7 +174,10 @@ export default function DashboardLayout({children}: { children: React.ReactNode 
                             return (
                                 <Box key={entry.group.id} mb={2}>
                                     <UnstyledButton
-                                        className="mm-nav-link mm-nav-group"
+                                        className={glassClassName({
+                                            material: "none", interactive: true, lift: "quiet",
+                                            className: "mm-nav-link mm-nav-group",
+                                        })}
                                         onClick={() => toggleGroup(entry.group.id)}
                                         aria-expanded={expanded}
                                         // A closed section holding the current page is
@@ -270,7 +276,9 @@ function NavItem({
         // and the destination shows in the status bar.
         <Link
             href={destination.href}
-            className="mm-nav-link"
+            className={glassClassName({
+                material: "none", interactive: true, lift: "quiet", className: "mm-nav-link",
+            })}
             data-active={active ? true : undefined}
             data-child={child ? true : undefined}
             // On a phone the navbar is an overlay: leaving it open would cover the

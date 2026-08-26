@@ -77,6 +77,15 @@ const PALETTE_DRAG_MIME = "application/x-micromanage-flow-node";
 // Edge-peek states for the palette, closed through to click-pinned.
 type PaletteMode = "closed" | "peek" | "open" | "pinned";
 
+// The palette floats over the canvas, in the band left between the toolbar across the top and the canvas floor.
+// Sized to sit alongside the app's navigation rather than outweigh it.
+//
+// The band is symmetric: the top has to clear the toolbar, and the bottom matches it so the panel reads as
+// centred on the canvas whether its block list fills the band or falls short of it.
+const PALETTE_WIDTH = 260;
+const PALETTE_BAND_TOP = 56;
+const PALETTE_BAND_BOTTOM = 56;
+
 // Hover intent delays. The leave grace is long enough to cross a gap without the palette snapping shut.
 const PALETTE_PEEK_DELAY = 90;
 const PALETTE_CLOSE_DELAY = 300;
@@ -669,19 +678,24 @@ function FlowEditorInner({
                     radius="xl"
                     style={{
                         position: "absolute",
-                        // Clears the toolbar floating over the canvas.
-                        top: 56,
-                        bottom: 8,
+                        // Centred in the band between the toolbar floating over the canvas and the canvas floor,
+                        // rather than pinned near the top of it. maxHeight is what stops a long block list from
+                        // growing out of that band; a short one just sits in the middle of it.
+                        top: PALETTE_BAND_TOP,
+                        bottom: PALETTE_BAND_BOTTOM,
                         left: 8,
-                        width: 320,
+                        margin: "auto 0",
+                        height: "fit-content",
+                        maxHeight: `calc(100% - ${PALETTE_BAND_TOP + PALETTE_BAND_BOTTOM}px)`,
+                        width: PALETTE_WIDTH,
                         zIndex: 5,
                         display: "flex",
                         flexDirection: "column",
-                        padding: 14,
+                        padding: 10,
                     }}
                 >
-                    <Group justify="center" mb={8} style={{position: "relative"}}>
-                        <Text fz="lg" fw={800} ta="center">
+                    <Group justify="center" mb={4} style={{position: "relative"}}>
+                        <Text fz="sm" fw={700} ta="center">
                             Palette
                         </Text>
                         {/* Glass, so the button reads as a control resting on the soft panel. */}
@@ -689,30 +703,31 @@ function FlowEditorInner({
                             className={glassClassName({material: "overlay", reactive: false})}
                             variant="subtle"
                             color="gray"
+                            size="sm"
                             onClick={closePalette}
                             style={{position: "absolute", right: 0, top: "50%", transform: "translateY(-50%)"}}
                         >
-                            <IconChevronLeft size={16}/>
+                            <IconChevronLeft size={14}/>
                         </ActionIcon>
                     </Group>
-                    <Text fz="sm" c="dimmed" ta="center" mb="md">
+                    <Text fz="xs" c="dimmed" ta="center" mb="xs">
                         Drag a block onto the canvas, or click Add.
                     </Text>
                     <Box style={{flex: 1, minHeight: 0}}>
                         <ScrollArea h="100%" offsetScrollbars>
-                            <Stack gap="sm">
+                            <Stack gap="xs">
                                 {Object.entries(paletteGroups).map(([cat, specs]) => (
                                     <Box key={cat}>
-                                        <Text fz={10} c="dimmed" tt="uppercase" mb={6}>
+                                        <Text fz={9} c="dimmed" tt="uppercase" mb={4}>
                                             {cat}
                                         </Text>
-                                        <Stack gap={8}>
+                                        <Stack gap={6}>
                                             {specs.map((s) => (
                                                 <Paper
                                                     key={s.type}
                                                     className={glassClassName({material: "thin", reactive: false})}
-                                                    p="xs"
-                                                    radius="lg"
+                                                    p={8}
+                                                    radius="md"
                                                     draggable={!readOnly}
                                                     onDragStart={(ev) => onPaletteDragStart(ev, s)}
                                                     onDragEnd={onPaletteDragEnd}
@@ -720,21 +735,22 @@ function FlowEditorInner({
                                                 >
                                                     <Group justify="space-between" align="flex-start" wrap="nowrap">
                                                         <Box style={{minWidth: 0}}>
-                                                            <Text fz="sm" fw={700} truncate>
+                                                            <Text fz="xs" fw={700} truncate>
                                                                 {s.label}
                                                             </Text>
-                                                            <Text fz={10} c="dimmed">
+                                                            <Text fz={9} c="dimmed">
                                                                 {s.type}
                                                             </Text>
                                                         </Box>
-                                                        <Badge variant="light" color={CATEGORY_COLOR[cat] ?? "indigo"}>
+                                                        <Badge size="xs" variant="light"
+                                                               color={CATEGORY_COLOR[cat] ?? "indigo"}>
                                                             {cat}
                                                         </Badge>
                                                     </Group>
-                                                    <Text fz="xs" c="dimmed" lineClamp={2} mt={6}>
+                                                    <Text fz={10} c="dimmed" lineClamp={2} mt={4}>
                                                         {shortDescription(s.description)}
                                                     </Text>
-                                                    <Group gap={6} mt="xs">
+                                                    <Group gap={6} mt={6}>
                                                         <Button
                                                             size="compact-xs"
                                                             color={CATEGORY_COLOR[cat] ?? "indigo"}

@@ -118,6 +118,15 @@ export function BreakTheGlassCard({deviceId}: { deviceId: string }) {
         }
     };
 
+    // Every way out of the confirm modal, so a cancel cannot leave a broken pane and an unread password behind
+    // for the next secret someone opens.
+    const closeConfirm = () => {
+        setTarget(null);
+        setRevealError(null);
+        setBroken(false);
+        setPending(null);
+    };
+
     const finishReveal = () => {
         setRevealed(pending);
         setPending(null);
@@ -229,107 +238,85 @@ export function BreakTheGlassCard({deviceId}: { deviceId: string }) {
                 </Text>
             )}
 
-            {/* Step 1: confirm, spelling out what the reveal costs. */}
+            {/* One pane for both steps. The glass breaks and the password appears behind it, rather than one
+                modal handing over to another and both cross-fading on the way. */}
             <Modal
-                opened={target !== null}
-                onClose={() => {
-                    setTarget(null);
-                    setRevealError(null);
-                    setBroken(false);
-                    setPending(null);
-                }}
-                title="Break the glass?"
+                opened={target !== null || revealed !== null}
+                onClose={revealed ? () => setRevealed(null) : closeConfirm}
+                title={revealed ? revealed.kind_label : "Break the glass?"}
                 centered
             >
-                <Stack gap="sm">
-                    <GlassShatter broken={broken} onBroken={finishReveal}/>
-                    <Alert
-                        color="orange"
-                        variant="light"
-                        icon={<IconAlertTriangle size={16}/>}
-                    >
-                        You are about to reveal the <b>{target?.kind_label.toLowerCase()}</b>
-                        {target?.label ? ` (${target.label})` : ""}. This is recorded against your
-                        account and raises an alert on the device. Being on the device may expose you to
-                        privileged or classified information. Make sure you are authorized to access it.
-                    </Alert>
-                    {revealError && (
-                        <Alert color="red" variant="light" icon={<IconAlertTriangle size={16}/>}>
-                            <Text fz="sm" style={{whiteSpace: "pre-wrap"}}>
-                                {revealError}
-                            </Text>
+                {revealed ? (
+                    <Stack gap="sm">
+                        <Alert color="orange" variant="light" icon={<IconAlertTriangle size={16}/>}>
+                            Shown once. You will raise another alert if you retrieve it again.
                         </Alert>
-                    )}
-                    <Group justify="flex-end">
-                        <Button
-                            variant="default"
-                            onClick={() => {
-                                setTarget(null);
-                                setRevealError(null);
+                        {revealed.label && (
+                            <Text fz="sm">
+                                Account / label: <b>{revealed.label}</b>
+                            </Text>
+                        )}
+                        <Group
+                            justify="space-between"
+                            wrap="nowrap"
+                            p="xs"
+                            style={{
+                                border: "1px solid var(--mantine-color-default-border)",
+                                borderRadius: "var(--mantine-radius-sm)",
+                                fontFamily: "var(--mantine-font-family-monospace)",
                             }}
-                            disabled={revealing}
                         >
-                            Cancel
-                        </Button>
-                        <Button color="orange" onClick={breakGlass} loading={revealing}>
-                            {revealError ? "Try again" : "Reveal password"}
-                        </Button>
-                    </Group>
-                </Stack>
+                            <Text fz="sm" style={{wordBreak: "break-all"}}>
+                                {revealed.value}
+                            </Text>
+                            <CopyButton value={revealed.value ?? ""}>
+                                {({copied, copy}) => (
+                                    <Button
+                                        size="xs"
+                                        variant="light"
+                                        color={copied ? "teal" : "gray"}
+                                        leftSection={copied ? <IconCheck size={14}/> : <IconCopy size={14}/>}
+                                        onClick={copy}
+                                    >
+                                        {copied ? "Copied" : "Copy"}
+                                    </Button>
+                                )}
+                            </CopyButton>
+                        </Group>
+                        <Group justify="flex-end">
+                            <Button variant="default" onClick={() => setRevealed(null)}>
+                                Done
+                            </Button>
+                        </Group>
+                    </Stack>
+                ) : (
+                    <Stack gap="sm">
+                        <GlassShatter broken={broken} onBroken={finishReveal}/>
+                        <Alert color="orange" variant="light" icon={<IconAlertTriangle size={16}/>}>
+                            You are about to reveal the <b>{target?.kind_label.toLowerCase()}</b>
+                            {target?.label ? ` (${target.label})` : ""}. This is recorded against your
+                            account and raises an alert on the device. Being on the device may expose you to
+                            privileged or classified information. Make sure you are authorized to access it.
+                        </Alert>
+                        {revealError && (
+                            <Alert color="red" variant="light" icon={<IconAlertTriangle size={16}/>}>
+                                <Text fz="sm" style={{whiteSpace: "pre-wrap"}}>
+                                    {revealError}
+                                </Text>
+                            </Alert>
+                        )}
+                        <Group justify="flex-end">
+                            <Button variant="default" onClick={closeConfirm} disabled={revealing}>
+                                Cancel
+                            </Button>
+                            <Button color="orange" onClick={breakGlass} loading={revealing}>
+                                {revealError ? "Try again" : "Reveal password"}
+                            </Button>
+                        </Group>
+                    </Stack>
+                )}
             </Modal>
 
-            {/* Step 2: the plaintext, shown once. */}
-            <Modal
-                opened={revealed !== null}
-                onClose={() => setRevealed(null)}
-                title={revealed?.kind_label ?? "Password"}
-                centered
-            >
-                <Stack gap="sm">
-                    <Alert color="orange" variant="light" icon={<IconAlertTriangle size={16}/>}>
-                        Shown once. You will raise another alert if you retrieve it again.
-                    </Alert>
-                    {revealed?.label && (
-                        <Text fz="sm">
-                            Account / label: <b>{revealed.label}</b>
-                        </Text>
-                    )}
-                    <Group
-                        justify="space-between"
-                        wrap="nowrap"
-                        p="xs"
-                        style={{
-                            border: "1px solid var(--mantine-color-default-border)",
-                            borderRadius: "var(--mantine-radius-sm)",
-                            fontFamily: "var(--mantine-font-family-monospace)",
-                        }}
-                    >
-                        <Text fz="sm" style={{wordBreak: "break-all"}}>
-                            {revealed?.value}
-                        </Text>
-                        <CopyButton value={revealed?.value ?? ""}>
-                            {({copied, copy}) => (
-                                <Button
-                                    size="xs"
-                                    variant="light"
-                                    color={copied ? "teal" : "gray"}
-                                    leftSection={
-                                        copied ? <IconCheck size={14}/> : <IconCopy size={14}/>
-                                    }
-                                    onClick={copy}
-                                >
-                                    {copied ? "Copied" : "Copy"}
-                                </Button>
-                            )}
-                        </CopyButton>
-                    </Group>
-                    <Group justify="flex-end">
-                        <Button variant="default" onClick={() => setRevealed(null)}>
-                            Done
-                        </Button>
-                    </Group>
-                </Stack>
-            </Modal>
         </GlassCard>
     );
 }

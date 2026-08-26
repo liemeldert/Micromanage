@@ -287,20 +287,35 @@ export default function DevicesPage() {
     }, []);
 
     // A printable key with nothing else focused goes to the search box, so typing narrows the list without
-    // clicking into it first.
+    // clicking into it first. An arrow key goes to the list, so it walks the rows rather than scrolling the
+    // window past them, which is what it did when no row had focus yet.
     useEffect(() => {
         const onKeyDown = (event: KeyboardEvent) => {
             if (event.metaKey || event.ctrlKey || event.altKey) return;
-            if (event.key.length !== 1) return;
+            // Something nearer the key already dealt with it. The search box is the one that matters: it takes
+            // the arrows to walk its own suggestions, and this would otherwise pull focus onto the table from
+            // under the list the reader is choosing from.
+            if (event.defaultPrevented) return;
             const active = document.activeElement as HTMLElement | null;
-            if (active && (active.tagName === "INPUT" || active.tagName === "TEXTAREA" || active.isContentEditable)) {
+            const typing = Boolean(active) && (active!.tagName === "INPUT" || active!.tagName === "TEXTAREA"
+                || active!.isContentEditable);
+
+            if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+                // A row already has it, and its own handler is walking the list.
+                if (active?.closest("tr[data-peek-id]")) return;
+                // A field takes its own arrows, and the search box hands the list its down-arrow itself.
+                if (typing) return;
+                event.preventDefault();
+                focusFirstRow();
                 return;
             }
+
+            if (event.key.length !== 1 || typing) return;
             searchInputRef.current?.focus();
         };
         window.addEventListener("keydown", onKeyDown);
         return () => window.removeEventListener("keydown", onKeyDown);
-    }, []);
+    }, [focusFirstRow]);
 
     const onRowKeyDown = (event: React.KeyboardEvent<HTMLTableRowElement>, device: Device) => {
         if (event.target !== event.currentTarget) return;
@@ -321,9 +336,10 @@ export default function DevicesPage() {
             return;
         }
         if (event.key === " ") {
-            // Space peeks, Enter opens. Without the default stopped, the page scrolls instead.
+            // Space peeks, Enter opens. Without the default stopped, the page scrolls instead. Pressing it
+            // again on the row being peeked puts the peek away, so the one key does both.
             event.preventDefault();
-            setPeekId(device.id);
+            setPeekId((current) => (current === device.id ? null : device.id));
             return;
         }
         if (event.key === "Enter") {

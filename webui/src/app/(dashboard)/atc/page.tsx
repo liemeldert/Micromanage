@@ -4,7 +4,6 @@ import {useCallback, useEffect, useMemo, useRef, useState} from "react";
 import {
     ActionIcon,
     Alert,
-    Badge,
     Box,
     Button,
     Center,
@@ -167,6 +166,11 @@ async function fetchServerVerdict(
     }
 }
 
+// The editor fills the window: the canvas takes whatever the toolbar above it leaves, down to the bottom of the
+// window, so the page never scrolls and never ends short of the bottom.
+const CANVAS_STACK_GAP = 8;
+const CANVAS_BOTTOM_SLACK = 8;
+
 export default function ATCPage() {
     const {token, isAdmin} = useAuth();
     const {data, setData, loading, saving, save, version, setVersion} = useConfigResource<FlowsConfig>("flows", {
@@ -191,7 +195,8 @@ export default function ATCPage() {
         const recalcCanvasHeight = () => {
             if (!canvasRef.current) return;
             const top = canvasRef.current.getBoundingClientRect().top;
-            const available = window.innerHeight - top - 20;
+            // Nothing is under the canvas, so it takes everything left down to the bottom of the window.
+            const available = window.innerHeight - top - CANVAS_BOTTOM_SLACK;
             setCanvasHeight(Math.max(520, Math.round(available)));
         };
         const observer = new ResizeObserver(() => recalcCanvasHeight());
@@ -919,7 +924,7 @@ export default function ATCPage() {
                     : autosaveState;
 
     return (
-        <Stack gap="md">
+        <Stack gap={CANVAS_STACK_GAP}>
             <FlowIssuesModal
                 opened={issuesOpen}
                 blocking={issuesBlocking}
@@ -1240,14 +1245,6 @@ export default function ATCPage() {
                 </Paper>
             </Box>
 
-            <Group gap={6}>
-                <Badge variant="light" color="gray">
-                    {activeFlow.nodes.length} node{activeFlow.nodes.length === 1 ? "" : "s"}
-                </Badge>
-                <Text fz="xs" c="dimmed">
-                    Drag from a node&apos;s bottom handle to wire the next step.
-                </Text>
-            </Group>
         </Stack>
     );
 }

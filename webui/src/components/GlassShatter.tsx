@@ -51,16 +51,31 @@ export function GlassShatter({
     const [gone, setGone] = useState(false);
     const fired = useRef(false);
 
+    // Held in a ref because the caller rebuilds this callback every render. As a dependency it would cancel the
+    // timer below on the next render the parent happens to do, and the fired guard then refuses to set another,
+    // so the animation would end with nothing revealed.
+    const onBrokenRef = useRef(onBroken);
+    useEffect(() => {
+        onBrokenRef.current = onBroken;
+    }, [onBroken]);
+
     useEffect(() => {
         if (!broken || fired.current) return;
         fired.current = true;
         const reduced = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
         const t = setTimeout(() => {
             setGone(true);
-            onBroken?.();
+            onBrokenRef.current?.();
         }, reduced ? 0 : 820);
         return () => clearTimeout(t);
-    }, [broken, onBroken]);
+    }, [broken]);
+
+    // A pane put back together is one the caller is reusing for another key, so the next break animates again.
+    useEffect(() => {
+        if (broken) return;
+        fired.current = false;
+        setGone(false);
+    }, [broken]);
 
     return (
         <Box className="mm-shatter" aria-hidden>
