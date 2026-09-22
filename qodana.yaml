@@ -3,7 +3,7 @@
 ####################################################################################################################
 
 version: "1.0"
-linter: qodana-python
+linter: qodana-python-community
 profile:
   name: qodana.recommended
 bootstrap: pip install -r controller/requirements.txt
