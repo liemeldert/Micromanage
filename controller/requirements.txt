@@ -14,7 +14,7 @@ python-dotenv==1.2.2
 fastapi==0.104.1
 uvicorn[standard]==0.52.4
 python-multipart==0.0.31
-pyjwt[crypto]==2.13.0
+pyjwt[crypto]==2.15.0
 cryptography==50.0.0
 # CMS/PKCS7 SignedData parsing for ADE MachineInfo signature verification
 asn1crypto==1.5.1
