@@ -1,7 +1,6 @@
 """E2E checks for deployment state vs task state, on in-memory sqlite.
 
 Run: PYTHONPATH=. ./.venv/bin/python tests/verify_deployment_state.py
-See docs/tests/verify_deployment_state.md for section details and background.
 """
 import asyncio
 import os
@@ -13,13 +12,13 @@ from types import SimpleNamespace
 import yaml
 from tortoise import Tortoise
 
+from tests._verify_harness import LogCapture, make_check, make_tally
+
 PASS, FAIL = [], []
 REPO = Path(__file__).resolve().parent.parent
 
 
-def check(label, cond):
-    (PASS if cond else FAIL).append(label)
-    print(f"  [{'PASS' if cond else 'FAIL'}] {label}")
+check = make_check(FAIL, PASS)
 
 
 def write_configs(base: Path, tenant_id: str = "default") -> None:
@@ -59,7 +58,8 @@ async def main():
         AppDeployment, AuditLog, Device, ProfileDeployment, Task, Tenant, User,
     )
     from controller.services import audit, reconciler, webhook_handler
-    from controller.api.main import get_device_details, get_app_manifest_info
+    from controller.api.routes.devices import get_device_details
+    from controller.api.routes.manifests import get_app_manifest_info
 
     # Device signals and compliance runs are other subsystems' business; record them instead of running them.
     signals = []
@@ -360,7 +360,7 @@ async def main():
           await AuditLog.filter(action=audit.TAG_ACTION).count() == before)
 
     # "How did this device get this tag" has to be one query, or the console goes back to reading flow-run prose.
-    from controller.api.main import list_audit_log
+    from controller.api.routes.audit import list_audit_log
 
     listed = await list_audit_log(
         skip=0, limit=100, action=audit.TAG_ACTION, target_type="device",
@@ -394,6 +394,11 @@ async def main():
               "generate_schemas=False" in src
               and "generate_schemas=True" not in src
               and "await init_schema()" in src)
+    for route_file in sorted((REPO / "controller/api/routes").glob("*.py")):
+        src = route_file.read_text()
+        check(f"{route_file.name} leaves schema generation to init_schema",
+              "generate_schemas=True" not in src
+              and "db_url=DATABASE_URL" not in src)
 
     # asyncpg's Pool.__init__ raises if min_size > max_size; tortoise builds lazily.
     import controller.models.database as _db_mod
@@ -425,7 +430,8 @@ async def main():
     # ensure_deployment stamps last_task_id synchronously, before deploy_app runs.
     from controller.services.app_manager import AppManager
     from controller.services.profile_manager import ProfileManager
-    from controller.api.main import send_device_command, retry_task, CommandRequest
+    from controller.api.routes.commands import CommandRequest, send_device_command
+    from controller.api.routes.tasks import retry_task
 
     # 9a. The building block on its own.
     never_ran = await new_device("SN-NEVER-RAN")
@@ -516,8 +522,8 @@ async def main():
         check(f"the fan-out was deferred rather than run ({len(deferred)})",
               len(deferred) >= 1)
 
-        # 10b. Running the deferred coroutines produces the signals the inline path used to emit. app_installed is not
-        # among them: it waits for the inventory that confirms the app, not for the command being taken.
+        # 10b. Running the deferred coroutines emits the signals. app_installed is not among them, since it waits for
+        # the inventory that confirms the app, not for the command being taken.
         for coro in deferred:
             await coro
         check("deferred fan-out emits checkin",
@@ -529,18 +535,10 @@ async def main():
         deferred.clear()
 
     # 10c. A fan-out failure is logged with device context and does not poison the spawn machinery for later webhooks.
-    class _CaptureLog(_logging.Handler):
-        def __init__(self):
-            super().__init__()
-            self.messages = []
-
-        def emit(self, record):
-            self.messages.append(record.getMessage())
-
     async def exploding_signal(device_id, signal, ref=None):
         raise RuntimeError("boom")
 
-    capture = _CaptureLog()
+    capture = LogCapture()
     webhook_handler.logger.addHandler(capture)
     webhook_handler._atc_signal = exploding_signal
     try:
@@ -732,9 +730,8 @@ async def main():
     # The sqlite equivalent of the Postgres backfill statement in _AUX_DDL.
     conn = Tortoise.get_connection("default")
     await conn.execute_script(
-        "UPDATE tasks SET command_uuid = json_extract(details, '$.command_uuid') "
-        "WHERE command_uuid IS NULL "
-        "AND json_extract(details, '$.command_uuid') IS NOT NULL")
+        "UPDATE tasks SET command_uuid = json_extract(details, '$.command_uuid') WHERE command_uuid IS NULL AND "
+        "json_extract(details, '$.command_uuid') IS NOT NULL")
     await handler._dispatch_command_response(corr_dev, "cmd-col-legacy", "Acknowledged", {})
     check("after the backfill the same answer correlates",
           (await Task.get(id=legacy.id)).status == "completed")
@@ -781,11 +778,7 @@ async def main():
     conn = connections.get("default")
     counts = {"profile_deployments": 0, "app_deployments": 0}
 
-    def _tally(sql):
-        if sql.lstrip().upper().startswith("SELECT"):
-            for table in counts:
-                if f'"{table}"' in sql:
-                    counts[table] += 1
+    _tally = make_tally(counts)
 
     # Prefetches use execute_query; failure injection arms there.
     fail_tables = set()
@@ -852,14 +845,12 @@ async def main():
           await Task.filter(device=devs_a[0], type="profile_remove").count() == 1
           and await ProfileDeployment.filter(
               device=devs_a[0], profile_id="ghost-installed").count() == 1)
-    check(f"batched: one profile-deployment query for the whole tenant "
-          f"(got {batched['profile_deployments']})",
+    check(f"batched: one profile-deployment query for the whole tenant (got {batched['profile_deployments']})",
           batched["profile_deployments"] == 1)
-    check(f"batched: one app-deployment query for the whole tenant "
-          f"(got {batched['app_deployments']})",
+    check(f"batched: one app-deployment query for the whole tenant (got {batched['app_deployments']})",
           batched["app_deployments"] == 1)
-    # The no-rows device rode the prefetch's missing-key path (the count above proves no fallback query fired for it)
-    # and still got both installs.
+    # The no-rows device took the prefetch's missing-key path (the count above proves no fallback query ran for it) and
+    # still got both installs.
     check("a device with no deployment rows still gets its profile queued",
           await Task.filter(device=devs_a[2], type="profile_install").count() == 1)
     check("...and its app queued",
@@ -1172,8 +1163,7 @@ async def main():
     diverged = [label for label, ttype, details in edges
                 if canonical(head_row_key(ttype, details))
                 != task_dedup_key(ttype, details)]
-    check(f"the key matches the previous reader on all {len(edges)} edge shapes "
-          f"(diverged: {diverged})", not diverged)
+    check(f"the key matches the previous reader on all {len(edges)} edge shapes (diverged: {diverged})", not diverged)
     # The empty string is a real key and not the absence of one: the old reader tested profile_info for truth and never
     # the id, so an empty id still produced a key. NULL and '' mean different things in the column.
     check("an empty profile id is an empty key, not a missing one",
@@ -1291,8 +1281,7 @@ async def main():
         dk_sqls.clear()
         mirrored_keys = await reconciler._active_task_keys(dk_tenant)
         task_reads = [s for s in dk_sqls if 'FROM "tasks"' in s]
-        check(f"the guard is one query when every row is mirrored "
-              f"(got {len(task_reads)})", len(task_reads) == 1)
+        check(f"the guard is one query when every row is mirrored (got {len(task_reads)})", len(task_reads) == 1)
         check("and it never asks for the details blob",
               bool(task_reads) and '"details"' not in task_reads[0]
               and '"dedup_key"' in task_reads[0])
@@ -1318,11 +1307,9 @@ async def main():
     # 15d. The upgrade path is the _AUX_DDL backfill. The sqlite equivalent of the Postgres statement, run against a row
     # that really has no mirror.
     await conn.execute_script(
-        "UPDATE tasks SET dedup_key = "
-        "json_extract(details, '$.app_info.app_id') || char(31) || "
-        "json_extract(details, '$.app_info.version') "
-        "WHERE dedup_key IS NULL AND type = 'app_install' "
-        "AND json_extract(details, '$.app_info.app_id') IS NOT NULL")
+        "UPDATE tasks SET dedup_key = json_extract(details, '$.app_info.app_id') || char(31) || json_extract(details, "
+        "'$.app_info.version') WHERE dedup_key IS NULL AND type = 'app_install' AND json_extract(details, "
+        "'$.app_info.app_id') IS NOT NULL")
     check("the backfill fills a row the mirror never saw",
           (await Task.get(id=app_keyed.id)).dedup_key
           == "slack" + DEDUP_KEY_SEP + "1.0")
@@ -1352,13 +1339,11 @@ async def main():
     saved_fallback = reconciler._unmirrored_task_keys
     try:
         second = await reconciler.reconcile_tenant(ten_a, base)
-        check(f"a second cycle queues nothing while the first is still in progress. "
-              f"({second})",
+        check(f"a second cycle queues nothing while the first is still in progress. ({second})",
               second["profiles_queued"] == 0 and second["apps_queued"] == 0
               and second["removals_queued"] == 0 and second["errors"] == 0)
 
-        # Now the upgrade case, for real: every in-flight row un-mirrored, the way a database that has not run the
-        # backfill yet looks.
+        # Upgrade case: pending and running tasks lose their dedup_key, as on a database that has not run the backfill.
         await Task.filter(tenant=ten_a, status__in=["pending", "running"]).update(
             dedup_key=None)
         third = await reconciler.reconcile_tenant(ten_a, base)
@@ -1373,8 +1358,7 @@ async def main():
 
         reconciler._unmirrored_task_keys = _no_fallback
         fourth = await reconciler.reconcile_tenant(ten_a, base)
-        check(f"without the fallback the same cycle re-queues everything "
-              f"({fourth})",
+        check(f"without the fallback the same cycle re-queues everything ({fourth})",
               fourth["profiles_queued"] == 2 and fourth["apps_queued"] == 2
               and fourth["removals_queued"] == 1)
     finally:
@@ -1544,7 +1528,7 @@ async def main():
         device_model="MacBookPro18,3", os_version="15.5", hostname=f"nobucket-{i}",
         enrollment_state="enrolled", groups=[], tags=[]) for i in range(3)]
 
-    nb_capture = _CaptureLog()
+    nb_capture = LogCapture()
     reconciler.logger.addHandler(nb_capture)
     nb_counts = {"app_deployments": 0}
     nb_real_q, nb_real_qd = conn.execute_query, conn.execute_query_dict
@@ -1572,8 +1556,7 @@ async def main():
         reconciler._spawn = real_spawn
         reconciler.logger.removeHandler(nb_capture)
 
-    check(f"no app install is queued for a tenant with nowhere to serve from "
-          f"({blocked})", blocked["apps_queued"] == 0)
+    check(f"no app install is queued for a tenant with nowhere to serve from ({blocked})", blocked["apps_queued"] == 0)
     check("...and the summary says how much work the fix would release",
           blocked["apps_blocked"] == 3)
     check("...and no device is given a task for it",
@@ -1582,12 +1565,10 @@ async def main():
           await AppDeployment.filter(tenant=nb_tenant).count() == 0)
     check("profiles are not collateral", blocked["profiles_queued"] == 3)
     warnings = [m for m in nb_capture.messages if "app install" in m]
-    check(f"exactly one warning for the tenant, not one per device "
-          f"(got {len(warnings)})", len(warnings) == 1)
+    check(f"exactly one warning for the tenant, not one per device (got {len(warnings)})", len(warnings) == 1)
     check("...and it names the setting to change",
           bool(warnings) and "AWS_S3_BUCKET" in warnings[0])
-    check(f"the precondition costs no per-device queries "
-          f"(got {nb_counts['app_deployments']} for 3 devices)",
+    check(f"the precondition costs no per-device queries (got {nb_counts['app_deployments']} for 3 devices)",
           nb_counts["app_deployments"] == 1)
 
     os.environ["AWS_S3_BUCKET"] = saved_bucket
@@ -1608,8 +1589,8 @@ async def main():
     us_dir = base / "tenants" / "unscope"
 
     def us_apps(include_slack):
-        """apps.yaml for this tenant: 'held' is scoped but its only version is behind a rollout nobody has reached,
-        which is not the same thing as no longer being wanted."""
+        """Writes apps.yaml for this tenant. 'held' is scoped, but its only version is behind a rollout no device has
+        reached, so it must not count as unscoped."""
         apps = [{"id": "held", "name": "Held", "bundle_id": "com.example.held",
                  "versions": [{"version": "2.0", "s3_key": "apps/held-2.0.pkg",
                                "groups": ["all-macs"],
@@ -1904,22 +1885,31 @@ async def main():
     tracebacks = []
 
     class _TracebackSpy(_logging.Handler):
+        def __init__(self, sink):
+            super().__init__()
+            self.sink = sink
+
         def emit(self, record):
             if record.exc_info:
-                tracebacks.append(record.getMessage())
+                self.sink.append(record.getMessage())
 
-    async def run_cycle(answer):
-        async def fake_sync(device, **kw):
-            return answer
+    def make_cycle(ddm_mod, real_sync, cycle_tenant, sink):
+        async def cycle(answer):
+            async def fake_sync(device, **kw):
+                return answer
 
-        spy = _TracebackSpy()
-        ddm_manager.sync_device = fake_sync
-        reconciler.logger.addHandler(spy)
-        try:
-            return await reconciler.reconcile_tenant(ddm_tenant, base)
-        finally:
-            ddm_manager.sync_device = real_sync
-            reconciler.logger.removeHandler(spy)
+            spy = _TracebackSpy(sink)
+            ddm_mod.sync_device = fake_sync
+            reconciler.logger.addHandler(spy)
+            try:
+                return await reconciler.reconcile_tenant(cycle_tenant, base)
+            finally:
+                ddm_mod.sync_device = real_sync
+                reconciler.logger.removeHandler(spy)
+
+        return cycle
+
+    run_cycle = make_cycle(ddm_manager, real_sync, ddm_tenant, tracebacks)
 
     refused = await run_cycle(ddm_manager.EnqueueFailed("NanoMDM said no"))
     check(f"a refused enqueue counts one error ({refused})",
@@ -2043,11 +2033,10 @@ async def main():
         await lad_age(reconciler.RETRY_MINUTES * 2 + 1)
         sixth = await lad_cycle()
         check(f"the doubled interval does ({sixth})", sixth["profiles_queued"] == 1)
-        check(f"six cycles against a device that cannot be reached cost three "
-              f"tasks, not six",
+        check("six cycles against a device that cannot be reached cost three tasks, not six",
               await Task.filter(tenant=lad_tenant, type="profile_install").count() == 3)
 
-        # A genuine edit, made while the row is failing, still goes immediately.
+        # A real edit, made while the row is failing, still goes immediately.
         edited = dict(lad_wifi)
         edited["payload"] = {**lad_wifi["payload"], "SSID_STR": "CorpNet-2"}
         (base / "tenants" / "ladder" / "profiles.yaml").write_text(
@@ -2153,28 +2142,11 @@ async def main():
     held_real_sync = held_ddm.sync_device
     held_tracebacks = []
 
-    class _HeldTracebackSpy(_logging.Handler):
-        def emit(self, record):
-            if record.exc_info:
-                held_tracebacks.append(record.getMessage())
-
-    async def held_cycle(answer):
-        async def fake_sync(device, **kw):
-            return answer
-
-        spy = _HeldTracebackSpy()
-        held_ddm.sync_device = fake_sync
-        reconciler.logger.addHandler(spy)
-        try:
-            return await reconciler.reconcile_tenant(held_tenant, base)
-        finally:
-            held_ddm.sync_device = held_real_sync
-            reconciler.logger.removeHandler(spy)
+    held_cycle = make_cycle(held_ddm, held_real_sync, held_tenant, held_tracebacks)
 
     hold = held_ddm.SyncHeldOff("waiting out the backoff from a refused enqueue",
                                 retry_at=datetime.now(timezone.utc) + timedelta(hours=1))
-    check("a hold is falsy, so a caller asking only what went out reads it as "
-          "nothing", not hold)
+    check("a hold is falsy, so a caller asking only what went out reads it as nothing", not hold)
     check("...and is not a refusal, which is what keeps it out of the error count",
           not isinstance(hold, held_ddm.EnqueueFailed))
 
@@ -2187,14 +2159,12 @@ async def main():
     check("...and leaves no traceback, since nothing raised", not held_tracebacks)
     check("...and files no task of its own",
           await Task.filter(tenant=held_tenant, type="ddm_sync").count() == 0)
-    check(f"a cycle full of held devices reads exactly like a quiet one "
-          f"({held} vs {quiet})", held == quiet)
+    check(f"a cycle full of held devices reads exactly like a quiet one ({held} vs {quiet})", held == quiet)
 
     # The contrast, in the same fixture, so "count nothing at all" cannot pass these checks: the refusal that starts the
     # backoff is still an error.
     refused_cycle = await held_cycle(held_ddm.EnqueueFailed("NanoMDM said no"))
-    check(f"the refusal that starts the backoff is still counted "
-          f"({refused_cycle})", refused_cycle["errors"] == 1)
+    check(f"the refusal that starts the backoff is still counted ({refused_cycle})", refused_cycle["errors"] == 1)
 
     print("\n== 26. A profile a compliance rule installed is not taken back off ==")
     # Rule can install out-of-scope profile; row marked and held.
@@ -2357,7 +2327,7 @@ async def main():
               await ProfileDeployment.filter(
                   tenant=rem_tenant, profile_id="fv-enforce").count() == 2)
 
-        rem_capture = _CaptureLog()
+        rem_capture = LogCapture()
         reconciler.logger.addHandler(rem_capture)
         try:
             await reconciler.reconcile_tenant(rem_tenant, base)
@@ -2571,8 +2541,7 @@ async def main():
         check("...and the row says exactly what happened",
               acc_row.status == "failed"
               and acc_row.last_error == reconciler.APP_UNCONFIRMED_ERROR)
-        check("...and it joins the ordinary ladder rather than retrying at once, "
-              "since the failure is as of now",
+        check("...and it joins the ordinary ladder rather than retrying at once, since the failure is as of now",
               expired["apps_queued"] == 0
               and (await AppDeployment.get(id=acc_row.id)).failed_attempts == 0)
 
@@ -2626,8 +2595,7 @@ async def main():
                     "was_accepted": fresh_row.status}
 
         rounds = [await unconfirmed_round(n) for n in (1, 2, 3)]
-        check(f"each unconfirmed round waits a longer rung than the last "
-              f"({[r['rung'] for r in rounds]})",
+        check(f"each unconfirmed round waits a longer rung than the last ({[r['rung'] for r in rounds]})",
               [r["rung"] for r in rounds]
               == [reconciler.RETRY_MINUTES,
                   reconciler.RETRY_MINUTES * 2,
@@ -2637,8 +2605,7 @@ async def main():
         check("every round re-pushes exactly once, when its rung is up",
               all(r["pushed"]["apps_queued"] == 1 for r in rounds)
               and all(r["early"]["apps_queued"] == 0 for r in rounds))
-        check("...and nothing is queued while the device is still inside the "
-              "confirmation window",
+        check("...and nothing is queued while the device is still inside the confirmation window",
               all(r["waiting"]["apps_queued"] == 0
                   and r["waiting"]["apps_unconfirmed"] == 0 for r in rounds))
         check("...and each round fails the acceptance exactly once",
@@ -2760,8 +2727,7 @@ async def main():
         # A different flow is not this flow.
         fl_flows({"flow": {"id": "offboard", "name": "Offboarding", "nodes": []}})
         replaced = await reconciler.reconcile_tenant(fl_tenant, base)
-        check(f"a document that defines another flow releases this one "
-              f"({replaced})", replaced["removals_queued"] == 1)
+        check(f"a document that defines another flow releases this one ({replaced})", replaced["removals_queued"] == 1)
         check("...with a proper removal task",
               await Task.filter(tenant=fl_tenant, type="profile_remove").count() == 1)
     finally:
@@ -2830,8 +2796,7 @@ async def main():
                 os.environ[key] = value
     check("a Mac install is managed by default, as every apps.yaml so far means",
           ias_sent[0] == (ias_mac.udid, True))
-    check("...and unmanaged when the app says so, which is what lets a driver "
-          "or a script-only package install at all",
+    check("...and unmanaged when the app says so, which is what lets a driver or a script-only package install at all",
           ias_sent[1] == (ias_mac.udid, False))
     check("...while an iPad never carries the macOS-only key either way",
           ias_sent[2] == (ias_ipad.udid, False))

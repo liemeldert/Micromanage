@@ -33,14 +33,13 @@ from controller.models.tenant import (  # noqa: E402
 from controller.services import enrollment as enroll  # noqa: E402
 from controller.services import tenant_config  # noqa: E402
 from controller.services import webhook_handler as wh  # noqa: E402
+from tests._verify_harness import make_check, SqlSpy
 
 PASS, FAIL = [], []
 REPO = Path(__file__).resolve().parent.parent
 
 
-def check(label, cond):
-    (PASS if cond else FAIL).append(label)
-    print(f"  [{'PASS' if cond else 'FAIL'}] {label}")
+check = make_check(FAIL, PASS)
 
 
 def raw_payload(info):
@@ -59,7 +58,7 @@ def url_params(tenant_id):
 def write_config_yaml(tenant_id, doc):
     """Write config.yaml with new inode and mtime for fingerprinting.
 
-    Uses temp file plus os.replace, not in-place write, to match api.main._atomic_write_yaml.
+    Uses temp file plus os.replace, not in-place write, to match api.config_io._atomic_write_yaml.
     """
     d = tenant_config.tenant_dir(tenant_id)
     d.mkdir(parents=True, exist_ok=True)
@@ -115,33 +114,8 @@ async def main():
 
     handler = wh.WebhookHandler()
     conn = connections.get("default")
-    seen_sql = []
-
-    class _Spy:
-        """Records the SQL a block issues, so statements can be counted rather than argued."""
-
-        def __enter__(self):
-            self._q, self._qd = conn.execute_query, conn.execute_query_dict
-
-            async def spy_q(sql, values=None):
-                seen_sql.append(sql)
-                return await self._q(sql, values)
-
-            async def spy_qd(sql, values=None):
-                seen_sql.append(sql)
-                return await self._qd(sql, values)
-
-            seen_sql.clear()
-            conn.execute_query, conn.execute_query_dict = spy_q, spy_qd
-            return self
-
-        def __exit__(self, *exc):
-            conn.execute_query, conn.execute_query_dict = self._q, self._qd
-            return False
-
-    def _stmts(verb, table):
-        return [s for s in seen_sql
-                if s.lstrip().upper().startswith(verb) and f'"{table}"' in s]
+    spy = SqlSpy(conn)
+    _stmts = spy.statements
 
     async def checkin(tenant_id, udid, info=None, topic="mdm.Connect"):
         """One driven check-in, through the same entry point NanoMDM posts to."""
@@ -160,11 +134,11 @@ async def main():
 
         The naming block is the only place _upsert_device reads the Tenant row.
         """
-        with _Spy():
+        with spy:
             await checkin(tenant_id, udid)
         return len(_stmts("SELECT", "tenants"))
 
-    # == 1. checkout cancels the in-flight tasks in one statement ==
+    # == 1. checkout cancels the pending and running tasks in one statement ==
     print("\n== 1. a checkout cancels pending and running in one UPDATE ==")
     t9 = await Tenant.create(id="m9", name="M9 Org")
     write_config_yaml("m9", {"device_naming": {}})
@@ -228,7 +202,7 @@ async def main():
               for r in before_rows.values()))
 
     started = datetime.now(timezone.utc)
-    with _Spy():
+    with spy:
         await handler.handle_webhook({
             "topic": "mdm.CheckOut",
             "checkin_event": {"udid": "UDID-M9-1"},
@@ -392,8 +366,7 @@ async def main():
     await tn.save(update_fields=["device_naming"])
     write_config_yaml("nm-fp", {"device_naming": tn.device_naming})
     stale = wh._TENANT_NAMING_CACHE.get("nm-fp")
-    check("the cached entry is still present and still unexpired, so only the "
-          "fingerprint can break the tie",
+    check("the cached entry is still present and still unexpired, so only the fingerprint can break the tie",
           bool(stale) and stale[2] == {} and stale[1] > time.monotonic())
     reads = await naming_reads("nm-fp", "UDID-NM-FP")
     named = await Device.get(udid="UDID-NM-FP")
@@ -445,17 +418,14 @@ async def main():
 
     held = await naming_reads("nm-ttl", "UDID-NM-TTL")
     ttl_dev = await Device.get(udid="UDID-NM-TTL")
-    check(f"inside the TTL the stale negative is served, no query "
-          f"(got {held} tenant read(s))", held == 0)
-    check("...so the device is still unnamed, which is the bounded staleness "
-          "this trade accepts", ttl_dev.name is None)
+    check(f"inside the TTL the stale negative is served, no query (got {held} tenant read(s))", held == 0)
+    check("...so the device is still unnamed, which is the bounded staleness this trade accepts", ttl_dev.name is None)
 
     expired = wh._TENANT_NAMING_CACHE["nm-ttl"]
     wh._TENANT_NAMING_CACHE["nm-ttl"] = (expired[0], time.monotonic() - 1.0,
                                          expired[2])
     # Fingerprint unchanged, so only TTL expiry can evict this.
-    check("the entry is expired with its fingerprint untouched, so only the "
-          "TTL can force the re-read",
+    check("the entry is expired with its fingerprint untouched, so only the TTL can force the re-read",
           wh._TENANT_NAMING_CACHE["nm-ttl"][0] == wh._naming_cfg_fingerprint("nm-ttl"))
     past = await naming_reads("nm-ttl", "UDID-NM-TTL")
     ttl_dev = await Device.get(udid="UDID-NM-TTL")
@@ -561,8 +531,7 @@ async def main():
     check("...and it is still the same cache entry, so that comparison was "
           "made against the object the check-in actually read",
           doc_after is shared_before)
-    check("the readonly loader hands out one shared list, the copying loader "
-          "hands out a fresh one",
+    check("the readonly loader hands out one shared list, the copying loader hands out a fresh one",
           tenant_config.load_groups_readonly("m5-groups")
           is tenant_config.load_groups_readonly("m5-groups")
           and tenant_config.load_groups("m5-groups")
@@ -733,7 +702,8 @@ async def main():
     check("an Authenticate with only DeviceName still fills the column",
           h_dev is not None and h_dev.hostname == "Micromanage VM")
 
-    # DeviceInformation carries HostName; hostname scope conditions are written against the network name, not display name.
+    # DeviceInformation carries HostName; hostname scope conditions are written against the network name,
+    # not display name.
     t_info, u_info = await command_task(t10, h_dev, "refresh_info", {}, "info")
     await ack(h_dev, {"QueryResponses": {
         "SerialNumber": "M10-H", "OSVersion": "26.6.1",
@@ -1146,8 +1116,7 @@ async def main():
     # Acknowledgement is after parameter validation, before download; not proof of arrival.
     ok_task, ok_dep = await app_ack("accepted-app", {
         "State": "Installing", "Identifier": "com.example.app"}, failed_attempts=3)
-    check(f"an acknowledged install records as accepted, not installed "
-          f"({ok_dep.status})",
+    check(f"an acknowledged install records as accepted, not installed ({ok_dep.status})",
           ok_dep.status == "accepted" and ok_task.status == "completed")
     check("...and the task says in words that presence is unconfirmed",
           ((ok_task.details or {}).get("install_confirmation") or {}).get("confirmed")
@@ -1179,8 +1148,7 @@ async def main():
 
     # macOS pkg installs answer with minimal body; still reaches accepted.
     bare_task, bare_dep = await app_ack("bare-app", {})
-    check(f"an acknowledgement with no state at all is still only accepted "
-          f"({bare_dep.status})",
+    check(f"an acknowledgement with no state at all is still only accepted ({bare_dep.status})",
           bare_dep.status == "accepted" and bare_task.status == "completed"
           and "app_state" not in (bare_task.details or {}))
 
@@ -1202,8 +1170,7 @@ async def main():
         {"Identifier": "com.apple.Safari", "Name": "Safari", "Version": "26.0"},
     ])
     await ok_dep.refresh_from_db()
-    check(f"the device reporting the app promotes the row to installed "
-          f"({ok_dep.status})",
+    check(f"the device reporting the app promotes the row to installed ({ok_dep.status})",
           ok_dep.status == "installed" and ok_dep.install_date is not None)
     check("...and that, not the acknowledgement, is what tells a waiting flow",
           ("app_installed", "accepted-app") in app_signals)
@@ -1228,8 +1195,7 @@ async def main():
          "Version": "9.9", "ShortVersion": "9.9"},
     ])
     await wrong_dep.refresh_from_db()
-    check(f"presence confirms the row even when the version differs from the "
-          f"label ({wrong_dep.status})",
+    check(f"presence confirms the row even when the version differs from the label ({wrong_dep.status})",
           wrong_dep.status == "installed" and wrong_dep.install_date is not None
           and ("app_installed", "wrong-version-app") in app_signals)
 
@@ -1246,16 +1212,14 @@ async def main():
     # Upgrade re-uses prior confirmation; old version does not confirm new build.
     upgrade_task, upgrade_dep = await app_ack(
         "accepted-app", {}, version="1.0.1", existing=ok_dep)
-    check(f"an accepted upgrade starts from the confirmation it already had "
-          f"({upgrade_dep.reported_version})",
+    check(f"an accepted upgrade starts from the confirmation it already had ({upgrade_dep.reported_version})",
           upgrade_dep.status == "accepted" and upgrade_dep.reported_version == "1.0")
     await app_inventory([
         {"Identifier": "com.example.accepted", "Name": "Accepted",
          "Version": "1.0", "ShortVersion": "1.0"},
     ])
     await upgrade_dep.refresh_from_db()
-    check(f"the old version still being there does not confirm the upgrade "
-          f"({upgrade_dep.status})",
+    check(f"the old version still being there does not confirm the upgrade ({upgrade_dep.status})",
           upgrade_dep.status == "accepted"
           and ("app_installed", "accepted-app") not in app_signals)
 
@@ -1265,8 +1229,7 @@ async def main():
          "Version": "1.0.1", "ShortVersion": "1.0.1"},
     ])
     await upgrade_dep.refresh_from_db()
-    check(f"the version moving is what confirms the upgrade "
-          f"({upgrade_dep.status}, {upgrade_dep.reported_version})",
+    check(f"the version moving is what confirms the upgrade ({upgrade_dep.status}, {upgrade_dep.reported_version})",
           upgrade_dep.status == "installed"
           and upgrade_dep.reported_version == "1.0.1"
           and ("app_installed", "accepted-app") in app_signals)

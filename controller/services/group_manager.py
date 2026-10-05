@@ -1,12 +1,10 @@
-"""Device group membership. services.scoping is the shared matching engine.
-
-See docs for membership rules, recursive resolution, and cycle handling.
-"""
+"""Device group membership. services.scoping is the shared matching engine."""
 
 import logging
 from typing import Any, Dict, List
 
 from controller.models.tenant import Device
+from controller.services import tenant_config
 from controller.services.scoping import evaluate_condition
 
 logger = logging.getLogger(__name__)
@@ -19,7 +17,7 @@ class GroupManager:
     def evaluate_device_groups(
         self, device: Device, groups_config: List[Dict[str, Any]]
     ) -> List[str]:
-        """All groups the device belongs to, in groups.yaml order. Memoized within this call only. See docs for cycle handling."""
+        """All groups the device belongs to, in groups.yaml order. Memoized within this call only."""
         by_name: Dict[str, Dict[str, Any]] = {
             g["name"]: g for g in groups_config if isinstance(g, dict) and g.get("name")
         }
@@ -77,3 +75,11 @@ class GroupManager:
         return all(
             evaluate_condition(device, c, group_resolver=resolver) for c in conditions
         )
+
+
+def current_groups(device: Device, readonly: bool = False) -> List[str]:
+    """The groups a device belongs to under its tenant's groups.yaml as it is now. readonly reads the cached document
+    without copying it, for a caller that never writes into a group."""
+    tenant_id = str(device.tenant_id)
+    load = tenant_config.load_groups_readonly if readonly else tenant_config.load_groups
+    return GroupManager(tenant_id).evaluate_device_groups(device, load(tenant_id))

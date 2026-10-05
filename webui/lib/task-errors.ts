@@ -95,12 +95,16 @@ const RULES: Rule[] = [
         headline: "The device isn't supervised, so it refused this command.",
         nextStep: "Supervision is set at enrollment. A device already in use has to be erased and re-enrolled to become supervised.",
     },
+    {
+        match: (r) => /no bypass code available/i.test(r),
+        headline: "The device returned no Activation Lock bypass code.",
+        nextStep:
+            "Apple only provides the bypass code within 15 days of supervision. " +
+            "If the device was supervised more than 15 days ago, the code can no longer be retrieved.",
+    },
 ];
 
-/**
- * Explain a raw task/command error. Always safe to render: headline and nextStep never
- * contain upstream URLs or internal hostnames.
- */
+/** Explain a raw task/command error. The headline and nextStep never contain upstream URLs or internal hostnames. */
 export function explainError(raw: string | null | undefined): ExplainedError | null {
     const original = (raw ?? "").trim();
     if (!original) return null;
@@ -165,6 +169,7 @@ const TASK_TYPE_LABELS: Record<string, string> = {
     disable_lost_mode: "Disable Lost Mode",
     device_location: "Request location",
     play_lost_mode_sound: "Play Lost Mode sound",
+    fetch_activation_lock_bypass_code: "Fetch Activation Lock bypass code",
     user_list: "User list",
     logout_user: "Log out current user",
     delete_user: "Delete user",

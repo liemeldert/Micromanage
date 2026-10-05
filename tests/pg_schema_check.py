@@ -1,26 +1,23 @@
-"""Bring a fresh Postgres to the schema and prove it holds up.
+"""Applies the schema to a fresh Postgres and checks it, including a rerun against an older schema.
+
+The verify_*.py suites run on in-memory sqlite and never execute models.database._AUX_DDL, the hand-written Postgres DDL
+every process runs at startup, where a typo stops all three processes on boot. CI runs this against a postgres service.
 
 Run against a throwaway database:
 
     DATABASE_URL=postgres://postgres:pw@localhost:5432/mdm_iac \\
         PYTHONPATH=. python tests/pg_schema_check.py
-
-Kept out of the verify_*.py set: those run on in-memory sqlite, where the models already carry every column and nothing
-runs models.database._AUX_DDL, the hand-written Postgres DDL every process executes at startup. A typo there takes all
-three processes down on boot, and nothing else runs that DDL before production. CI gives this a postgres service.
 """
 import asyncio
 import os
 import sys
 import traceback
 
+from tests._verify_harness import make_check
+
 FAILED = []
 
-
-def check(label, cond):
-    print(f"  [{'PASS' if cond else 'FAIL'}] {label}")
-    if not cond:
-        FAILED.append(label)
+check = make_check(FAILED)
 
 
 async def main() -> int:
@@ -41,7 +38,7 @@ async def main() -> int:
             "SELECT table_name FROM information_schema.tables WHERE table_schema = current_schema()")
     }
     for name in ("tenants", "users", "devices", "tasks", "audit_logs", "flow_runs",
-                 "alerts", "dep_servers", "device_secrets", "schema_state"):
+                 "alerts", "dep_servers", "device_secrets", "schema_state", "service_tokens"):
         check(f"table {name} exists", name in tables)
 
     # Three processes run this at once at startup, and every restart runs it again.
@@ -62,15 +59,17 @@ async def main() -> int:
     print("4) the aux DDL's columns and indexes are present")
     cols = {
         (r["table_name"], r["column_name"]) for r in await conn.execute_query_dict(
-            "SELECT table_name, column_name FROM information_schema.columns "
-            "WHERE table_schema = current_schema()")
+            "SELECT table_name, column_name FROM information_schema.columns WHERE table_schema = current_schema()")
     }
     for table, col in (("tasks", "command_uuid"), ("tasks", "dedup_key"),
                        ("devices", "tags"), ("devices", "attributes"),
-                       ("devices", "enrollment_state"), ("tenants", "device_naming"),
+                       ("devices", "enrollment_state"),
+                       ("devices", "bootstrap_token_escrowed"),
+                       ("tenants", "device_naming"),
                        ("tenants", "fv_escrow_private_key_enc"),
                        ("tenants", "fv_escrow_cert_pem"),
                        ("tenants", "fv_escrow_cert_expires_at"),
+                       ("tenants", "profile_signing_cert_expires_at"),
                        ("users", "mfa_changed_at")):
         check(f"{table}.{col} exists", (table, col) in cols)
     check("table user_mfa exists", "user_mfa" in tables)
@@ -83,7 +82,7 @@ async def main() -> int:
             "SELECT indexname FROM pg_indexes WHERE schemaname = current_schema()")
     }
     for name in ("idx_tasks_command_uuid", "idx_appdeploy_tenant_status",
-                 "idx_profiledeploy_tenant"):
+                 "idx_profiledeploy_tenant", "idx_service_tokens_tenant_hash"):
         check(f"{name} exists", name in indexes)
 
     print("5) JSONB filters the API uses work here")
@@ -115,8 +114,7 @@ async def main() -> int:
         check(f"init_schema ran against the older schema without raising ({exc})", False)
     cols = {
         (r["table_name"], r["column_name"]) for r in await conn.execute_query_dict(
-            "SELECT table_name, column_name FROM information_schema.columns "
-            "WHERE table_schema = current_schema()")
+            "SELECT table_name, column_name FROM information_schema.columns WHERE table_schema = current_schema()")
     }
     check("tasks.command_uuid came back", ("tasks", "command_uuid") in cols)
     check("devices.tags came back", ("devices", "tags") in cols)
@@ -126,9 +124,8 @@ async def main() -> int:
     }
     check("idx_tasks_command_uuid came back", "idx_tasks_command_uuid" in indexes)
     cursor_type = (await conn.execute_query_dict(
-        "SELECT data_type FROM information_schema.columns "
-        "WHERE table_schema = current_schema() AND table_name = 'dep_servers' "
-        "AND column_name = 'sync_cursor'"))[0]["data_type"]
+        "SELECT data_type FROM information_schema.columns WHERE table_schema = current_schema() AND table_name = "
+        "'dep_servers' AND column_name = 'sync_cursor'"))[0]["data_type"]
     check(f"dep_servers.sync_cursor is text again (is {cursor_type})", cursor_type == "text")
     # The fingerprint did not move, so the converged run records no second row.
     check("still exactly one schema_state row", await SchemaState.all().count() == 1)

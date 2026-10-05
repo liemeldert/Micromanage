@@ -1,15 +1,6 @@
-"""The capability readiness registry, on in-memory sqlite.
+"""The capability readiness registry (controller/services/readiness.py), on in-memory sqlite.
 
 Run: PYTHONPATH=. ./.venv/bin/python tests/verify_readiness.py
-
-services/readiness.py answers, one capability at a time, whether this deployment is configured for what it is being
-asked to do. Every predicate is exercised both ways, blocked and ready, because a predicate that only ever answers
-one of the two is indistinguishable from a constant.
-
-The settings are read on every call, so the checks below mutate the environment after the module is imported and
-assert the answer moves. Beyond the registry itself: the readiness endpoint's authorization and its setting names
-without values, the uniform 404 on the unauthenticated device endpoints with the real reason recorded server-side,
-the boot refusal on a malformed encryption key, and source guards over the modules that read these settings.
 """
 
 import ast
@@ -31,13 +22,11 @@ from tortoise import Tortoise  # noqa: E402
 from controller.auth.tokens import AuthConfigError, _secret, issue_session_token  # noqa: E402
 from controller.models.tenant import Tenant, User  # noqa: E402
 from controller.services import readiness  # noqa: E402
+from tests._verify_harness import make_check
 
 PASS, FAIL = [], []
 
-
-def check(label, cond):
-    (PASS if cond else FAIL).append(label)
-    print(f"  [{'PASS' if cond else 'FAIL'}] {label}")
+check = make_check(FAIL, PASS)
 
 
 class _Env:
@@ -110,9 +99,8 @@ def test_predicates_both_ways(tenant):
             check(f"...and the reason for {setting} is a sentence naming it",
                   setting in status.reason and status.reason.endswith("."))
 
-    # MDM_HOSTNAME is only needed for the URLs that are not set outright, so it
-    # is reported missing when it is unset and something is built from it, and
-    # not reported when both URLs are given explicitly.
+    # MDM_HOSTNAME is only needed for the URLs that are not set outright, so it is reported missing when it is unset and
+    # something is built from it, and not reported when both URLs are given explicitly.
     with configured(MDM_HOSTNAME=None):
         check("enroll is blocked with no hostname and no explicit URLs",
               "MDM_HOSTNAME" in readiness.check("enroll").missing)
@@ -124,8 +112,7 @@ def test_predicates_both_ways(tenant):
     with configured(MDM_HOSTNAME=None,
                     MDM_SERVER_URL="https://mdm.example.test/mdm",
                     SCEP_URL="https://mdm.example.test/scep/x"):
-        check("...and not blocked when both URLs are set outright, since "
-              "nothing would read the hostname",
+        check("...and not blocked when both URLs are set outright, since nothing would read the hostname",
               readiness.check("enroll").ready)
 
     # A fresh install with no hostname and no public URL, everything else filled in: enrollment refuses and names
@@ -133,8 +120,7 @@ def test_predicates_both_ways(tenant):
     with configured(MDM_HOSTNAME=None, PUBLIC_API_URL=None,
                     MDM_SERVER_URL=None, SCEP_URL=None):
         status = readiness.check("enroll")
-        check("a fresh install with the host settings blank refuses, and names "
-              "them both",
+        check("a fresh install with the host settings blank refuses, and names them both",
               not status.ready and "MDM_HOSTNAME" in status.missing
               and "PUBLIC_API_URL" in status.missing)
 
@@ -316,8 +302,7 @@ def test_settings_are_read_per_call(tenant):
     check("the public address reader follows the environment too",
           one == "https://one.example.test" and two == "https://two.example.test")
     with configured(PUBLIC_API_URL="https://three.example.test/"):
-        check("...and strips one trailing slash, which is what every call site "
-              "used to do for itself",
+        check("...and strips one trailing slash, which is what every call site used to do for itself",
               readiness.public_api_url() == "https://three.example.test")
 
 
@@ -353,16 +338,14 @@ def test_warnings(tenant):
         many = readiness.check("enroll", active_tenants=4)
         check("an unsigned tenant claim warns where there is a fleet to cross into",
               any("MDM_ALLOW_UNSIGNED_TENANT_CLAIM" in w for w in many.warnings))
-        check("...and stays quiet on a single-tenant deployment, where the "
-              "setting it describes can reach nobody else",
+        check("...and stays quiet on a single-tenant deployment, where the setting it describes can reach nobody else",
               not any("MDM_ALLOW_UNSIGNED_TENANT_CLAIM" in w
                       for w in one_tenant.warnings))
         check("...and never makes enrollment unready",
               many.ready)
 
     with configured():
-        check("a configured SCEP challenge still warns that nothing can compare "
-              "it with step-ca",
+        check("a configured SCEP challenge still warns that nothing can compare it with step-ca",
               any("step-ca" in w for w in readiness.check("enroll").warnings))
     with configured(SCEP_CHALLENGE="changeme_scep_challenge"):
         check("a SCEP challenge still set to the template value warns as well",
@@ -554,7 +537,7 @@ async def test_endpoint(tenant, admin, member):
     from fastapi.security import HTTPAuthorizationCredentials
     from starlette.datastructures import Headers
 
-    from controller.api.main import get_readiness
+    from controller.api.routes.readiness import get_readiness
 
     class _Req:
         def __init__(self, headers=None):
@@ -591,8 +574,7 @@ async def test_endpoint(tenant, admin, member):
 
         _body, status = await call(
             HTTPAuthorizationCredentials(scheme="Bearer", credentials=member_token))
-        check("an authenticated member gets a named 403, being inside the "
-              "deployment already", status == 403)
+        check("an authenticated member gets a named 403, being inside the deployment already", status == 403)
 
         body, status = await call(
             HTTPAuthorizationCredentials(scheme="Bearer", credentials=admin_token))
@@ -641,8 +623,7 @@ async def test_endpoint(tenant, admin, member):
     # its pydantic validators and raises.
     probe = subprocess.run(
         [sys.executable, "-c",
-         "import controller.api.main as m;"
-         " print(m.app.openapi_url, m.app.docs_url, m.app.redoc_url)"],
+         "import controller.api.main as m; print(m.app.openapi_url, m.app.docs_url, m.app.redoc_url)"],
         cwd=REPO, capture_output=True, text=True, timeout=60,
         env={**os.environ, "MDM_ENABLE_API_DOCS": "1", "PYTHONPATH": ".",
              "PYTHONDONTWRITEBYTECODE": "1"},
@@ -656,7 +637,7 @@ async def test_uniform_404(tenant):
     from fastapi import HTTPException
     from starlette.datastructures import Headers
 
-    from controller.api.main import download_enrollment_profile
+    from controller.api.routes.enrollment import download_enrollment_profile
     from controller.api.ddm import download_bridged_profile
     from controller.services import enrollment as enroll
 
@@ -679,8 +660,7 @@ async def test_uniform_404(tenant):
         check("an unknown tenant gets 404",
               await status_of(download_enrollment_profile(
                   "no-such-tenant", good, _Req())) == 404)
-        check("a bad token on a real tenant gets the same 404, so the two "
-              "cannot be told apart",
+        check("a bad token on a real tenant gets the same 404, so the two cannot be told apart",
               await status_of(download_enrollment_profile(
                   tenant.id, "wrong-token", _Req())) == 404)
         check("a bad bridge signature gets 404 rather than 403",
@@ -788,14 +768,12 @@ def test_boot():
         check("...and the message names the variable and both ways out",
               "CONTROLLER_BOOTSTRAP_ADMIN_PASSWORD" in message
               and "CONTROLLER_BOOTSTRAP_ADMIN_EMAIL" in message)
-        check("...and says that clearing it later does not fix an account "
-              "an earlier boot already created",
+        check("...and says that clearing it later does not fix an account an earlier boot already created",
               "already started" in message)
         check("...and quotes no password anywhere in it",
               "change-me-now" not in message)
-    # Only when the bootstrap would actually run. A placeholder password beside
-    # no email creates nothing, and refusing to start over a value nothing reads
-    # is the boot creep this module is otherwise careful about.
+    # Only when the bootstrap would actually run. A placeholder password beside no email creates nothing, and refusing
+    # to start over a value nothing reads is the boot creep this module is otherwise careful about.
     with _Env(CONTROLLER_BOOTSTRAP_ADMIN_EMAIL=None,
               CONTROLLER_BOOTSTRAP_ADMIN_PASSWORD="change-me-now"):
         check("a template password with no bootstrap email does not refuse",
@@ -825,8 +803,7 @@ def test_boot():
     # a key is, or one refuses to start and the other quietly reads nothing.
     from controller.services import crypto_secrets
     with configured(SECRET_ENCRYPTION_KEY="not-a-fernet-key"):
-        check("encrypt refuses a malformed key by naming it, not by claiming "
-              "no key is set",
+        check("encrypt refuses a malformed key by naming it, not by claiming no key is set",
               _raises(lambda: crypto_secrets.encrypt("x"),
                       crypto_secrets.SecretEncryptionUnavailable))
         try:
@@ -878,9 +855,8 @@ def test_boot():
           "Traceback" not in api_output
           and "lifespan.startup.failed" not in api_output)
 
-    # The bootstrap refusal takes the same exit, run for real for the same
-    # reason: what can go wrong is the shutdown path it unwinds through, not the
-    # refusal. Exits before any database connection is opened.
+    # The bootstrap refusal takes the same exit, run for real for the same reason: what can go wrong is the shutdown
+    # path it unwinds through, not the refusal. Exits before any database connection is opened.
     proc = subprocess.run(
         [sys.executable, "-m", "controller.main"],
         cwd=REPO, capture_output=True, text=True, timeout=60,
@@ -918,10 +894,9 @@ def test_source_guards():
         "controller/services/enrollment.py",
         "controller/services/app_manager.py",
         "controller/services/ddm_manager.py",
-        "controller/utils/yaml_validator.py",
-        "controller/api/main.py",
-        "controller/api/dep.py",
-    ]
+    ] + [str(p.relative_to(REPO)) for pattern in ("controller/utils/yaml_*.py", "controller/api/*.py",
+                                                  "controller/api/routes/*.py")
+         for p in sorted(REPO.glob(pattern))]
     # Settings readiness.py is the only reader of. Asserted on the parsed module rather than its text, so any spelling
     # of an os.getenv call is caught.
     single_reader = ("PUBLIC_API_URL", "DDM_HMAC_SECRET",

@@ -1,8 +1,5 @@
 // Display join between managed deployment rows and the tasks that produced them, matched on the row's last_task_id.
 // A row's status is the state the item on the device is believed to be in; a task's status is what one attempt did.
-// An app row can also sit at accepted, an ack that no inventory report has confirmed. Its task is already complete by
-// then, so agreementOf treats it as settled like any other finished row. Nothing here repairs a row, it only names
-// where the two legitimately read differently.
 
 import type {Task} from "./api";
 

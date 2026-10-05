@@ -14,8 +14,7 @@ from typing import Deque, Optional
 class SlidingWindowLimiter:
     """Per-key sliding window, plus a global ceiling on total attempts.
 
-    The global ceiling is a backstop, not the primary defense: refusing on it refuses everyone at once, so it
-    defaults to max_keys * max_attempts.
+    The global ceiling is only a backstop, since refusing on it refuses everyone at once.
     """
 
     def __init__(self, max_attempts: int = 10, window_seconds: int = 60,
@@ -153,8 +152,8 @@ def _env_int(name: str, default: int) -> int:
         return default
 
 
-# Escrowed credential retrieval (api.main.reveal_device_secret). Defaults cover one incident's worth of reveals.
-# Raise BREAKGLASS_REVEAL_CEILING for a recovery larger than a room.
+# Escrowed credential retrieval (api.routes.secrets.reveal_device_secret). Defaults cover one incident's worth of
+# reveals. Raise BREAKGLASS_REVEAL_CEILING for a recovery larger than a room.
 reveal_limiter = BurstLimiter(
     burst=_env_int("BREAKGLASS_REVEAL_BURST", 10),
     ceiling=_env_int("BREAKGLASS_REVEAL_CEILING", 30),

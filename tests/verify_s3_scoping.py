@@ -17,6 +17,7 @@ from controller.services.app_manager import (
 )
 from controller.models.tenant import Device, Tenant
 from controller.utils.yaml_validator import TenantConfig, YAMLValidator
+from tests._verify_harness import make_check
 
 PASS, FAIL = [], []
 
@@ -32,9 +33,7 @@ AMBIENT = {
 }
 
 
-def check(label, cond):
-    (PASS if cond else FAIL).append(label)
-    print(f"  [{'PASS' if cond else 'FAIL'}] {label}")
+check = make_check(FAIL, PASS)
 
 
 def set_ambient_env():
@@ -197,7 +196,7 @@ async def test_partial_configuration_fails():
 
 async def test_use_ssl_false():
     print("use_ssl: false:")
-    # As pydantic sees it coming out of config.yaml. A Dict[str, str] annotation used to coerce this to the string
+    # As pydantic sees it coming out of config.yaml. A Dict[str, str] annotation would coerce this to the string
     # "False", which is truthy.
     parsed = TenantConfig(**yaml.safe_load(
         "id: t\nname: T\nallowed_users: []\n"

@@ -18,29 +18,17 @@ from urllib.parse import quote
 
 from controller.auth.tokens import _secret as _jwt_secret, AuthConfigError
 from controller.services import readiness
+from controller.utils import compare
+from controller.utils.timeutil import as_utc
 
 logger = logging.getLogger(__name__)
 
-
-def _token_eq(provided: Optional[str], expected: str) -> bool:
-    """Constant-time token compare that survives arbitrary attacker input.
-
-    Compares UTF-8 bytes, not str: hmac.compare_digest over str raises TypeError on non-ASCII input, and the
-    left operand here always comes off an unauthenticated request.
-    """
-    try:
-        provided_b = (provided or "").encode("utf-8", "surrogatepass")
-        expected_b = expected.encode("utf-8", "surrogatepass")
-    except Exception:
-        return False
-    return hmac.compare_digest(provided_b, expected_b)
+_token_eq = compare.constant_time_eq
 
 
 def enrollment_token(tenant_id: str) -> str:
-    """The per-tenant token the unauthenticated enrollment endpoints require.
-
-    Raises AuthConfigError when JWT_SECRET is unset or the shipped placeholder, since an empty key would make
-    the token a constant anyone can compute to fetch the SCEP challenge.
+    """The per-tenant token the unauthenticated enrollment endpoints require. Raises AuthConfigError when JWT_SECRET is
+    unset or the shipped placeholder, since anyone could then compute the token and fetch the SCEP challenge.
     """
     return hmac.new(
         _jwt_secret().encode(), f"enroll:{tenant_id}".encode(), sha256
@@ -48,10 +36,8 @@ def enrollment_token(tenant_id: str) -> str:
 
 
 def verify_enrollment_token(tenant_id: str, token: str) -> bool:
-    """Constant-time compare against the tenant's token.
-
-    False when no token can be computed at all, so an unconfigured server rejects every caller instead of
-    accepting a guessable one.
+    """Constant-time compare against the tenant's token. False when no token can be computed, so an unconfigured server
+    rejects every caller.
     """
     try:
         expected = enrollment_token(tenant_id)
@@ -67,8 +53,7 @@ def verify_enrollment_token(tenant_id: str, token: str) -> bool:
 def tenant_url_token(tenant_id: str) -> str:
     """The signature that binds the ?tenant= on the MDM ServerURL to this server.
 
-    Without it a device could edit its own ServerURL to join another tenant's fleet. See
-    docs/controller/services/enrollment.md for why the HMAC label differs from enrollment_token's.
+    Without it a device could edit its own ServerURL to join another tenant's fleet.
     """
     return hmac.new(
         _jwt_secret().encode(), f"mdm-tenant:{tenant_id}".encode(), sha256
@@ -76,10 +61,8 @@ def tenant_url_token(tenant_id: str) -> str:
 
 
 def verify_tenant_url_token(tenant_id: str, token: str) -> bool:
-    """Constant-time check of a device-supplied tenant signature.
-
-    False when no signature can be computed at all, so an unconfigured server trusts no tenant claim. Never
-    raises: both arguments come off the device's own ServerURL query string.
+    """Constant-time check of a device-supplied tenant signature. False when no signature can be computed, so an
+    unconfigured server trusts no tenant claim. Never raises, since both arguments come from the device's ServerURL.
     """
     if not tenant_id:
         return False
@@ -96,10 +79,8 @@ def verify_tenant_url_token(tenant_id: str, token: str) -> bool:
 
 def log_token_refusal(endpoint: str, tenant_id: str, reason: str,
                       remote_addr: Optional[str]) -> None:
-    """Record why an unauthenticated device endpoint refused a caller.
-
-    The three device-facing endpoints answer the same 404 whether the tenant is unknown or the token is wrong,
-    so this log line is the only place the distinction survives.
+    """Record why an unauthenticated device endpoint refused a caller. The three device-facing endpoints answer the same
+    404 for an unknown tenant and a wrong token, so this log line is the only record of which it was.
     """
     logger.warning(
         "%s: refused (tenant=%s, remote=%s): %s",
@@ -149,8 +130,7 @@ def _server_url_for(tenant_id: str) -> str:
     base = _mdm_server_url() or ""
     sep = "&" if "?" in base else "?"
     return (
-        f"{base}{sep}tenant={quote(tenant_id, safe='')}"
-        f"&tsig={tenant_url_token(tenant_id)}"
+        f"{base}{sep}tenant={quote(tenant_id, safe='')}&tsig={tenant_url_token(tenant_id)}"
     )
 
 
@@ -181,10 +161,8 @@ _PEM_CERT_RE = re.compile(
 
 
 def _embed_ca_der() -> Optional[bytes]:
-    """DER of the CA certificate to ship inside the enrollment profile, if any.
-
-    Off unless MDM_EMBED_CA_CERT_PATH names a PEM file. Only the first certificate in the file is used; point this at
-    the root, not a chain bundle.
+    """DER of the CA certificate to ship inside the enrollment profile, if any. Off unless MDM_EMBED_CA_CERT_PATH names
+    a PEM file; only the first certificate in it is used, so point it at the root, not a chain bundle.
     """
     return _read_embedded_ca()[0]
 
@@ -227,16 +205,12 @@ def _days_remaining(expires_at: Optional[datetime]) -> Optional[int]:
     if expires_at is None:
         return None
     now = datetime.now(timezone.utc)
-    if expires_at.tzinfo is None:
-        expires_at = expires_at.replace(tzinfo=timezone.utc)
-    return (expires_at - now).days
+    return (as_utc(expires_at) - now).days
 
 
 def enrollment_details(tenant) -> Dict[str, Any]:
-    """Non-secret enrollment details for the console, without the SCEP challenge.
-
-    configured and missing come from readiness.check('enroll'), the same source the readiness endpoint reports and the
-    download refuses on, so the three cannot disagree.
+    """Non-secret enrollment details for the console, without the SCEP challenge. configured and missing come from
+    readiness.check('enroll'), the same source the readiness endpoint reports and the download refuses on.
     """
     public = readiness.public_api_url()
     try:
@@ -277,10 +251,8 @@ def enrollment_details(tenant) -> Dict[str, Any]:
 
 
 def ade_enroll_url(tenant_id: str) -> Optional[str]:
-    """The device-facing URL a DEP profile's url points at.
-
-    Setup Assistant POSTs its signed MachineInfo here and gets back the enrollment .mobileconfig. Returns None
-    when the 'ade' readiness capability is not ready.
+    """The device-facing URL a DEP profile's url points at. Setup Assistant POSTs its signed MachineInfo here and gets
+    back the enrollment .mobileconfig. None when the 'ade' readiness capability is not ready.
     """
     status = readiness.check(readiness.ADE)
     if not status.ready:
@@ -298,10 +270,8 @@ _PLIST_XML_RE = re.compile(rb"<\?xml.*?</plist>", re.DOTALL)
 
 
 def _extract_plist(data: bytes) -> Optional[Dict[str, Any]]:
-    """Best-effort extraction of a plist embedded in raw CMS/DER bytes.
-
-    Finds the embedded plist (XML or binary bplist00) rather than pulling in a whole ASN.1 stack. Observability
-    only: the device identifies itself for real later, through SCEP and the Authenticate webhook.
+    """Best-effort extraction of a plist (XML or binary bplist00) embedded in raw CMS/DER bytes, with no ASN.1 parsing.
+    For observability only, since the device identifies itself later through SCEP and the Authenticate webhook.
     """
     m = _PLIST_XML_RE.search(data)
     if m:
@@ -321,10 +291,8 @@ def _extract_plist(data: bytes) -> Optional[Dict[str, Any]]:
 
 
 def parse_machine_info(header_value: Optional[str]) -> Tuple[Dict[str, Any], bool]:
-    """Parse and verify the CMS-signed MachineInfo in the aspen-deviceinfo header.
-
-    Returns (machine_info, verified). Never raises: an unverifiable header comes back as verified=False with
-    whatever MachineInfo could be extracted.
+    """Parse and verify the CMS-signed MachineInfo in the aspen-deviceinfo header. Returns (machine_info, verified) and
+    never raises; an unverifiable header gives verified=False with whatever MachineInfo could be extracted.
     """
     if not header_value:
         return {}, False
@@ -428,7 +396,21 @@ def build_enrollment_profile(tenant) -> Dict[str, Any]:
 
 
 def build_enrollment_mobileconfig(tenant) -> bytes:
-    return plistlib.dumps(build_enrollment_profile(tenant))
+    """The enrollment profile, CMS-signed when the tenant has a signing certificate, otherwise unsigned."""
+    plist_bytes = plistlib.dumps(build_enrollment_profile(tenant))
+    from controller.services import profile_signing
+    if not profile_signing.is_configured(tenant):
+        return plist_bytes
+    try:
+        return profile_signing.sign(tenant, plist_bytes)
+    except profile_signing.CertificateExpired:
+        logger.warning("enrollment: the profile signing certificate for tenant %s has expired; serving the profile "
+                       "unsigned", getattr(tenant, "id", "unknown"))
+        return plist_bytes
+    except Exception:
+        logger.exception("enrollment: signing the profile failed for tenant %s; serving it unsigned",
+                         getattr(tenant, "id", "unknown"))
+        return plist_bytes
 
 
 def build_wifi_profile(
@@ -438,11 +420,8 @@ def build_wifi_profile(
     encryption: str = None,
     org: str = None,
 ) -> Dict[str, Any]:
-    """A minimal Wi-Fi configuration profile.
-
-    Used by Return to Service so a freshly-wiped device can reach the MDM server during Setup Assistant.
-    EncryptionType defaults to "Any" rather than a named protocol: naming the wrong one can exclude the network
-    the device is meant to join, which is unrecoverable once the device is wiped.
+    """A minimal Wi-Fi profile for Return to Service, so a wiped device can reach the MDM server during Setup Assistant.
+    EncryptionType defaults to "None" with no password and "Any" with one, as a named protocol can exclude the network.
     https://raw.githubusercontent.com/apple/device-management/release/mdm/profiles/com.apple.wifi.managed.yaml
     """
     payload_uuid = str(uuid.uuid4()).upper()

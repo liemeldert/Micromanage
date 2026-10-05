@@ -1,12 +1,5 @@
-// Where a device's tags came from.
-//
-// A device.tags audit row names the subsystem that added or removed a tag, the flow node or rule inside it, and a
-// reason when a rule took its own tag back. It covers removals and outlives the run or alert behind it, so it wins
-// over inference wherever it exists.
-//
-// Inference over compliance alerts, flow timelines and tag_update tasks covers the two cases it misses: a member
-// cannot read the admin-only audit endpoint, and a tag applied before the tenant had tag auditing has no row.
-// Inferred sources are marked as such, since the timeline parse is string-matching on server-formatted messages.
+// Where a device's tags came from. device.tags audit rows win; a tag with no row is inferred from compliance alerts,
+// flow timelines and tag_update tasks, and marked as inferred.
 
 import {
     AUDIT_TAG_ACTION,
@@ -231,10 +224,8 @@ export function parseTagAudit(entries: AuditLogEntry[]): TagAuditRow[] {
 }
 
 /**
- * Who put each of this device's tags there.
- *
- * Pass null when the log could not be read, and every tag falls back to inference. A tag with neither predates tag
- * auditing, fell outside the retained alert, run and task history, or arrived with an import.
+ * Who put each of this device's tags there. Pass null for audit when the log could not be read, and every tag falls
+ * back to inference; a tag nothing explains gets an empty sources list.
  */
 export function attributeTags(
     tags: string[],

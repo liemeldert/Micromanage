@@ -1,17 +1,16 @@
 """Pure document surgery for ATC flow drafts.
 
-Functions for create, promote, discard, and diff operations on drafts. See docs for detailed semantics.
+Functions for create, promote, discard, and diff operations on drafts.
 """
 
 import copy
 import logging
 from typing import Any, Dict, Tuple
 
-from controller.services import flow_step_catalog
-from controller.services.flow_step_catalog import is_draft
+from controller.services import flow_step_catalog, profile_manager
+from controller.services.flow_step_catalog import flow_id_of, is_draft
 
-# Must match controller.api.main._REDACTED; see docs/controller/services/flow_drafts.md.
-REDACTED = "***redacted***"
+REDACTED = profile_manager.REDACTED
 
 logger = logging.getLogger(__name__)
 
@@ -24,11 +23,6 @@ class DraftError(Exception):
         self.code = code
 
 
-def _flow_id(flow: Dict[str, Any]) -> str:
-    raw = flow.get("id")
-    return raw.strip() if isinstance(raw, str) else ""
-
-
 def create(doc: Dict[str, Any], target_id: str, *,
            note: str = "", actor: str = "", at: str = "") -> Dict[str, Any]:
     """Create a draft of target_id in doc and return the updated document.
@@ -36,7 +30,7 @@ def create(doc: Dict[str, Any], target_id: str, *,
     Copies node params verbatim, plaintext secrets included, under the draft's own flow id (<target_id>--draft).
     """
     flows = list(doc.get("flows") or [])
-    by_id = {_flow_id(f): f for f in flows if isinstance(f, dict)}
+    by_id = {flow_id_of(f): f for f in flows if isinstance(f, dict)}
     target = by_id.get(target_id)
     if not target or is_draft(target):
         raise DraftError(f"Target flow '{target_id}' not found or is a draft", status=404,
@@ -57,7 +51,7 @@ def create(doc: Dict[str, Any], target_id: str, *,
     draft["draft_created_by"] = actor
     draft["draft_created_at"] = at
 
-    new_flows = [f for f in flows if _flow_id(f) != draft_id] + [draft]
+    new_flows = [f for f in flows if flow_id_of(f) != draft_id] + [draft]
     return {**doc, "version": 2, "flows": new_flows}
 
 
@@ -65,10 +59,10 @@ def promote(doc: Dict[str, Any], target_id: str, *,
             force: bool = False) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     """Promote <target_id>--draft onto target_id.
 
-    Returns updated document and change summary with base_drifted flag. See docs for force semantics.
+    Returns updated document and change summary with base_drifted flag.
     """
     flows = list(doc.get("flows") or [])
-    by_id = {_flow_id(f): f for f in flows if isinstance(f, dict)}
+    by_id = {flow_id_of(f): f for f in flows if isinstance(f, dict)}
     target = by_id.get(target_id)
     draft_id = f"{target_id}--draft"
     draft = by_id.get(draft_id)
@@ -104,7 +98,7 @@ def promote(doc: Dict[str, Any], target_id: str, *,
 
     new_flows = []
     for f in flows:
-        fid = _flow_id(f)
+        fid = flow_id_of(f)
         if fid == draft_id:
             continue
         elif fid == target_id:
@@ -118,14 +112,14 @@ def discard(doc: Dict[str, Any], target_id: str) -> Dict[str, Any]:
     """Discard <target_id>--draft from doc."""
     draft_id = f"{target_id}--draft"
     flows = [f for f in (doc.get("flows") or []) if isinstance(f, dict)]
-    new_flows = [f for f in flows if _flow_id(f) != draft_id]
+    new_flows = [f for f in flows if flow_id_of(f) != draft_id]
     if len(new_flows) == len(flows):
         raise DraftError(f"No draft found for flow '{target_id}'", status=404,
                          code="draft-not-found")
     return {**doc, "version": 2, "flows": new_flows}
 
 
-def _display(node: Dict[str, Any]) -> Dict[str, Any]:
+def redact_node(node: Dict[str, Any]) -> Dict[str, Any]:
     """A node with its secret params replaced by the sentinel, for anything that goes back to a client."""
     params = node.get("params")
     if not isinstance(params, dict):
@@ -140,7 +134,7 @@ def _display(node: Dict[str, Any]) -> Dict[str, Any]:
 def diff(target: Dict[str, Any], draft: Dict[str, Any]) -> Dict[str, Any]:
     """Compute the semantic diff between a flow and its draft.
 
-    Only output is redacted; ui positions excluded. See docs for redaction strategy and why it matters.
+    Only output is redacted; ui positions excluded. Redacting before comparing would hide a changed secret.
     """
     target_nodes = {n["id"]: n for n in (target.get("nodes") or [])
                     if isinstance(n, dict) and n.get("id")}
@@ -160,7 +154,7 @@ def diff(target: Dict[str, Any], draft: Dict[str, Any]) -> Dict[str, Any]:
         in_d = draft_nodes.get(nid)
         if in_d and not in_t:
             entry = {"id": nid, "change": "added", "type": in_d.get("type"),
-                     "params": _display(in_d).get("params") or {}}
+                     "params": redact_node(in_d).get("params") or {}}
             node_entries.append(entry)
             added_nodes.append(nid)
         elif in_t and not in_d:
@@ -230,8 +224,8 @@ def diff(target: Dict[str, Any], draft: Dict[str, Any]) -> Dict[str, Any]:
     base_drifted = bool(base_hash and current_target_hash != base_hash)
 
     return {
-        "flow_id": _flow_id(target),
-        "draft_id": _flow_id(draft),
+        "flow_id": flow_id_of(target),
+        "draft_id": flow_id_of(draft),
         "base_hash": base_hash,
         "base_drifted": base_drifted,
         "note": draft.get("draft_note") or "",

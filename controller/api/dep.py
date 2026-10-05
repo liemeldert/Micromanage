@@ -8,6 +8,8 @@ import logging
 from typing import Any, Dict, List, Optional, Tuple
 
 import yaml
+from controller.api.anonymous import enrollment_tenant_or_error
+from controller.api.config_io import _atomic_write_yaml, _config_document_text
 from controller.api.ids import require_uuid
 from controller.auth.dependencies import Principal, require_admin
 from controller.models.tenant import DepProfile, DepServer, Device, Tenant
@@ -66,7 +68,7 @@ async def _get_server(server_id: str, admin: Principal) -> DepServer:
     return server
 
 
-#  link lifecycle 
+# ==link lifecycle==
 
 @router.get("/servers")
 async def list_servers(admin: Principal = Depends(require_admin)) -> Dict[str, Any]:
@@ -161,8 +163,7 @@ async def upload_token(server_id: str,
 def _mirror_dep_enabled(tenant_id: str, enabled: bool) -> None:
     """Write tenant.dep.enabled back into the tenant's config.yaml.
 
-    config.yaml wins: sync_tenant re-reads this key every few minutes, so a DB-only flag reverts. A tenant with no
-    config file on disk is left alone.
+    config.yaml wins, since sync_tenant re-reads this key every few minutes and would revert a DB-only flag.
     """
     path = tenant_config.tenant_dir(tenant_id) / "config.yaml"
     if not path.exists():
@@ -176,8 +177,6 @@ def _mirror_dep_enabled(tenant_id: str, enabled: bool) -> None:
     if config["tenant"]["dep"].get("enabled") == enabled:
         return
     config["tenant"]["dep"]["enabled"] = enabled
-    # Imported here (not at module level) because api.main imports this router at load time.
-    from controller.api.main import _atomic_write_yaml, _config_document_text
     _atomic_write_yaml(path, config, text=_config_document_text(path, config))
 
 
@@ -199,7 +198,7 @@ async def unlink_server(server_id: str,
     return {"status": "unlinked"}
 
 
-#  device sync 
+# ==device sync==
 
 @router.post("/servers/{server_id}/sync")
 async def sync_now(server_id: str,
@@ -235,7 +234,7 @@ async def list_dep_devices(server_id: str,
     ]}
 
 
-#  enrollment profiles 
+# ==enrollment profiles==
 
 @router.post("/servers/{server_id}/default-profile")
 async def set_default_profile(server_id: str, body: DefaultProfileBody,
@@ -326,37 +325,18 @@ async def get_skip_keys(admin: Principal = Depends(require_admin)) -> Dict[str, 
     return {"skip_keys": skip_keys.catalog()}
 
 
-#  device-facing ADE endpoint (UNAUTHENTICATED) 
+# ==device-facing ADE endpoint (UNAUTHENTICATED)==
 
 @router.post("/enroll/{tenant_id}/{token}")
 async def ade_enroll(tenant_id: str, token: str, request: Request) -> Response:
     """The URL an ADE device's Setup Assistant POSTs to during enrollment.
 
     No JWT: the request carries the same per-tenant enrollment token baked into the DEP profile url Apple delivers.
-    Returns the tenant's enrollment .mobileconfig. Unknown tenant and bad token both answer 404, so an anonymous
-    caller cannot learn which tenant ids exist; the real reason goes to the log via enrollment.log_token_refusal.
+    Returns the tenant's enrollment .mobileconfig. Unknown tenant and bad token both answer 404, so an anonymous caller
+    cannot learn which tenant ids exist.
     """
     remote = request.client.host if request.client else None
-    tenant = await Tenant.get_or_none(id=tenant_id)
-    if not tenant or not tenant.is_active:
-        enrollment_svc.log_token_refusal(
-            "ADE enroll", tenant_id, "no such active tenant", remote)
-        raise HTTPException(status_code=404, detail="Not found")
-
-    if not enrollment_svc.verify_enrollment_token(tenant_id, token):
-        # Also covers an unset JWT_SECRET; that reason stays out of this anonymous-facing 404 (see readiness).
-        enrollment_svc.log_token_refusal(
-            "ADE enroll", tenant_id, "the enrollment token did not verify", remote)
-        raise HTTPException(status_code=404, detail="Not found")
-
-    # Refuse to hand back a structurally-valid but dead profile, past the token check.
-    details = enrollment_svc.enrollment_details(tenant)
-    if not details["configured"]:
-        raise HTTPException(
-            status_code=503,
-            detail="Enrollment is not fully configured; check: "
-                   f"{readiness.settings_to_check(details)}",
-        )
+    tenant = await enrollment_tenant_or_error(tenant_id, token, "ADE enroll", remote, enrollment_svc)
 
     # Parse and verify the signed MachineInfo, proving the request came from a real Apple device. Enforcement is
     # opt-in (see _require_apple_signature).
@@ -376,9 +356,8 @@ async def ade_enroll(tenant_id: str, token: str, request: Request) -> Response:
             missing = ("no MachineInfo in the request: the POST body was empty and "
                        "no x-apple-aspen-deviceinfo header was sent")
         else:
-            missing = (f"the MachineInfo from the {source} did not verify: its CMS "
-                       f"signature or its chain to an Apple anchor failed (see the "
-                       f"preceding machine-info verification log line)")
+            missing = (f"the MachineInfo from the {source} did not verify: its CMS signature or its chain to an Apple "
+                       f"anchor failed (see the preceding machine-info verification log line)")
         logger.warning("ADE: rejecting enrollment for tenant %s (serial=%s): %s "
                        "[body=%d bytes, header=%s, DEP_ADE_REQUIRE_APPLE_SIGNATURE=on]",
                        tenant_id, serial or "?", missing, len(body),
@@ -396,10 +375,9 @@ async def ade_enroll(tenant_id: str, token: str, request: Request) -> Response:
 
 
 async def _read_capped_body(request: Request, limit: int) -> bytes:
-    """The request body, refusing anything past limit rather than buffering it.
+    """The request body, refusing anything past limit even when Content-Length understates the size.
 
-    Cut off at the ceiling while streaming even if Content-Length understates the size. Returns empty for a body
-    this endpoint cannot read at all, which the caller treats as "no MachineInfo".
+    Returns empty for a body this endpoint cannot read at all, which the caller treats as "no MachineInfo".
     """
     too_large = HTTPException(status_code=413, detail="Request body is too large")
     declared = (request.headers.get("content-length") or "").strip()
@@ -439,7 +417,7 @@ def _machine_info(body: bytes,
     """The device's MachineInfo for this request, as (info, verified, source).
 
     The body wins over the x-apple-aspen-deviceinfo header (web-view flow), and a body that fails to verify is
-    never retried against the header, which would let an unsigned body ride in on a replayed header. See
+    never retried against the header, or a request with an unsigned body could verify through a replayed header. See
     https://developer.apple.com/documentation/devicemanagement/authenticating-through-web-views
     """
     if body:

@@ -1,18 +1,6 @@
-"""E2E checks for the admin audit log, on in-memory sqlite.
+"""E2E checks for the admin audit log (services.audit, the list endpoint and retention), on in-memory sqlite.
 
 Run: PYTHONPATH=. .venv/bin/python tests/verify_audit_log.py
-
-Covers services.audit.record_audit, record_tag_change and the tenant-scoped, admin-only list endpoint.
-
-record_audit writes a row scoped to principal.tenant, stamped with the actor's email and role, the action, the target
-and non-secret detail. It is best effort: a write that raises is logged and swallowed, so an audit failure cannot break
-the admin action it was recording. The list endpoint returns only the caller's tenant, and its action, actor and
-target_type filters are exact matches. record_tag_change, the helper ATC and Dispatcher call after a device.tags write,
-is exercised directly rather than through either subsystem.
-
-On the retention side, cleanup_old_audit_log deletes nothing unless a positive window is given, and even then only
-machine-attributed rows (actor_email null) past the cutoff. warn_on_audit_log_size reports the true row count regardless
-of threshold and never deletes anything itself.
 """
 import asyncio
 from datetime import datetime, timedelta, timezone
@@ -22,17 +10,15 @@ from tortoise import Tortoise
 
 from controller.auth.dependencies import Principal
 from controller.models.tenant import Tenant, User, Device, AuditLog
-from controller.api.main import list_audit_log
+from controller.api.routes.audit import list_audit_log
 from controller.services import audit
 from controller.services.audit import record_audit, record_tag_change
 from controller.services.task_manager import cleanup_old_audit_log, warn_on_audit_log_size
+from tests._verify_harness import make_check
 
 PASS, FAIL = [], []
 
-
-def check(label, cond):
-    (PASS if cond else FAIL).append(label)
-    print(f"  [{'PASS' if cond else 'FAIL'}] {label}")
+check = make_check(FAIL, PASS)
 
 
 async def main():
@@ -43,7 +29,7 @@ async def main():
     admin_user = await User.create(tenant=tenant, email="admin@t1", role="admin")
     admin = Principal(tenant=tenant, user=admin_user, email="admin@t1", role="admin")
 
-    #  1. record_audit writes a tenant-scoped row with the actor stamped.
+    # 1. record_audit writes a tenant-scoped row with the actor stamped.
     await record_audit(
         admin,
         "user.create",
@@ -66,7 +52,7 @@ async def main():
             r.detail.get("password_set") is True and "password" not in r.detail,
         )
 
-    #  2. The list endpoint is admin-only + tenant-scoped.
+    # 2. The list endpoint is admin-only + tenant-scoped.
     other_tenant = await Tenant.create(id="t2", name="Tenant Two")
     other_admin_user = await User.create(tenant=other_tenant, email="admin@t2", role="admin")
     other_admin = Principal(tenant=other_tenant, user=other_admin_user, email="admin@t2", role="admin")
@@ -105,7 +91,7 @@ async def main():
     res_actor = await list_audit_log(skip=0, limit=100, action=None, actor="admin@t1", target_type=None, admin=admin)
     check("actor filter narrows to this actor's rows", res_actor["total"] == 3)
 
-    #  3. record_audit is best-effort: a write failure must NOT propagate.
+    # 3. record_audit is best-effort: a write failure must NOT propagate.
     before = await AuditLog.all().count()
 
     async def _boom(*a, **k):
@@ -125,7 +111,7 @@ async def main():
     after = await AuditLog.all().count()
     check("failed record_audit wrote no row", after == before)
 
-    #  4. record_tag_change, tested against the helper's own contract rather than through ATC or Dispatcher. It only
+    # 4. record_tag_change, tested against the helper's own contract rather than through ATC or Dispatcher. It only
     #     records; it does not write device.tags, so these calls leave dev.tags alone.
     dev = await Device.create(
         tenant=tenant, udid="UDID-TAG", serial_number="TAGDEV",
@@ -169,7 +155,7 @@ async def main():
         check("console tag-change row is attributed to the admin", row2.actor_email == "admin@t1")
         check("console tag-change row keeps the reason", row2.detail.get("reason") == "manual removal")
 
-    #  5. cleanup_old_audit_log: disabled by default, and even enabled it removes only machine-attributed rows past
+    # 5. cleanup_old_audit_log: disabled by default, and even enabled it removes only machine-attributed rows past
     #     the cutoff. Backdating uses a bulk .update() because created_at is auto_now_add and .save() will not move
     #     it.
     old_cutoff = datetime.now(timezone.utc) - timedelta(days=40)
@@ -216,7 +202,7 @@ async def main():
     deleted_again = await cleanup_old_audit_log(days=30)
     check("a second sweep at the same window deletes nothing further", deleted_again == 0)
 
-    #  6. warn_on_audit_log_size reports the true count on both sides of the threshold and never removes a row.
+    # 6. warn_on_audit_log_size reports the true count on both sides of the threshold and never removes a row.
     #     The suite has no log-capture convention, so this checks the count the log line is built from, not its text.
     total_before = await AuditLog.all().count()
     count_below = await warn_on_audit_log_size(threshold=total_before + 1)
@@ -228,7 +214,7 @@ async def main():
     check("warn_on_audit_log_size never deletes anything",
           await AuditLog.all().count() == total_before)
 
-    #  7. Date bounds (since/until), inclusive at both ends, composing with the exact-match filters.
+    # 7. Date bounds (since/until), inclusive at both ends, composing with the exact-match filters.
     t0 = datetime.now(timezone.utc) - timedelta(days=10)
     in_window = await AuditLog.create(
         tenant=tenant, actor_email="admin@t1", actor_role="admin",
@@ -274,7 +260,7 @@ async def main():
     check("since/until are inclusive at both edges (a row exactly on the bound matches)",
           res_edge["total"] == 1 and res_edge["entries"][0]["target_id"] == "cfg-in")
 
-    #  8. system: a yes/no filter on actor_email IS NULL rather than on an actor value, so an actor literally named
+    # 8. system: a yes/no filter on actor_email IS NULL rather than on an actor value, so an actor literally named
     #     "system" cannot pass for one.
     sys_row = await AuditLog.create(
         tenant=tenant, actor_email=None, actor_role=None,
@@ -319,10 +305,11 @@ async def main():
           and all(e["action"] == audit.TAG_ACTION and e["actor_email"] is None
                   for e in res_composed["entries"]))
 
-    #  9. Device commands are audited, not only recorded as a Task row.
+    # 9. Device commands are audited, not only recorded as a Task row.
     print("device commands:")
-    import controller.api.main as api_main
-    from controller.api.main import CommandRequest, retry_task, send_device_command
+    import controller.api.runtime as api_services
+    from controller.api.routes.commands import CommandRequest, send_device_command
+    from controller.api.routes.tasks import retry_task
     from controller.models.tenant import Task
     from controller.services.audit import COMMAND_ACTION, redact_command_params
 
@@ -369,7 +356,7 @@ async def main():
         async def close(self):
             pass
 
-    api_main.MDMConnector = FakeConnector
+    api_services.MDMConnector = FakeConnector
     cmd_device = await Device.create(
         tenant=tenant, udid="UDID-CMD", serial_number="CMDDEV",
         device_model="MacBookPro18,3", os_version="15.5",
@@ -423,7 +410,7 @@ async def main():
 
     # The message builder tolerates a transport that says nothing about pushes, and separates a failure with no reason
     # from no failure at all.
-    from controller.api.main import _command_sent_message, _push_failure_reason
+    from controller.api.routes.commands import _command_sent_message, _push_failure_reason
 
     check("no push keys at all reads as a healthy push",
           _push_failure_reason({"result": {"command_uuid": "u"}}) is None
@@ -567,8 +554,8 @@ async def main():
         def build_wifi_mobileconfig(ssid, password=None, hidden=False, org=None):
             return b"<wifi>"
 
-    real_enrollment = api_main.enrollment_svc
-    api_main.enrollment_svc = FakeEnrollment
+    real_enrollment = api_services.enrollment_svc
+    api_services.enrollment_svc = FakeEnrollment
     before_count = await AuditLog.filter(action=COMMAND_ACTION).count()
     try:
         await send_device_command(
@@ -581,7 +568,7 @@ async def main():
         check("an unconfirmed warning is a confirmable 400",
               exc.status_code == 400 and isinstance(exc.detail, dict))
     finally:
-        api_main.enrollment_svc = real_enrollment
+        api_services.enrollment_svc = real_enrollment
     check("asking the admin to confirm writes no audit row",
           await AuditLog.filter(action=COMMAND_ACTION).count() == before_count)
 
@@ -645,7 +632,7 @@ async def main():
           unrunnable_row is not None
           and unrunnable_row.detail.get("outcome") == "refused")
 
-    #  10. The refusals send_device_command answers before the shared path, and the commands nobody pressed a
+    # 10. The refusals send_device_command answers before the shared path, and the commands nobody pressed a
     #      button for.
     print("automated and pre-dispatch-refused commands:")
 
@@ -793,7 +780,7 @@ async def main():
     # Turning down a queued destructive remediation is itself a decision. Without a route for it the only answers are to
     # approve it or to leave it queued, and a queued command reads as nobody having looked.
     print("remediation decisions:")
-    from controller.api.main import (
+    from controller.api.routes.alerts import (
         RemediateRequest, RemediationRejectRequest,
         approve_alert_remediation, reject_alert_remediation,
     )
@@ -872,8 +859,7 @@ async def main():
         except HTTPException as exc:
             check("an unknown alert is a 404", exc.status_code == 404)
 
-        # A stale queued wipe on an alert that resolved itself: a resolved alert can still be vetoed even though it can
-        # no longer be approved.
+        # A wipe still queued on a resolved alert can be vetoed, though approving it is refused.
         resolved = await queued_alert(status="resolved")
         await reject_alert_remediation(
             str(resolved.id),

@@ -33,13 +33,8 @@ export const theme = createTheme({
                 header: "mm-overlay-header",
             },
         },
-        // Buttons and icon buttons sit on the same material as everything else: they take the highlight that
-        // follows the cursor, the press glow, and a small rise toward the reader. material "none" is the point,
-        // since the variant already paints the button and this only adds how it answers the pointer. Colour
-        // therefore survives untouched, which matters where colour is the warning (red erase, orange lock).
-        //
-        // Doing it here rather than at each call site is what makes it one edit: every Button in the app,
-        // including the ones inside modals and drawers, picks this up.
+        // Buttons and icon buttons get the cursor highlight, press glow and a small lift but no fill of their own
+        // (material "none"), so the variant's colour survives where colour is the warning (red erase, orange lock).
         Button: {
             defaultProps: {radius: "md"},
             classNames: {
@@ -61,10 +56,8 @@ export const theme = createTheme({
                 }),
             },
         },
-        // Text fields answer the pointer the same way, with the highlight that follows the cursor but not the
-        // press feedback or the pointer cursor: a field is typed into, not clicked. Set on Input, which is the
-        // element every text-entry component in Mantine builds on, so TextInput, Textarea, Select, Autocomplete
-        // and PillsInput all take it from here.
+        // Text fields get the cursor highlight but not press feedback or the pointer cursor. Set on Input, which
+        // TextInput, Textarea, Select, Autocomplete and PillsInput all build on.
         Input: {
             classNames: {
                 input: glassClassName({

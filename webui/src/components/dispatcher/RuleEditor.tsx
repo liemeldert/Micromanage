@@ -149,9 +149,8 @@ export function RuleEditor({initialRuleId}: { initialRuleId?: string | null }) {
     useEffect(() => {
         if (selection?.kind === "rule" && !rules.some((r) => r.id === selection.id)) setSelection(null);
     }, [rules, selection]);
-    // The ?rule= deep link only gets the first pick. Marked once a selection is
-    // committed, so a discard later falls to the top of the list instead of back
-    // onto the linked rule.
+    // The ?rule= deep link only gets the first pick. Marked once a selection is committed, so a discard later falls to
+    // the top of the list instead of back onto the linked rule.
     const picked = useRef(false);
     useEffect(() => {
         if (selection) picked.current = true;
@@ -160,8 +159,7 @@ export function RuleEditor({initialRuleId}: { initialRuleId?: string | null }) {
         if (selection || !ordered.length) return;
         const wanted = picked.current ? null : initialRuleId;
         const hit = wanted && ordered.some((r) => r.id === wanted) ? wanted : ordered[0].id;
-        // A link to a rule that no longer exists selects the top of the list, so name the one it
-        // could not find.
+        // A link to a rule that no longer exists selects the top of the list, so name the one it could not find.
         if (wanted && hit !== wanted) {
             notifications.show({
                 color: "yellow",
@@ -241,8 +239,7 @@ export function RuleEditor({initialRuleId}: { initialRuleId?: string | null }) {
                     webhooks: prev?.webhooks ?? [],
                     rules: (prev?.rules ?? []).filter((r) => r.id !== doomed.id)
                 }));
-                // Select the neighbour that takes the deleted rule's place, so the form does not
-                // empty out mid-edit.
+                // Select the neighbour that takes the deleted rule's place, so the form does not empty out mid-edit.
                 const rest = ordered.filter((r) => r.id !== doomed.id);
                 const next = rest[Math.min(idx, rest.length - 1)];
                 setSelection(next ? {kind: "rule", id: next.id} : null);
@@ -766,9 +763,8 @@ function ActionsEditor({
                                     value={a.type}
                                     onChange={(v) => {
                                         const type = v ?? "webhook";
-                                        // A remediation acts on real devices, so it starts in dry
-                                        // run. A missing dry_run reads as false on the server, so
-                                        // write it explicitly.
+                                        // A remediation acts on real devices, so it starts in dry run. A missing
+                                        // dry_run reads as false on the server, so write it explicitly.
                                         patch(i, {
                                             type,
                                             params: {},

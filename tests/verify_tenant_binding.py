@@ -29,14 +29,13 @@ from controller.services import enrollment as enroll  # noqa: E402
 from controller.services.webhook_handler import (  # noqa: E402
     WebhookHandler, _resolve_tenant, _first_param, _log_attempt,
 )
+from tests._verify_harness import make_check
 
 PASS, FAIL = [], []
 SECRET = os.environ["JWT_SECRET"]
 
 
-def check(label, cond):
-    (PASS if cond else FAIL).append(label)
-    print(f"  [{'PASS' if cond else 'FAIL'}] {label}")
+check = make_check(FAIL, PASS)
 
 
 class StubTenant:
@@ -344,7 +343,7 @@ async def test_upsert_end_to_end():
 async def test_existing_fleet_untouched():
     """Fleet safety: old installs with unsigned URLs still work.
 
-    This proves no security property (test 10 covers that); see docs for full context.
+    This proves no security property (test 10 covers that).
     """
     print("7) Already-enrolled devices are untouched (the load-bearing claim)")
     handler = WebhookHandler()
@@ -542,7 +541,8 @@ async def test_udid_rekey_is_audited():
     handler = WebhookHandler()
     await _fresh_fleet()
 
-    # Both identifiers hardware-derived; genuine device won't change serial on same udid. Stays permitted, is audited.
+    # Both identifiers are hardware-derived, so a real device does not change its serial on the same udid. The check-in
+    # stays permitted and is audited.
     dev = await handler._upsert_device(
         "UDID-TARGET", {}, {"SerialNumber": "SN-STOLEN"}, topic="mdm.Authenticate")
     logs = await AuditLog.filter(action="device.rekey").all()
@@ -727,7 +727,7 @@ async def test_attempt_log_is_tenant_scoped():
 
 
 async def test_tsig_is_a_bearer_token():
-    """tsig binds to tenant, not device. See docs for the bearer model."""
+    """tsig binds to tenant, not device."""
     print("15) BY DESIGN: tsig is a bearer claim on a TENANT, not on a device")
     handler = WebhookHandler()
     await _fresh_fleet()

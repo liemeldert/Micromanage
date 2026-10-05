@@ -71,7 +71,8 @@ export default function FlowsOverviewPage() {
     const router = useRouter();
     const {data, loading} = useConfigResource<FlowsConfig>("flows", {version: 2, flows: []});
     const [summary, setSummary] = useState<FlowsSummaryResponse | null>(null);
-    // The summary endpoint carries the run counts. If it refuses, the cards say so rather than counting forever.
+    // The summary endpoint carries the run counts. If it fails, the cards show them as unavailable instead of loading
+    // forever.
     const [summaryFailed, setSummaryFailed] = useState(false);
 
     useEffect(() => {

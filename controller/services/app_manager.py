@@ -43,11 +43,7 @@ class S3ConfigError(RuntimeError):
 
 
 def _is_set(value: Any) -> bool:
-    """Whether an author actually supplied this setting.
-
-    use_ssl: false counts, which is why this is not a truthiness test. An empty string does not, since that is what a
-    cleared form field and a blank YAML value both serialize to.
-    """
+    """Whether an author supplied this setting. False counts; None and a blank string do not."""
     if value is None:
         return False
     if isinstance(value, str):
@@ -92,10 +88,8 @@ class S3Settings:
 
 
 def no_bucket_error(tenant_id: Any) -> S3ConfigError:
-    """The error for a tenant that resolves to no bucket at all.
-
-    Only reachable from the ambient environment, since a tenant that describes its own object store already has to name
-    a bucket in it. Shared with the readiness predicate rather than written out twice, so both answer in one sentence.
+    """The error for a tenant that resolves to no bucket. Only reachable from the ambient environment, since a tenant's
+    own S3 config must name a bucket. Shared with the readiness check, so both give the same message.
     """
     return S3ConfigError(
         f"No S3 bucket is configured for tenant '{tenant_id}'. This tenant has "
@@ -121,10 +115,8 @@ def _incomplete_config_error(tenant_id: Any, declared: List[str],
 
 
 def resolve_s3_settings(tenant: Tenant) -> S3Settings:
-    """Resolve one tenant's S3 settings from exactly one trust domain.
-
-    No tenant S3 config: falls back to the ambient AWS environment. Any TENANT_S3_KEYS set: must supply its
-    own full config, environment is never read.
+    """Resolve one tenant's S3 settings from exactly one trust domain. Without a tenant S3 config this is the ambient
+    AWS environment; with any of TENANT_S3_KEYS set, the tenant's full config applies and the environment is not read.
     """
     s3_config = tenant.s3_config or {}
     # A hand-edited config or direct DB write could leave this as a list or string; every line below is a .get(),
@@ -184,10 +176,8 @@ class AppManager:
 
     @property
     def s3_client(self):
-        """boto3 client for this tenant's object store, built on first use.
-
-        Not built in __init__: an incomplete S3 config would then abort this tenant's entire reconcile cycle,
-        including profile and DDM reconciliation, which never touch S3.
+        """boto3 client for this tenant's object store, built on first use. Building it in __init__ would let an
+        incomplete S3 config abort this tenant's reconcile cycle, including profile and DDM work that never touches S3.
         """
         if self._s3_client is None:
             self._s3_client = self._init_s3_client()
@@ -227,10 +217,8 @@ class AppManager:
         groups_config: List[Dict[str, Any]],
         device_groups: Optional[List[str]] = None,
     ) -> List[Dict[str, Any]]:
-        """Which apps should be installed on a device.
-
-        Also persists the freshly-computed group membership. device_groups lets a caller that already evaluated
-        it skip recomputing.
+        """Which apps should be installed on a device. Also saves the freshly computed group membership; pass
+        device_groups to skip recomputing it.
         """
         if device_groups is None:
             device_groups = self.group_manager.evaluate_device_groups(device, groups_config)
@@ -268,10 +256,8 @@ class AppManager:
         self, device: Device, app: Dict[str, Any], device_groups: List[str],
         now: Optional[datetime] = None,
     ) -> Optional[Dict[str, Any]]:
-        """Newest version the device is both scoped and waved into.
-
-        Versions are stored oldest-first; walks in reverse so a held rollout falls through to the next-older
-        version rather than leaving the device with nothing.
+        """Newest version the device is both scoped and waved into. Versions are stored oldest-first, so this walks in
+        reverse and a held rollout falls through to the next-older version.
         """
         for version in reversed(app.get('versions', [])):
             if not evaluate_scope(device, device_groups, version):
@@ -286,11 +272,7 @@ class AppManager:
         return None
 
     def _get_s3_bucket(self) -> str:
-        """The bucket this tenant's packages live in.
-
-        Comes from the same source as the credentials that will address it, so this can't be the tenant's bucket signed
-        with the deployment's keys.
-        """
+        """The bucket this tenant's packages live in, taken from the same source as the credentials used to reach it."""
         settings = resolve_s3_settings(self.tenant)
         if not settings.bucket:
             raise no_bucket_error(self.tenant.id)
@@ -306,10 +288,8 @@ class AppManager:
 
     def scoped_app_ids(self, device: Device, apps_config: List[Dict[str, Any]],
                        device_groups: List[str]) -> set:
-        """Every app id this device is scoped into, rollout waves included.
-
-        Broader than evaluate_device_apps (what to install now): a caller checking whether the device left an
-        app's scope must not confuse a held rollout with a departed scope.
+        """Every app id this device is scoped into, rollout waves included. Broader than evaluate_device_apps, which
+        skips a held rollout, so a held rollout is not mistaken for a departed scope.
         """
         scoped = set()
         for app in apps_config:
@@ -348,10 +328,8 @@ class AppManager:
     LIST_LIMIT = 1000
 
     def list_packages(self) -> List[Dict[str, Any]]:
-        """Objects under this tenant's prefix.
-
-        Synchronous boto3; call through asyncio.to_thread. Only the first LIST_LIMIT objects get a HEAD for their
-        sha256 metadata; past that the checksum comes back unknown rather than the listing taking a minute.
+        """Objects under this tenant's prefix. Synchronous boto3; call through asyncio.to_thread. Only the first
+        LIST_LIMIT objects get a HEAD for their sha256 metadata, which keeps the listing fast; the rest report None.
         """
         bucket = self._get_s3_bucket()
         prefix = self._get_s3_prefix()
@@ -386,10 +364,8 @@ class AppManager:
         return out
 
     def storage_usage_bytes(self) -> int:
-        """Bytes under this tenant's prefix right now. Synchronous; use to_thread.
-
-        A listing, not a cached counter, so packages that arrived outside the upload endpoint count too. Cheap at the
-        sizes an MDM tenant holds (a few hundred objects at most).
+        """Bytes under this tenant's prefix right now. Synchronous; use to_thread. Sums a listing rather than a cached
+        counter, so packages that arrived outside the upload endpoint count too.
         """
         bucket = self._get_s3_bucket()
         prefix = self._get_s3_prefix()
@@ -406,10 +382,8 @@ class AppManager:
         return total
 
     def storage_quota_bytes(self) -> Optional[int]:
-        """The ceiling that applies to this tenant, or None for unlimited.
-
-        The tenant's own value wins when set; otherwise the deployment default from MDM_DEFAULT_STORAGE_QUOTA_BYTES,
-        read per call. Zero or less on either means no ceiling.
+        """The ceiling that applies to this tenant, or None for unlimited. The tenant's own value wins when set;
+        otherwise MDM_DEFAULT_STORAGE_QUOTA_BYTES, read per call. Zero or less on either means no ceiling.
         """
         own = getattr(self.tenant, 'storage_quota_bytes', None)
         if own is not None:
@@ -423,10 +397,8 @@ class AppManager:
         return default if default > 0 else None
 
     def checksum_package(self, app_s3_key: str) -> str:
-        """sha256 of an object already in the bucket, recorded on it for next time.
-
-        Synchronous; call through asyncio.to_thread. Rewrites the object's metadata via a server-side S3 copy
-        onto itself; a failure to write that back is logged but the digest is still returned.
+        """sha256 of an object already in the bucket, recorded in its metadata for next time. Synchronous; call through
+        asyncio.to_thread. The write-back is a server-side copy onto itself; if it fails, the digest is still returned.
         """
         bucket = self._get_s3_bucket()
         full_key = self._build_s3_key(app_s3_key)
@@ -453,10 +425,8 @@ class AppManager:
     async def ensure_deployment(self, device: Device, app_info: Dict[str, Any],
                                 task_id: Optional[str] = None,
                                 source: Optional[str] = None) -> AppDeployment:
-        """Get-or-create the (device, app) deployment row and link it to the attempt about to run.
-
-        Split out of deploy_app so a caller that already created the Task can stamp the link early, before the
-        Task can be lost to a restart while queued. Idempotent: deploy_app calls this again once it actually runs.
+        """Get-or-create the (device, app) deployment row and link it to the attempt about to run. Idempotent, so
+        callers that created the Task can call it before queueing, and deploy_app calls it again when the task runs.
         """
         deployment, created = await AppDeployment.get_or_create(
             tenant=self.tenant,
@@ -489,11 +459,8 @@ class AppManager:
     async def deploy_app(self, device: Device, app_info: Dict[str, Any],
                          mdm_connector: 'MDMConnector', task_id: Optional[str] = None,
                          source: Optional[str] = None) -> AppDeployment:
-        """Deploy an app to a device.
-
-        source names whoever asked for an app the device is not scoped into, and reaches the deployment row through
-        ensure_deployment. The handler reads it off the task's details, so every path that goes through a task carries
-        it without knowing it exists.
+        """Deploy an app to a device. source names whoever asked for an app the device is not scoped into; the task
+        handler passes it in from the task details and ensure_deployment stores it on the deployment row.
         """
         from controller.models.tenant import Task
 
@@ -509,9 +476,9 @@ class AppManager:
             await task.save()
 
         try:
-            # The manifest itself is built and served by GET /api/manifests/{id} (api/main.py), which presigns the
-            # download at the moment the device asks for it. Nothing is built here: a URL signed now would start ageing
-            # before the command has even been pushed.
+            # The manifest itself is built and served by GET /api/manifests/{id} (api/routes/manifests.py), which
+            # presigns the download at the moment the device asks for it. Nothing is built here: a URL signed now would
+            # start ageing before the command has even been pushed.
             manifest_url = f"{readiness.public_api_url()}/api/manifests/{deployment.id}"
 
             # Apple requires the ManifestURL to begin with https:, or the device fails with an error an admin can't
@@ -549,9 +516,7 @@ class AppManager:
 
             if task_id:
                 task = await Task.get(id=task_id)
-                task.status = 'running'
-                task.details['command_uuid'] = result.get('command_uuid')
-                await task.save()
+                await task.mark_sent(result.get('command_uuid'))
 
             logger.info(f"App deployment initiated for {device.serial_number}: {result}")
 
@@ -562,11 +527,7 @@ class AppManager:
 
             if task_id:
                 task = await Task.get(id=task_id)
-                task.status = 'failed'
-                task.error = str(e)
-                # Terminal outside update_progress, so stamp what retention keys on.
-                task.completed_at = datetime.now(timezone.utc)
-                await task.save()
+                await task.mark_push_failed(str(e))
 
             logger.error(f"Failed to deploy app to {device.serial_number}: {e}")
             raise
@@ -600,20 +561,14 @@ class AppManager:
             if task_id:
                 # Wait for the device. The webhook completes the task.
                 task = await Task.get(id=task_id)
-                task.status = 'running'
-                task.details['command_uuid'] = result.get('command_uuid')
-                await task.save()
+                await task.mark_sent(result.get('command_uuid'))
 
             return True
 
         except Exception as e:
             if task_id:
                 task = await Task.get(id=task_id)
-                task.status = 'failed'
-                task.error = str(e)
-                # Terminal outside update_progress, so stamp what retention keys on.
-                task.completed_at = datetime.now(timezone.utc)
-                await task.save()
+                await task.mark_push_failed(str(e))
 
             logger.error(f"Failed to remove app from {device.serial_number}: {e}")
             return False

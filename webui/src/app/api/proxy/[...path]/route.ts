@@ -8,11 +8,9 @@ const CONTROLLER = process.env.CONTROLLER_URL ?? "http://localhost:8001";
 const TIMEOUT_MS = Number(process.env.PROXY_TIMEOUT_MS) || 300_000;
 const UPLOAD_TIMEOUT_MS = Number(process.env.PROXY_UPLOAD_TIMEOUT_MS) || 600_000;
 
-// Upstream response headers that must not be copied through. Hop-by-hop headers belong to the upstream connection,
-// not this one. content-encoding, content-length and content-range describe the encoded upstream body, but fetch
-// hands back a decoded stream, so the browser would fail to decode it and the advertised length would be wrong.
-// set-cookie and www-authenticate would let the controller set cookies on this origin or raise a browser auth
-// prompt, and auth here is a bearer token the client holds.
+// Upstream response headers that are not copied through: hop-by-hop headers; content-encoding, content-length and
+// content-range, which describe the encoded body while fetch returns it decoded; and set-cookie and www-authenticate,
+// since auth here is a bearer token the client holds.
 const DROP_RESPONSE_HEADERS = new Set([
     "connection",
     "transfer-encoding",

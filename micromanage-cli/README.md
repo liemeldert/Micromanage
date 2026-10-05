@@ -4,7 +4,7 @@ This is largely unfinished and hasn't really been worked on with newer features.
 
 A typer + httpx client for the controller's REST API. Separate from
 `controller/tenant_cli`, which runs inside the controller container and is for higher level actions like tenant
-management
+management.
 
 ## Install
 

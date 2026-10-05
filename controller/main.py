@@ -47,6 +47,37 @@ def _touch_heartbeat() -> None:
         logger.warning("could not touch heartbeat file %s", HEARTBEAT_FILE, exc_info=True)
 
 
+async def backfill_bootstrap_tokens() -> None:
+    """One-time read-only backfill querying NanoMDM to mark devices with escrowed bootstrap tokens."""
+    import asyncpg
+    from controller.models.tenant import Device
+    from controller.services.nanomdm_store import _nanomdm_dsn
+
+    try:
+        dsn = _nanomdm_dsn()
+    except Exception as exc:
+        logger.warning("backfill_bootstrap_tokens: cannot resolve NanoMDM DSN: %s", exc)
+        return
+    try:
+        conn = await asyncpg.connect(dsn)
+    except Exception as exc:
+        logger.warning("backfill_bootstrap_tokens: cannot connect to NanoMDM database: %s", exc)
+        return
+    try:
+        query = "SELECT id FROM devices WHERE bootstrap_token_b64 IS NOT NULL AND bootstrap_token_b64 <> ''"
+        rows = await conn.fetch(query)
+        ids = [row["id"] for row in rows if row.get("id")]
+        if ids:
+            updated = await Device.filter(udid__in=ids, enrollment_state="enrolled").update(
+                bootstrap_token_escrowed=True
+            )
+            logger.info("backfill_bootstrap_tokens: marked %d device(s) as bootstrap_token_escrowed", updated)
+    except Exception as exc:
+        logger.warning("backfill_bootstrap_tokens: query failed: %s", exc)
+    finally:
+        await conn.close()
+
+
 class MDMController:
     # Java and its consequences to society
     def __init__(self):
@@ -54,12 +85,22 @@ class MDMController:
         self.mdm_connector = MDMConnector()
         self.scheduler = AsyncIOScheduler()
 
+    @staticmethod
+    async def warn_nanomdm_storage() -> None:
+        """Log when NanoMDM keeps completed command results, which carry escrowed secrets in the clear."""
+        warning = await readiness.check_nanomdm_storage()
+        if warning:
+            logger.warning("readiness: %s", warning)
+
     async def start(self):
         """Start the MDM controller."""
 
         await init_db()
 
         await self._bootstrap_admin()
+        await backfill_bootstrap_tokens()
+        await self.warn_nanomdm_storage()
+        self.scheduler.add_job(self.warn_nanomdm_storage, 'interval', hours=1, max_instances=1, coalesce=True)
 
         # Schedule periodic sync (reconcile declared config -> device tasks).
         self.scheduler.add_job(self.sync_all_tenants, 'interval', minutes=SYNC_INTERVAL_MINUTES, max_instances=1,

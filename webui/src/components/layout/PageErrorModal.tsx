@@ -1,9 +1,5 @@
-// What a route's error boundary renders. A centered dialog rather than a page of text, so a failure
-// reads as something that happened to the app rather than as the page the reader asked for. The glass
-// surface and radius come from the Modal defaults in lib/theme.ts.
-//
-// It cannot be dismissed, because behind it is a route that threw and has nothing to show. The only ways
-// out are retrying and leaving.
+// What a route's error boundary renders. It cannot be dismissed, because the route behind it threw and has nothing to
+// show; the only ways out are retrying and leaving. The glass surface and radius are Modal defaults from lib/theme.ts.
 
 import Link from "next/link";
 import {Alert, Button, Code, Group, Modal, Stack, Text, ThemeIcon} from "@mantine/core";

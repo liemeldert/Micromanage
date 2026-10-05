@@ -1,17 +1,10 @@
 # Dev overlay. Use it with:
 #   docker compose -f docker-compose.prod.yml -f docker-compose.dev.yml up
 #
-# What changes vs production:
-#   - Controller mounts live source, shorter sync interval
-#   - Postgres published on loopback for the IDE database tools
-#   - WebUI disabled here, run `yarn dev` on the host
-#   - NanoMDM validates device certs against step-ca, same as production; it
-#     just doesn't need to be on port 443 here, so this overlay defaults
-#     MDM_PORT to 8443 and the front binds without root. MDM_PORT reaches the
-#     front, so localhost:8443 serves /mdm and answers 404 for everything else,
-#     exactly as in production. NanoMDM's own listener, /v1/ included, is on
-#     127.0.0.1:9000.
-#
+# It mounts the live controller source with a shorter sync interval, publishes Postgres on loopback for IDE database
+# tools, and disables the webui service (run yarn dev on the host). NanoMDM still validates device certs against
+# step-ca. MDM_PORT defaults to 8443 so nanomdm-front binds without root. localhost:8443 serves /mdm and returns 404 for
+# everything else, as in production. NanoMDM's own listener, /v1/ included, is on 127.0.0.1:9000.
 
 services:
   # Bound to loopback so the IDE database tools and host scripts can reach the controller database. Production
@@ -20,11 +13,8 @@ services:
     ports:
       - "127.0.0.1:5432:5432"
 
-  # Only the published port changes. `!override` rather than a second entry:
-  # Compose merges `ports` additively, so an overlay that simply lists
-  # 8443:8080 would publish 443 as well and a dev box with nothing configured
-  # would still grab a privileged port. This replaces the base list instead.
-  # An explicit MDM_PORT in the environment or .env still wins over the 8443.
+  # Compose merges ports additively, so !override replaces the base list; without it 443 would be published as well.
+  # An explicit MDM_PORT in the environment or .env still wins over 8443.
   nanomdm-front:
     ports: !override
       - "${MDM_PORT:-8443}:8080"

@@ -10,7 +10,6 @@ from rich.table import Table
 from rich.progress import Progress, SpinnerColumn, TextColumn
 from rich.syntax import Syntax
 from rich.panel import Panel
-from rich import print as rprint
 from datetime import datetime
 import asyncio
 from functools import wraps
@@ -88,9 +87,8 @@ async def make_request(method: str, endpoint: str, **kwargs):
             **kwargs
         )
 
-        # A 401 from /auth/login just means the credentials were wrong; let
-        # the login command report that itself. Anywhere else, 401 means the
-        # session is gone (expired, revoked, tenant deactivated).
+        # A 401 from /auth/login just means the credentials were wrong; let the login command report that itself.
+        # Anywhere else, 401 means the session is gone (expired, revoked, tenant deactivated).
         if response.status_code == 401 and endpoint != '/auth/login':
             console.print("[red]Authentication failed. Please login again.[/red]")
             raise typer.Exit(1)
@@ -233,8 +231,7 @@ async def flows_migrate(
 ):
     """Migrate flows.yaml to the multi-flow v2 format.
 
-    Normalization happens automatically on every read; this command forces the
-    on-disk document to be rewritten to the v2 schema.
+    Reads already normalize to v2; this command writes the normalized document back to disk.
     """
     response = await make_request("GET", "/config/flows")
     if response.status_code != 200:
@@ -269,8 +266,7 @@ async def flows_migrate(
 @async_command
 async def yaml_get(
     config_type: str = typer.Argument(
-        ..., help="Config type: groups, apps, profiles, tags, flows, dispatcher, "
-                   "declarations, or config"
+        ..., help="Config type: groups, apps, profiles, tags, flows, dispatcher, declarations, or config"
     ),
     output: Optional[Path] = typer.Option(None, "--output", "-o", help="Output file")
 ):
@@ -323,7 +319,7 @@ async def yaml_update(
                 console.print(f"  ⚠️  {warning}")
     else:
         error_data = response.json()
-        console.print(f"[red]Failed to update configuration[/red]")
+        console.print("[red]Failed to update configuration[/red]")
         
         if 'detail' in error_data and isinstance(error_data['detail'], dict):
             if error_data['detail'].get('errors'):
@@ -498,7 +494,7 @@ async def device_info(device_id: str):
                 if task['error']:
                     console.print(f"   [red]Error: {task['error']}[/red]")
     else:
-        console.print(f"[red]Device not found[/red]")
+        console.print("[red]Device not found[/red]")
 
 @device_app.command("commands")
 @async_command
@@ -580,9 +576,8 @@ async def device_command(
         console.print(f"[red]Missing required parameter(s): {', '.join(missing)}[/red]")
         raise typer.Exit(1)
 
-    # The server also gates destructive commands on role (admin-only) and would
-    # reject this anyway, but asking here avoids sending a command the operator
-    # didn't mean to fire.
+    # The server also gates destructive commands on role (admin-only) and would reject this anyway, but asking here
+    # avoids sending a command the operator didn't mean to fire.
     if entry['destructive'] and not yes:
         if not typer.confirm(f"'{command}' is destructive: {entry['description']} Continue?"):
             raise typer.Abort()
@@ -706,7 +701,7 @@ async def task_info(task_id: str):
             panel_content += f"\n[bold red]Error:[/bold red]\n{task['error']}"
         
         if task['details']:
-            panel_content += f"\n\n[bold]Details:[/bold]\n"
+            panel_content += "\n\n[bold]Details:[/bold]\n"
             for key, value in task['details'].items():
                 panel_content += f"  {key}: {value}\n"
         
@@ -717,7 +712,7 @@ async def task_info(task_id: str):
         )
         console.print(panel)
     else:
-        console.print(f"[red]Task not found[/red]")
+        console.print("[red]Task not found[/red]")
 
 @task_app.command("cancel")
 @async_command

@@ -23,7 +23,7 @@ DESTRUCTIVE_COMMANDS = frozenset({
     "logout_user", "delete_user",
 })
 
-# Allowlist of config types a member may write. Keep in sync with _EDITABLE_CONFIG_TYPES in controller/api/main.py.
+# Allowlist of config types a member may write. Keep in sync with _EDITABLE_CONFIG_TYPES in api/routes/config.py.
 MEMBER_WRITABLE_CONFIG_TYPES = frozenset({"tags"})
 
 __all__ = [

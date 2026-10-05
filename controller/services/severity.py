@@ -1,7 +1,6 @@
 """The one rank table for the alert severity scale.
 
 Shared by Dispatcher board and ATC gate ladder. Unknown values rank 0 and escalate unchanged.
-See docs/controller/services/severity.md for design rationale, including ALIASES and the planned rename.
 """
 
 from typing import Dict, List

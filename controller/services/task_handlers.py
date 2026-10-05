@@ -1,40 +1,31 @@
 """Handlers for the queued MDM tasks the reconciler and the API fan out.
 
 Each one enqueues a command through NanoMDM; the webhook completes or fails the task when the device answers.
-Nothing here waits for a device. See _resolve_device_tenant for the device/tenant binding contract.
 """
 
-import asyncio
 import logging
-import weakref
 from typing import Any, Dict, Optional, Tuple
 
 from controller.models.tenant import Device, Task, Tenant
 from controller.services.app_manager import AppManager
 from controller.services.mdm_connector import MDMConnector
 from controller.services.profile_manager import ProfileManager
+from controller.utils.per_loop import PerLoop
 
 logger = logging.getLogger(__name__)
 
 # One connector, hence one httpx connection pool, per event loop; a per-task pool would be far more expensive.
-# Keyed by loop so a process that rebuilds its loop doesn't reuse a client bound to a dead one.
-_connectors: "weakref.WeakKeyDictionary" = weakref.WeakKeyDictionary()
+_connectors = PerLoop(lambda: MDMConnector())
 
 
 def shared_connector() -> MDMConnector:
     """The process's MDMConnector for the running loop. Callers must NOT close it."""
-    loop = asyncio.get_running_loop()
-    connector = _connectors.get(loop)
-    if connector is None:
-        connector = MDMConnector()
-        _connectors[loop] = connector
-    return connector
+    return _connectors.get()
 
 
 async def close_shared_connector() -> None:
     """Release the connector for the running loop (process shutdown hook)."""
-    loop = asyncio.get_running_loop()
-    connector = _connectors.pop(loop, None)
+    connector = _connectors.pop()
     if connector is not None:
         try:
             await connector.close()
@@ -47,15 +38,12 @@ async def _resolve_device_tenant(
     device: Optional[Device],
     tenant: Optional[Tenant],
 ) -> Tuple[Device, Tenant]:
-    """The (device, tenant) pair a handler operates on, bound or fetched.
+    """The (device, tenant) pair a handler operates on, bound by the caller or fetched.
 
-    Callers that already hold device/tenant pass them in to skip the fetch; a supplied tenant must be the
-    supplied device's own tenant (unchecked here, a caller contract). Only device.pk/udid/serial_number and
-    tenant.pk/name/s3_config are read off a bound object; do not read a new field without checking
-    _resolve_device_tenant's doc entry first, since a bound object can be a stale or narrowed snapshot.
+    A bound tenant must be the bound device's own; nothing checks it. A bound object may be stale or narrowed (.only()).
     """
     if device is None:
-        # Cold path (api/main.py's send_device_command, retry_task). Use device_id, not device.id: on a Task
+        # Cold path (send_device_command, retry_task in api/routes). Use device_id, not device.id: on a Task
         # read back without prefetch_related('device'), Tortoise 0.20 leaves .device an awaitable QuerySet.
         if tenant is None:
             device = await Device.get(id=task.device_id).prefetch_related('tenant')
@@ -128,11 +116,9 @@ async def handle_app_remove_task(task: Task, *, device: Optional[Device] = None,
 
 
 async def _deployable_profile(task: Task, tenant: Tenant) -> Dict[str, Any]:
-    """The profile definition this task should send, in a form fit to send.
+    """The profile definition this task should send.
 
-    A stored task's definition may have secrets replaced by a sentinel; sending that would install the sentinel
-    on the device, so a redacted record is re-read from profiles.yaml instead of used as-is. See
-    docs/controller/services/task_handlers.md for why and for what callers reach this path.
+    A stored definition with secrets replaced by a sentinel is re-read from profiles.yaml, never sent with the sentinel.
     """
     details = task.details or {}
     stored = details.get('profile_info') or {}
@@ -159,8 +145,7 @@ async def handle_profile_install_task(task: Task, *, device: Optional[Device] = 
                                       profile_info: Optional[Dict[str, Any]] = None):
     """Enqueue an InstallProfile for the task's device.
 
-    profile_info is the definition to install; a caller holding it binds it, otherwise _deployable_profile
-    resolves it from the stored task.
+    profile_info is the definition to install; when omitted, _deployable_profile resolves it from the stored task.
     """
     try:
         device, tenant = await _resolve_device_tenant(task, device, tenant)
@@ -218,7 +203,7 @@ async def handle_profile_remove_task(task: Task, *, device: Optional[Device] = N
         await task.update_progress(task.progress, 'failed')
 
 
-# Bare functions rather than bound partials: the only consumer is api/main.py's retry_task, which dispatches on
+# Bare functions rather than bound partials: the only consumer is api/routes/tasks.py's retry_task, which dispatches on
 # task.type holding nothing, so it calls handler(task) and takes the fetch path in _resolve_device_tenant.
 TASK_HANDLERS = {
     'app_install': handle_app_install_task,

@@ -19,6 +19,8 @@ os.environ["SECRET_ENCRYPTION_KEY"] = Fernet.generate_key().decode()
 import yaml
 from tortoise import Tortoise
 
+from tests._verify_harness import make_check
+
 _FAILURES = []
 
 # Captured AccountConfiguration sends, and the switch that makes the next one raise inside the connector, which is the
@@ -34,10 +36,7 @@ RECONCILE_CALLS = []
 WIFI_PROFILE_PASSWORD = "corpnet-psk-9a3e"
 
 
-def check(name, cond):
-    print(f"  [{'PASS' if cond else 'FAIL'}] {name}")
-    if not cond:
-        _FAILURES.append(name)
+check = make_check(_FAILURES)
 
 
 def _returns(value):
@@ -547,7 +546,7 @@ async def main():
         delta = dl - datetime.now(timezone.utc)
         return timedelta(minutes=minutes - 5) < delta <= timedelta(minutes=minutes + 5)
 
-    #  1) DEP enroll runs s-dep, applies tags/name/branch/install, parks; a
+    # 1) DEP enroll runs s-dep, applies tags/name/branch/install, parks; a
     #      green in-setup alert opens
     print("1) enroll_dep on a Mac runs s-dep and parks; green in-setup alert opens")
     dev = await new_device("MAC-EU", "host-eu-1", dep=True)
@@ -592,7 +591,7 @@ async def main():
           bool(a) and (a.detail or {}).get("kind") == "atc_in_setup"
           and (a.detail or {}).get("actions"))
 
-    #  2) device_info resumes -> release_device -> completes; alert resolves
+    # 2) device_info resumes -> release_device -> completes; alert resolves
     print("2) device_info resumes the run through release_device to completion")
     await atc.advance_on_signal(str(dev.id), "device_info")
     await run.refresh_from_db()
@@ -600,7 +599,7 @@ async def main():
     check("release_device visited", "dep-release" in (run.context or {}).get("visited", []))
     check("in-setup alert resolved after release", await active_in_setup(dev) is None)
 
-    #  3) wait_for timeout follows on_timeout (degraded)
+    # 3) wait_for timeout follows on_timeout (degraded)
     print("3) wait_for timeout follows on_timeout")
     dev2 = await new_device("MAC-US", "host-us-1", dep=True)
     run2 = (await atc.start_flows_for_event(dev2, "enroll_dep"))[0]
@@ -615,7 +614,7 @@ async def main():
     check("timeout tag applied", "onboarding-timeout" in dev2.tags)
     check("completed after timeout path", run2.status == "completed")
 
-    #  4) DEP vs OTA dispatch: enroll_profile runs s-profile only
+    # 4) DEP vs OTA dispatch: enroll_profile runs s-profile only
     print("4) enroll_profile runs the profile start (kind routing)")
     ota = await new_device("OTA-1", "host-ota")
     pruns = await atc.start_flows_for_event(ota, "enroll_profile")
@@ -623,13 +622,13 @@ async def main():
     check("one profile run started", len(pruns) == 1 and pruns[0].start_node == "s-profile")
     check("ota tag applied + completed", "ota" in ota.tags and pruns[0].status == "completed")
 
-    #  5) match scoping: a non-Mac device does not trigger the Mac-scoped start
+    # 5) match scoping: a non-Mac device does not trigger the Mac-scoped start
     print("5) start match scope excludes out-of-scope devices")
     ipad = await new_device("IPAD-1", "host-ipad", dep=True, model="iPad13,8")
     ipad_runs = await atc.start_flows_for_event(ipad, "enroll_dep")
     check("Mac-scoped s-dep did not trigger for an iPad", ipad_runs == [])
 
-    #  6) check-in dedup: a second check-in does not pile up a run
+    # 6) check-in dedup: a second check-in does not pile up a run
     print("6) checkin start dedups while a run is active")
     cdev = await new_device("CHK-1", "host-chk")
     r1 = await atc.start_flows_for_event(cdev, "checkin")
@@ -640,7 +639,7 @@ async def main():
         device_id=cdev.id, start_node="s-checkin", status__in=["running", "waiting"]).count()
     check("exactly one active checkin run", active == 1)
 
-    #  7) scheduled interval: launch, then skip until the interval elapses
+    # 7) scheduled interval: launch, then skip until the interval elapses
     print("7) scheduled start launches on interval, dedups within it")
     sdev = await new_device("SCHED-1", "host-sched")
     n1 = await atc.sweep_scheduled_starts(tenant, [sdev])
@@ -660,7 +659,7 @@ async def main():
     swept_rows = await AuditLog.filter(action="device.tags", target_id=str(sdev.id)).count()
     check("second (no-change) run wrote no additional audit row", swept_rows == 1)
 
-    #  7b) the sweep decides a whole fleet from two queries, not two per device
+    # 7b) the sweep decides a whole fleet from two queries, not two per device
     print("7b) scheduled sweep decides the fleet from prefetched sets")
     sdev2 = await new_device("SCHED-2", "host-sched2")
     sdev3 = await new_device("SCHED-3", "host-sched3")
@@ -710,7 +709,7 @@ async def main():
     check("device whose newest run is inside the interval did not relaunch",
           await FlowRun.filter(device_id=sdev.id, start_node="s-schedule").count() == 2)
 
-    #  7c) a run from a DIFFERENT flow does not dedup this one: dedup keys on (device, flow, start).
+    # 7c) a run from a DIFFERENT flow does not dedup this one: dedup keys on (device, flow, start).
     print("7c) a run from another flow with the same start id does not dedup")
     sdev4 = await new_device("SCHED-4", "host-sched4")
     await FlowRun.create(
@@ -724,7 +723,7 @@ async def main():
           await FlowRun.filter(device_id=sdev4.id, start_node="s-schedule",
                                flow_id=BASE_FLOW["id"]).count() == 1)
 
-    #  8) human gate: timeout -> manual_gate -> resume down chosen edge
+    # 8) human gate: timeout -> manual_gate -> resume down chosen edge
     print("8) wait_for timeout escalates to a manual_gate; admin decision resumes")
     gdev = await new_device("GATE-1", "host-gate")
     grun = await atc.start_run_from_start(gdev, "s-gate")
@@ -781,7 +780,7 @@ async def main():
     check("run failed on gate dismissal", grun2.status == "failed")
     _ = ga2
 
-    #  9) ref-based wait matches only the queued profile ref
+    # 9) ref-based wait matches only the queued profile ref
     print("9) profile_installed wait matches only the queued profile ref")
     dev3 = await new_device("REF-1", "host-ref")
     run3 = await atc.start_run_from_start(dev3, "s-ref")
@@ -794,14 +793,14 @@ async def main():
     await run3.refresh_from_db()
     check("matching profile ref resumes to completion", run3.status == "completed")
 
-    #  10) empty-expectation ref wait is skipped, not hung
+    # 10) empty-expectation ref wait is skipped, not hung
     print("10) a ref-based wait with nothing queued is skipped")
     dev6 = await new_device("STANDALONE-1", "host-sa")
     run6 = await atc.start_run_from_start(dev6, "s-standalone")
     await run6.refresh_from_db()
     check("standalone wait_for(app_installed) skipped -> completed", run6.status == "completed")
 
-    #  11) two sequential ref waits: stale ref must not satisfy the second
+    # 11) two sequential ref waits: stale ref must not satisfy the second
     print("11) REGRESSION: second wait_for is not satisfied by a stale ref")
     dev7 = await new_device("DOUBLE-1", "host-dw")
     run7 = await atc.start_run_from_start(dev7, "s-double")
@@ -825,7 +824,7 @@ async def main():
     await run7.refresh_from_db()
     check("matching P2 resumes to completion", run7.status == "completed")
 
-    #  12) flow_hash pinning: a breaking edit can't corrupt an in-flight run
+    # 12) flow_hash pinning: a breaking edit can't corrupt a run that is already started
     print("12) editing flows.yaml mid-run does not affect the pinned run")
     dev4 = await new_device("PIN-1", "host-eu-4", dep=True)
     run4 = (await atc.start_flows_for_event(dev4, "enroll_dep"))[0]
@@ -840,7 +839,7 @@ async def main():
     check("flow_hash unchanged", run4.flow_hash == original_hash)
     (tdir / "flows.yaml").write_text(yaml.safe_dump({"flow": BASE_FLOW}))
 
-    #  13) enroll supersede is scoped to the same start
+    # 13) enroll supersede is scoped to the same start
     print("13) re-enroll supersedes the prior run from the same start")
     dev5 = await new_device("RE-1", "host-eu-5", dep=True)
     ra = (await atc.start_flows_for_event(dev5, "enroll_dep"))[0]
@@ -852,7 +851,7 @@ async def main():
     check("prior run cancelled", ra.status == "cancelled")
     check("new run active + distinct", rb.id != ra.id and rb.status in ("waiting", "running", "completed"))
 
-    #  14) legacy multi-flow migration
+    # 14) legacy multi-flow migration
     print("14) legacy multi-flow flows.yaml migrates to a single flow")
     legacy = {"flows": [
         {"id": "legacy-a", "name": "A", "enabled": True, "priority": 10,
@@ -895,7 +894,7 @@ async def main():
           [f["id"] for f in v2flows] == ["enrollment", "triage"])
     check("v2 doc is silent", v2warns == [])
 
-    #  15) flows.yaml validator
+    # 15) flows.yaml validator
     print("15) validator accepts the model flow and rejects malformed starts/gates")
 
     def validate_flow(doc):
@@ -978,7 +977,7 @@ async def main():
     check("a gate that is neither true nor false warns and still saves",
           qok and any("neither true nor false" in w for w in qwarns))
 
-    #  16) a wait_for waits for EVERY ref the run queued, not the first one
+    # 16) a wait_for waits for EVERY ref the run queued, not the first one
     print("16) a three-profile barrier holds until all three land")
     dev8 = await new_device("ALL-1", "host-all")
     run8 = await atc.start_run_from_start(dev8, "s-all")
@@ -1027,7 +1026,7 @@ async def main():
     await run8.refresh_from_db()
     check("the second barrier's own ref completes the run", run8.status == "completed")
 
-    #  17) a partly-satisfied barrier that times out escalates
+    # 17) a partly-satisfied barrier that times out escalates
     print("17) a barrier stuck at 1 of 3 takes the on_timeout edge")
     dev9 = await new_device("ALL-2", "host-all2")
     run9 = await atc.start_run_from_start(dev9, "s-all")
@@ -1045,7 +1044,7 @@ async def main():
     check("the device is tagged as incomplete", "provisioning-incomplete" in dev9.tags)
     check("run finished down the degraded path", run9.status == "completed")
 
-    #  18) the pre-park check needs every ref too, not just one
+    # 18) the pre-park check needs every ref too, not just one
     print("18) the pre-park check requires all refs to be installed already")
     dev10 = await new_device("PRE-1", "host-pre1")
     for pid in ("P1", "P2"):
@@ -1066,7 +1065,7 @@ async def main():
           any("wait skipped" in (t.get("message") or "")
               for t in (run11.context or {}).get("timeline", [])))
 
-    #  19) configure_accounts settles the escrow against the device's answer
+    # 19) configure_accounts settles the escrow against the device's answer
     print("19) the managed-admin escrow is reconciled against the acknowledgement")
 
     async def account_task(device):
@@ -1157,8 +1156,7 @@ async def main():
           bool(task15) and "AutoSetupAdminAccounts" in (task15.error or ""))
     check("the timeline says why nothing was sent",
           "AutoSetupAdminAccounts" in timeline_of(run15))
-    check("the refusal is on the gap ledger as broken, so a release cannot call the "
-          "run clean",
+    check("the refusal is on the gap ledger as broken, so a release cannot call the run clean",
           any(g.get("grade") == "broken"
               and any(i.get("id") == "account_configuration" for i in (g.get("items") or []))
               for g in (run15.context or {}).get("gaps") or []))
@@ -1202,8 +1200,7 @@ async def main():
                                     kind=DeviceSecret.KIND_MANAGED_ADMIN).count() == 0)
 
     # ==19d) AccountConfiguration only goes to a Mac that enrolled through ADE==
-    print("19d) a hand-enrolled Mac skips the step instead of escrowing for an "
-          "account that will never exist")
+    print("19d) a hand-enrolled Mac skips the step instead of escrowing for an account that will never exist")
     dev19 = await new_device("ACCT-OTA", "host-acct-ota")
     run19 = await atc.start_run_from_start(dev19, "s-acct")
     await run19.refresh_from_db()
@@ -1310,8 +1307,7 @@ async def main():
         check("the reason travels with the ledger item, not just the timeline",
               any("unreachable" in (i.get("why") or "")
                   for g in gaps22 for i in (g.get("items") or [])))
-        check("nothing is expected, so the barrier below holds nothing and the run "
-              "does not park",
+        check("nothing is expected, so the barrier below holds nothing and the run does not park",
               run22.status != "waiting"
               and not ((run22.context or {}).get("expected") or {}).get("declaration_applied"))
         check("the empty barrier inherits the broken grade rather than reading as policy",
@@ -1321,8 +1317,7 @@ async def main():
         print("19e-i) a device waiting out an earlier refusal is a gap too")
         # A refused enqueue never stamps ddm_last_published_token, so backoff is distinguishable from "in sync".
         ddm.sync_device = _returns(ddm.SyncHeldOff(
-            "waiting until 2026-08-17T04:00:00Z after 2 refused attempt(s): "
-            "NanoMDM is unreachable (ConnectError)"))
+            "waiting until 2026-08-17T04:00:00Z after 2 refused attempt(s): NanoMDM is unreachable (ConnectError)"))
         dev23 = await new_device("DDM-HELD", "host-ddm-held")
         run23 = await atc.start_run_from_start(dev23, "s-ddm")
         await run23.refresh_from_db()
@@ -1335,8 +1330,7 @@ async def main():
         check("the ledger carries it graded broken",
               any(g.get("kind") == "not_queued" and g.get("grade") == "broken"
                   and g.get("signal") == "declaration_applied" for g in gaps23))
-        check("nothing is expected, so the run does not park on declarations "
-              "that are not coming",
+        check("nothing is expected, so the run does not park on declarations that are not coming",
               run23.status != "waiting"
               and not ((run23.context or {}).get("expected") or {}).get("declaration_applied"))
         check("SyncHeldOff is told apart from EnqueueFailed, not folded into it",
@@ -1373,7 +1367,7 @@ async def main():
         tenant.ddm_enabled = False
         await tenant.save()
 
-    #  20) a finished run stops carrying the whole flow document
+    # 20) a finished run stops carrying the whole flow document
     print("20) terminal runs drop the pinned flow snapshot")
     done_run = await FlowRun.get(id=run.id)
     check("a completed run has no snapshot", "flow" not in (done_run.context or {}))
@@ -1388,7 +1382,7 @@ async def main():
     check("a run that is still going keeps its snapshot",
           live_run.status == "waiting" and "flow" in (live_run.context or {}))
 
-    #  21) finished runs ask the coalescer for a reconcile, not one apiece
+    # 21) finished runs ask the coalescer for a reconcile, not one apiece
     print("21) a run that dirtied device state goes through request_reconcile")
     check("the coalescer was asked to reconcile the tenant", "default" in RECONCILE_CALLS)
 
@@ -1401,7 +1395,7 @@ async def main():
         return any(fragment in (t.get("message") or "")
                    for t in (run.context or {}).get("timeline", []))
 
-    #  22) no run ends silently
+    # 22) no run ends silently
     print("22) a failed run puts one alert on the board")
     fdev = await new_device("FAIL-1", "host-fail1")
     frun = await atc.start_run_from_start(fdev, "s-held")
@@ -1429,7 +1423,7 @@ async def main():
           bool(fa) and "FAIL-1" in fa[0].summary and "main" in fa[0].summary
           and "held-wait" in fa[0].summary)
 
-    #  23) the same failure over and over is still one row
+    # 23) the same failure over and over is still one row
     print("23) repeated failures of one flow on one device do not multiply rows")
     frun2 = await atc.start_run_from_start(fdev, "s-held")
     await FlowRun.filter(id=frun2.id).update(
@@ -1449,7 +1443,7 @@ async def main():
     check("no resolve-and-reopen churn behind it",
           await Alert.filter(device_id=fdev.id, rule_id="atc:flow-failed:main").count() == 1)
 
-    #  24) a run that gets to the end clears the row, and raises nothing itself
+    # 24) a run that gets to the end clears the row, and raises nothing itself
     print("24) a completed run resolves the failure alert and raises none of its own")
     okrun = await atc.start_run_from_start(fdev, "s-standalone")
     await okrun.refresh_from_db()
@@ -1461,7 +1455,7 @@ async def main():
     check("a run that succeeds first time completes", crun.status == "completed")
     check("and raises no alert at all", await Alert.filter(device_id=clean.id).count() == 0)
 
-    #  25) failing while holding an ADE device must not delete the evidence
+    # 25) failing while holding an ADE device must not delete the evidence
     print("25) a failure while holding a device in Setup Assistant keeps that alert open")
     hdev = await new_device("HELD-1", "host-held", dep=True)
     hrun = await atc.start_run_from_start(hdev, "s-held")
@@ -1492,7 +1486,7 @@ async def main():
           released and release_why is None)
     check("releasing resolves it", await active_in_setup(hdev) is None)
 
-    #  26) completing without releasing is not the same as releasing
+    # 26) completing without releasing is not the same as releasing
     print("26) a run that completes without releasing leaves the in-setup alert open")
     kdev = await new_device("KIOSK-1", "host-kiosk", dep=True)
     krun = await atc.start_run_from_start(kdev, "s-gate")
@@ -1513,7 +1507,7 @@ async def main():
     check("and a completion still raises no failure alert",
           await failure_alerts(kdev) == [])
 
-    #  27) an unexpected engine path reads differently from the normal one
+    # 27) an unexpected engine path reads differently from the normal one
     print("27) diagnostics: a barrier that held nothing back says so")
     check("an empty barrier says nothing was queued",
           timeline_has(run6, "nothing was queued for app_installed"))
@@ -1546,7 +1540,7 @@ async def main():
     check("and the run records that the 60 minutes was the engine's default",
           timeline_has(urun, "60 minute default"))
 
-    #  28) THE VACUOUS BARRIER: a flow that installs nothing must not be able to
+    # 28) THE VACUOUS BARRIER: a flow that installs nothing must not be able to
     #      release a device from Setup Assistant and report that it worked.
     print("28) an install that resolves nothing cannot release a device quietly")
 
@@ -1593,7 +1587,7 @@ async def main():
           bool(galert) and (galert[0].detail or {}).get("released_unverified") is True
           and (galert[0].detail or {}).get("gaps"))
 
-    #  29) the realistic trigger: a gradual rollout empties the barrier
+    # 29) the realistic trigger: a gradual rollout empties the barrier
     print("29) an app held back by a rollout wave trips the guard")
     rdev = await new_device("ROLL-1", "host-roll", dep=True)
     rrun = await atc.start_run_from_start(rdev, "s-rollout")
@@ -1624,7 +1618,7 @@ async def main():
     check("and the board item names the wait step",
           bool(palert) and "or-wait" in palert[0].summary)
 
-    #  30) the legitimate cases must keep working
+    # 30) the legitimate cases must keep working
     print("30) the flows that are supposed to do this keep working")
     odev = await new_device("OPTOUT-1", "host-optout", dep=True)
     orun = await atc.start_run_from_start(odev, "s-optout")
@@ -1665,7 +1659,7 @@ async def main():
           srun.status == "completed")
     check("and raises no alert", await failure_alerts(sdev) == [])
 
-    #  31) a ref that was queued and never turned up
+    # 31) a ref that was queued and never turned up
     print("31) a profile that never reported is named on the way out")
     ldev = await new_device("LATE-1", "host-late", dep=True)
     lrun = await atc.start_run_from_start(ldev, "s-late")
@@ -1686,9 +1680,8 @@ async def main():
     check("red on the board, since a profile the flow sent is not on the device",
           len(lalert) == 1 and lalert[0].severity == "red")
 
-    #  32) a coalesced row must not let a stale guard verdict outlive its run
-    print("32) released-unverified and its ledger do not survive past the run "
-          "that set them")
+    # 32) a coalesced row must not let a stale guard verdict outlive its run
+    print("32) released-unverified and its ledger do not survive past the run that set them")
 
     def ghost_doc(start_id, inst_id, wait_id, release_id, end_id):
         # The ghost flow from (28) again: a profile id the wait step can never resolve, so release_device trips the
@@ -1774,7 +1767,7 @@ async def main():
     check("and the row remembers when the streak actually started",
           bd2.get("first_failed_at") == b_first_seen)
 
-    #  33) the manual-gate escalation ladder
+    # 33) the manual-gate escalation ladder
     print("33) an unanswered manual gate escalates on the ladder, then fails")
 
     def gate_ladder(r):
@@ -1908,7 +1901,7 @@ async def main():
     check("the authored total then fails the run", lgrun.status == "failed")
     check("the error carries the authored total", "5 hours" in (lgrun.error or ""))
 
-    #  34) UPGRADE PATH: gates parked by the pre-ladder code have no deadline, which the sweep's <= query can never
+    # 34) UPGRADE PATH: gates parked by the pre-ladder code have no deadline, which the sweep's <= query can never
     #      match. They must be adopted onto the ladder rather than left waiting forever.
     print("34) a gate parked by the pre-ladder code is adopted onto the ladder")
     legdev = await new_device("LEGACY-1", "host-legacy")
@@ -1959,9 +1952,8 @@ async def main():
           await gate_alert_of(legrun) is None)
     check("and the snapshot is dropped", "flow" not in (legrun.context or {}))
 
-    #  35) the webhook defers ATC fan-out, and the deferred signals still arrive, in order
-    print("35) a webhook command response defers its ATC signals; the checkin-"
-          "started run still resumes on device_info")
+    # 35) the webhook defers ATC fan-out, and the deferred signals still arrive, in order
+    print("35) a webhook command response defers its ATC signals; the checkin-started run still resumes on device_info")
     from controller.services import webhook_handler
 
     wdev = await new_device("MAC-WEBHOOK", "host-webhook")
@@ -1985,7 +1977,7 @@ async def main():
     await wdev.refresh_from_db()
     check("the inventory write itself stayed inline", wdev.os_version == "14.6")
 
-    #  36) one rank table, one unknown-value default: both shared, so disagreement shows as misordered board.
+    # 36) one rank table, one unknown-value default: both shared, so disagreement shows as misordered board.
     print("36) one shared severity rank table, one unknown-value rule")
     import re
 
@@ -2007,8 +1999,7 @@ async def main():
     board = [_dispatcher.SEVERITY_RANK.get(s, 0) for s in _VALID_SEV]
     gate = [atc._severity_rank(s) for s in _VALID_SEV]
     check("both engines rank every valid severity identically", board == gate)
-    check("both engines rank an unknown severity identically, and below every "
-          "valid one",
+    check("both engines rank an unknown severity identically, and below every valid one",
           _dispatcher.SEVERITY_RANK.get("mauve", 0) == atc._severity_rank("mauve")
           == _severity.UNKNOWN_RANK
           and _severity.UNKNOWN_RANK < min(ranks_desc))
@@ -2027,7 +2018,8 @@ async def main():
           and atc._gate_severity({}) == "yellow")
     # Structural: the allow-list has exactly one definition. atc.py restating it as a bare tuple would make a rename of
     # the scale coerce every new name to "yellow" here while the validator accepted it everywhere else.
-    atc_src = Path(atc.__file__).read_text()
+    atc_files = [Path(atc.__file__)] + sorted(Path(atc.__file__).parent.glob("atc_*.py"))
+    atc_src = "\n".join(f.read_text() for f in atc_files)
     restated = [
         ln for ln in atc_src.splitlines()
         if not ln.strip().startswith("#")
@@ -2050,7 +2042,7 @@ async def main():
         _severity.ALIASES.pop("mauve", None)
     check("and the alias map is back to empty", _severity.ALIASES == {})
 
-    #  37) the flow document is read shared, and a run's pinned snapshot is its own copy.
+    # 37) the flow document is read shared, and a run's pinned snapshot is its own copy.
     #      Copy on start, not on read, to avoid rewriting snapshots when the document edits.
     print("37) the flow doc is read shared; a run's snapshot is its own copy")
     from controller.services import tenant_config as _tc
@@ -2061,8 +2053,7 @@ async def main():
     doc_before = copy.deepcopy(_tc._load_readonly(tid, "flows.yaml"))
     shared_doc = _tc._load_readonly(tid, "flows.yaml")
     # Wrapper dict is per read; nodes list is shared to keep the hot path cheap.
-    check("_load_flows does not copy the flows it hands out: the nodes are the "
-          "cached document's own list",
+    check("_load_flows does not copy the flows it hands out: the nodes are the cached document's own list",
           atc._load_flows(tid)[0].get("nodes") is atc._load_flows(tid)[0].get("nodes"))
     m5dev = await new_device("MAC-M5", "host-m5", dep=True)
     m5runs = await atc.start_flows_for_event(m5dev, "enroll_dep")
@@ -2082,8 +2073,7 @@ async def main():
         live_nodes.append({"id": "__injected__", "type": "end"})
         live["id"] = "__mutated__"
         snap = (m5runs[0].context or {}).get("flow") or {}
-        check("mutating the loaded document does not reach the run's pinned "
-              "snapshot",
+        check("mutating the loaded document does not reach the run's pinned snapshot",
               snap.get("id") == live_id
               and all(n.get("id") != "__injected__"
                       for n in (snap.get("nodes") or [])))
@@ -2096,7 +2086,7 @@ async def main():
     check("the document is back to what it was on disk",
           _tc._load_readonly(tid, "flows.yaml") == doc_before)
 
-    #  A command a flow sent is findable in the audit log: machine-attributed, flow-named.
+    # A command a flow sent is findable in the audit log: machine-attributed, flow-named.
     print("send_command steps are in the audit log")
     cmddev = await new_device("MAC-CMD", "host-cmd", dep=True)
     cmdrun = await atc.start_run_from_start(cmddev, "s-verified")
@@ -2126,10 +2116,10 @@ async def main():
           and (refused_rows[0].detail or {}).get("outcome") == "refused"
           and (refused_rows[0].detail or {}).get("task_id") is None)
 
-    #  The board's Release button, end to end
+    # ==The board's Release button, end to end==
     # Helper answers (ok, reason); must read both to avoid false success.
     print("the Release action reads both halves of the helper's answer")
-    from controller.api.main import AlertAction, alert_action
+    from controller.api.routes.alerts import AlertAction, alert_action
     from controller.auth.dependencies import Principal
     from controller.models.tenant import User as _User
 

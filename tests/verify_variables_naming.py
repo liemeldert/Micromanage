@@ -1,22 +1,18 @@
 """Standalone checks for the device-naming template pipeline: controller/services/variables.py (the {variable} registry
 and renderer) and controller/services/naming.py (template selection and resolution on top of it).
 
-No database: both modules only read attributes off whatever device object they are given, so these checks use a plain
-attribute bag instead of a Device model.
+Both modules only read attributes off the device object they are given, so these checks use a plain attribute bag
+instead of a Device model and need no database.
 
-Run (from repo root, with the project venv):
-
-    PYTHONPATH=. ./.venv/bin/python tests/verify_variables_naming.py
+Run: PYTHONPATH=. ./.venv/bin/python tests/verify_variables_naming.py
 """
 import sys
 
+from tests._verify_harness import make_check
+
 FAILURES: list = []
 
-
-def check(name: str, cond: bool) -> None:
-    print(f"  {'PASS' if cond else 'FAIL'}  {name}")
-    if not cond:
-        FAILURES.append(name)
+check = make_check(FAILURES)
 
 
 class Dev:
@@ -155,8 +151,7 @@ def main() -> None:
     check("suggested_name_for suppresses a self-referential template once the "
           "device already carries a managed name (loop guard)",
           n.suggested_name_for(named, self_ref_cfg, [], []) is None)
-    check("suggested_name_for still suggests a non-self-referential template "
-          "even on an already-named device",
+    check("suggested_name_for still suggests a non-self-referential template even on an already-named device",
           n.suggested_name_for(named, {"template": "MB-{serial}"}, [], []) == "MB-S1")
     check("resolve_device_name has no loop guard: it renders {hostname} "
           "unconditionally regardless of the device's current name",

@@ -4,9 +4,8 @@ import {IconSearch} from "@tabler/icons-react";
 import type {Device} from "../../../lib/api";
 
 /**
- * Multi-select device list for picking include and exclude cohorts. Searches serial, hostname, managed name and
- * model, and shows the managed name under each serial so a person can recognise the device. The color prop tints the
- * selection: teal for include, red for exclude.
+ * Multi-select device list for picking include and exclude cohorts, searchable by serial, hostname, display name and
+ * model. The color prop tints the selection: teal for include, red for exclude.
  */
 export function DevicePicker({
                                  devices,

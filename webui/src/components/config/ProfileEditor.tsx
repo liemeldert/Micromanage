@@ -66,10 +66,8 @@ import {SidebarLayout} from "../layout/SidebarLayout";
 import {GlassCard} from "../ui/GlassCard";
 
 export const IMPORT_KEY = "mm_profile_import";
-// The <date> keys an import recovered (lib/plist parseMobileconfig). Data keys live in the profile's
-// own data_keys; dates have nowhere to live, since profiles.yaml holds JSON values with no plist
-// type, so they sit beside the draft in sessionStorage. That store is tab-scoped: a download in a
-// later session types what the manifests and data_keys know, and warns about the rest.
+// The <date> keys an import recovered (lib/plist parseMobileconfig). profiles.yaml holds JSON with no plist types, so
+// dates cannot be stored in the profile and sit beside the draft in sessionStorage, which is tab-scoped.
 export const IMPORT_TYPES_KEY = "mm_profile_import_types";
 const PLIST_TYPES_KEY = "mm_profile_plist_types";
 
@@ -100,8 +98,7 @@ function writeDateTypes(id: string, types: PlistTypes) {
     }
 }
 
-// Meta keys every payload carries. None is ever binary, so keep them out of the
-// data_keys picker.
+// Meta keys every payload carries. None is ever binary, so keep them out of the data_keys picker.
 const PAYLOAD_META_KEYS = new Set([
     "PayloadType",
     "PayloadVersion",
@@ -113,8 +110,8 @@ const PAYLOAD_META_KEYS = new Set([
     "PayloadEnabled",
 ]);
 
-// Key names in a payload that hold a string somewhere. Only string leaves are decoded
-// (see profile_manager._decode_data_values), so declaring anything else does nothing.
+// Key names in a payload that hold a string somewhere. The server decodes only string values under a data_keys name,
+// so declaring any other key does nothing.
 function stringKeyNames(value: unknown, out: Set<string>, key?: string) {
     if (typeof value === "string") {
         if (key && !PAYLOAD_META_KEYS.has(key)) out.add(key);
@@ -138,15 +135,12 @@ interface DraftState {
     rollout?: Rollout;
     payloads: Record<string, unknown>[];
     enrollment: Record<string, unknown>;
-    // Key names whose base64 values must reach the device as plist <data>. Saved as
-    // the profile's data_keys.
+    // Key names whose base64 values must reach the device as plist <data>. Saved as the profile's data_keys.
     dataKeys: string[];
-    // Keys of the saved profile this form doesn't model (payload_type, and
-    // anything a YAML author wrote by hand). Carried through the round-trip so
-    // opening a profile and saving it can't silently delete parts of it.
+    // Keys of the saved profile this form doesn't model (payload_type, and anything a YAML author wrote by hand).
+    // Carried through the round-trip so opening a profile and saving it can't silently delete parts of it.
     extra: Record<string, unknown>;
-    // What an import said each date key was. Stripped from what gets saved;
-    // see PLIST_TYPES_KEY above.
+    // What an import said each date key was. Stripped from what gets saved; see PLIST_TYPES_KEY above.
     dates: PlistTypes;
 }
 
@@ -164,8 +158,8 @@ const FORM_OWNED_KEYS = new Set([
     "exclude_devices",
     "rollout",
     "payload",
-    // dep_manager reads payload before enrollment, so the form owns both keys and writes exactly one
-    // of them; carrying the other through would leave a stale copy under the settings on screen.
+    // The server reads an enrollment profile's settings from payload before enrollment, so the form owns both keys and
+    // writes exactly one of them; carrying the other through would save a stale copy alongside the settings on screen.
     "enrollment",
     "payloads",
     "data_keys",
@@ -192,7 +186,7 @@ function fromProfile(p: Profile, dates: PlistTypes = {}): DraftState {
         exclude_devices: p.exclude_devices ?? [],
         rollout: p.rollout,
         payloads: kind === "configuration" ? profilePayloads(p) : [],
-        // Read in the same order dep_manager does.
+        // Read in the same order the server does.
         enrollment: kind === "enrollment" ? (p.payload ?? p.enrollment ?? {}) : {},
         dataKeys: p.data_keys ?? [],
         extra,
@@ -213,8 +207,7 @@ function payloadLabel(pl: Record<string, unknown>): { title: string; subtitle?: 
     return {title: m ? m.title : (pl.PayloadType as string) || "Custom payload", subtitle: sub};
 }
 
-// profiles.yaml is outside MEMBER_WRITABLE_CONFIG_TYPES (controller/auth), so a member's save is
-// refused with 403. The form still renders; payload secrets come back redacted.
+// The API refuses a member's save of profiles with 403 and redacts payload secrets in what it returns to a member.
 const ADMIN_ONLY_REASON =
     "A profile changes settings on every device it targets, so authoring one is admin-only.";
 
@@ -234,20 +227,18 @@ export function ProfileEditor({profileId}: { profileId?: string }) {
     // Non-null while the raw JSON on screen does not match the draft. Saving waits for it to parse,
     // otherwise the last text that happened to parse would be saved instead of what is on screen.
     const [payloadTextError, setPayloadTextError] = useState<string | null>(null);
-    // Bumped on every delete. PayloadForm holds per-field local text, so it is
-    // keyed on the selected index plus this, and a delete that keeps the index
-    // still remounts it onto the payload that moved into the slot.
+    // Bumped on every delete. PayloadForm holds per-field local text, so it is keyed on the selected index plus this,
+    // and a delete that keeps the index still remounts it onto the payload that moved into the slot.
     const [payloadEpoch, setPayloadEpoch] = useState(0);
     const [idError, setIdError] = useState<string | null>(null);
-    // The id follows the name until the id itself is edited, after which the name no longer rewrites
-    // it. Only creation derives an id; an existing profile's is immutable and the field is disabled.
+    // The id follows the name until the id itself is edited. Only creation derives an id; an existing profile's is
+    // immutable and the field is disabled.
     const [idTouched, setIdTouched] = useState(false);
     const [initialized, setInitialized] = useState(false);
     const [notFound, setNotFound] = useState(false);
     const [addOpen, setAddOpen] = useState(false);
     const [addQuery, setAddQuery] = useState("");
-    // The draft as the editor opened on, so the guards below can tell a touched
-    // form from an untouched one.
+    // The draft as the editor opened on, so the guards below can tell a touched form from an untouched one.
     const baseline = useRef("");
 
     useEffect(() => {
@@ -361,8 +352,7 @@ export function ProfileEditor({profileId}: { profileId?: string }) {
     const leaveEditor = () =>
         confirmDiscard({dirty, what: "this profile", onConfirm: () => router.push("/profiles")});
 
-    // The JSON view and the form/json toggle belong to whichever payload is on
-    // screen, so they move together with it.
+    // The JSON view and the form/json toggle belong to whichever payload is on screen, so they move together with it.
     function syncPayloadView(pl?: Record<string, unknown>) {
         setMode(pl && getManifest(pl.PayloadType as string) ? "form" : "json");
         setPayloadText(pl ? JSON.stringify(pl, null, 2) : "{}");
@@ -407,9 +397,8 @@ export function ProfileEditor({profileId}: { profileId?: string }) {
         syncPayloadView(next === null ? undefined : payloads[next]);
     }
 
-    // Parse the raw JSON editor's text into the draft. Anything that is not a usable payload object
-    // leaves the draft alone and records an error, so a blank or invalid box cannot save as an empty
-    // object and lose PayloadType.
+    // Parse the raw JSON editor's text into the draft. Anything that is not a usable payload object leaves the draft
+    // alone and records an error, so a blank or invalid box cannot save as an empty object and lose PayloadType.
     function commitPayloadText(text: string): boolean {
         const trimmed = text.trim();
         if (!trimmed) {
@@ -507,7 +496,7 @@ export function ProfileEditor({profileId}: { profileId?: string }) {
         router.push("/profiles");
     }
 
-    //  render
+    // == render ==
     if (loading || !initialized) {
         return (
             <Box py={80} ta="center">
@@ -898,9 +887,8 @@ export function ProfileEditor({profileId}: { profileId?: string }) {
                             const cats = manifestsByCategory(draft.platforms)
                                 .map((g) => ({
                                     category: g.category,
-                                    // Keywords carry the section titles a merged
-                                    // domain absorbed, so searching Energy Saver still
-                                    // reaches the payload that now holds those keys.
+                                    // Keywords carry the section titles a merged domain absorbed, so searching Energy
+                                    // Saver still reaches the payload that now holds those keys.
                                     items: g.items.filter((m) =>
                                         `${m.title} ${m.domain} ${(m.keywords ?? []).join(" ")} ${m.fields.map(f => f.name).join(" ")}`
                                             .toLowerCase()

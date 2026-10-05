@@ -1,7 +1,4 @@
-"""Catalog of Dispatcher compliance checks: a curated set plus two generic ones.
-
-See docs/controller/services/compliance_catalog.md for design notes.
-"""
+"""Catalog of Dispatcher compliance checks: a curated set plus two generic ones."""
 
 import logging
 import os
@@ -9,9 +6,11 @@ import re
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
+from controller.utils.timeutil import as_utc
+
 logger = logging.getLogger(__name__)
 
-# ReDoS guard: pattern is admin-authored but subject is untrusted device data (see docs for details).
+# ReDoS guard: pattern is admin-authored but subject is untrusted device data.
 try:
     import regex as _regex_engine
 
@@ -33,20 +32,17 @@ CHECK_CATALOG: List[Dict[str, Any]] = [
      "description": "The device has no passcode set.",
      "category": "Security", "params": []},
     {"type": "user_approved_enrollment_missing", "label": "Enrollment not user-approved",
-     "description": "Nobody at the Mac ever approved its management, so macOS ignores "
-                    "the parts of a profile that depend on that approval (kernel "
-                    "extension policy, privacy/PPPC settings) while still reporting "
+     "description": "Nobody at the Mac ever approved its management, so macOS ignores the parts of a profile that "
+                    "depend on that approval (kernel extension policy, privacy/PPPC settings) while still reporting "
                     "the profile installed.",
      "category": "Security", "params": []},
     {"type": "bootstrap_token_disallowed", "label": "Bootstrap token not usable",
-     "description": "The Mac's Secure Enclave will not let secure operations use its "
-                    "bootstrap token, so managed software updates and kernel extension "
-                    "approval fail whenever they need it. The setting can be changed on "
-                    "the Mac itself, in recoveryOS.",
+     "description": "The Mac's Secure Enclave will not let secure operations use its bootstrap token, so managed "
+                    "software updates and kernel extension approval fail whenever they need it. The setting can be "
+                    "changed on the Mac itself, in recoveryOS.",
      "category": "Security", "params": []},
     {"type": "remote_desktop_enabled", "label": "Remote Management enabled",
-     "description": "Remote Management (Apple Remote Desktop screen sharing and "
-                    "control) is switched on (macOS).",
+     "description": "Remote Management (Apple Remote Desktop screen sharing and control) is switched on (macOS).",
      "category": "Security", "params": []},
     {"type": "os_below", "label": "OS below version",
      "description": "The OS version is below a minimum.",
@@ -72,23 +68,19 @@ CHECK_CATALOG: List[Dict[str, Any]] = [
      "description": "Any desired profile/app is missing or failed to install.",
      "category": "Drift", "params": []},
     {"type": "declaration_drift", "label": "Declaration drift (DDM)",
-     "description": "A desired DDM declaration is missing from the device's reported "
-                    "state, inactive, or invalid. Devices without DDM enabled are "
-                    "treated as compliant.",
+     "description": "A desired DDM declaration is missing from the device's reported state, inactive, or invalid. "
+                    "Devices without DDM enabled are treated as compliant.",
      "category": "Drift",
      "params": [{"name": "ids", "label": "Declaration ids", "type": "tags",
                  "required": False,
-                 "help": "Limit to specific declarations.yaml ids; empty checks the "
-                         "whole desired set."}]},
+                 "help": "Limit to specific declarations.yaml ids; empty checks the whole desired set."}]},
     {"type": "tagged", "label": "Carries a tag",
      "description": "The device carries any of the named tags.",
      "category": "Status",
      "params": [{"name": "tags", "label": "Tags", "type": "tags", "required": True}]},
     {"type": "flow_parked_for", "label": "Flow run parked too long",
-     "description": "An enrollment flow run has been waiting at the same step "
-                    "for longer than N hours. A run parked with no deadline is "
-                    "treated as compliant, because the engine puts it back on "
-                    "the clock by itself.",
+     "description": "An enrollment flow run has been waiting at the same step for longer than N hours. A run parked "
+                    "with no deadline is treated as compliant, because the engine puts it back on the clock by itself.",
      "category": "Status",
      "params": [{"name": "hours", "label": "Hours parked", "type": "int",
                  "required": True}]},
@@ -109,8 +101,7 @@ CHECK_CATALOG: List[Dict[str, Any]] = [
      "category": "Advanced",
      "params": [
          {"name": "key", "label": "Attribute path", "type": "string", "required": True,
-          "help": 'Dot path into device attributes, e.g. '
-                  '"SecurityInfo.SystemIntegrityProtectionEnabled".'},
+          "help": 'Dot path into device attributes, e.g. "SecurityInfo.SystemIntegrityProtectionEnabled".'},
          {"name": "operator", "label": "Operator", "type": "select", "required": True,
           "options": ["equals", "not_equals", "exists", "gt", "lt", "regex"]},
          {"name": "value", "label": "Value", "type": "string", "required": False},
@@ -281,7 +272,7 @@ def _not_seen_for(device, params, ctx):
     if last_seen is None:
         return None
     now = datetime.now(timezone.utc)
-    ls = last_seen if last_seen.tzinfo else last_seen.replace(tzinfo=timezone.utc)
+    ls = as_utc(last_seen)
     age_days = (now - ls).total_seconds() / 86400.0
     if age_days > days:
         return {"summary": f"Not seen for {age_days:.1f} days (limit {days:g})",
@@ -436,13 +427,11 @@ def _flow_parked_for(device, params, ctx):
         if _run_field(run, "wait_deadline") is None:
             continue
         # updated_at is auto_now and a parked run writes on every partial arrival, so this measures how long the run has
-        # been silent, the same reading parked_before uses in api/main.py.
+        # been silent, the same reading parked_before uses in api/routes/flow_runs.py.
         parked_since = _run_field(run, "updated_at")
         if not isinstance(parked_since, datetime):
             continue
-        since = (parked_since if parked_since.tzinfo
-                 else parked_since.replace(tzinfo=timezone.utc))
-        parked = (now - since).total_seconds() / 3600.0
+        parked = (now - as_utc(parked_since)).total_seconds() / 3600.0
         if parked <= hours:
             continue
         entry = {
@@ -459,8 +448,7 @@ def _flow_parked_for(device, params, ctx):
         return None
     if len(stuck) == 1:
         one = stuck[0]
-        summary = (f"Flow '{one['flow_id'] or '?'}' has been parked "
-                   f"{one['hours_parked']:g} hours at "
+        summary = (f"Flow '{one['flow_id'] or '?'}' has been parked {one['hours_parked']:g} hours at "
                    f"'{one['node'] or '?'}' (limit {hours:g})")
     else:
         summary = f"{len(stuck)} flow runs parked longer than {hours:g} hours"

@@ -41,8 +41,7 @@ export function usePeekTimer() {
         if (event.button !== 0) return;
         // Clearing first, since cancel drops the origin the drift check measures against.
         cancel();
-        // A hold released off the element leaves nothing to swallow, and a stale flag would eat the next
-        // honest click.
+        // A hold released off the element leaves nothing to swallow, and a stale flag would eat the next honest click.
         fired.current = false;
         origin.current = {x: event.clientX, y: event.clientY};
         timer.current = window.setTimeout(() => {

@@ -1,14 +1,7 @@
-"""Backend E2E for the account-config and firmware-lock ATC nodes and device secret escrow, on in-memory sqlite (no
-docker, no MDM network).
+"""Backend E2E for the configure_accounts and set_firmware_lock ATC nodes and device secret escrow, on in-memory sqlite
+with a fake MDM connector.
 
-Covers account_hash.password_hash_blob (SALTED-SHA512-PBKDF2, 128, 32) and that the on-wire passwordHash verifies
-against the escrowed password. Then the configure_accounts node: AccountConfiguration keys for standard/admin/skip,
-managed-admin provisioning and escrow, and password redaction from the audit task. Then set_firmware_lock choosing
-SetRecoveryLock on Apple silicon, SetFirmwarePassword on Intel and nothing on an unknown architecture, each escrowing
-its password. Finally device_secrets.reveal, which returns the plaintext, stamps the ledger and raises a single
-Dispatcher alert, and the flows.yaml validator for both node types.
-
-Run:  PYTHONPATH=. ./.venv/bin/python tests/verify_account_config.py Exits non-zero if any check fails.
+Run:  PYTHONPATH=. ./.venv/bin/python tests/verify_account_config.py
 """
 
 import hashlib
@@ -26,6 +19,8 @@ os.environ["SECRET_ENCRYPTION_KEY"] = Fernet.generate_key().decode()
 import yaml
 from tortoise import Tortoise
 
+from tests._verify_harness import make_check
+
 _FAILURES = []
 
 # Captured MDM commands (the fake connector appends here).
@@ -33,10 +28,7 @@ ACCOUNT_CMDS = []  # list of kwargs dicts from account_configuration
 RAW_CMDS = []  # list of (request_type, fields) from send_raw_command
 
 
-def check(name, cond):
-    print(f"  [{'PASS' if cond else 'FAIL'}] {name}")
-    if not cond:
-        _FAILURES.append(name)
+check = make_check(_FAILURES)
 
 
 class FakeConnector:
@@ -105,7 +97,6 @@ async def main():
 
     tenant = await Tenant.create(id="default", name="Default")
 
-    #  0) account_hash unit checks
     print("0) account_hash builds a valid SALTED-SHA512-PBKDF2 blob")
     blob = account_hash.password_hash_blob("hunter2", salt=b"\x01" * 32)
     parsed = plistlib.loads(blob)
@@ -130,7 +121,6 @@ async def main():
             enrollment_state="enrolled", groups=[], tags=[], attributes=attrs,
             dep_profile_uuid=f"DEP-{serial}")
 
-    #  1) configure_accounts sends AccountConfiguration + escrows the admin
     print("1) configure_accounts: standard primary + managed admin, escrowed")
     dev = await new_device("MAC-1", apple_silicon=True)
     runs = await atc.start_flows_for_event(dev, "enroll_dep")
@@ -160,7 +150,6 @@ async def main():
     check("audit task details carry NO password",
           task is not None and "password" not in yaml.safe_dump(task.details or {}).lower())
 
-    #  2) the on-wire passwordHash verifies against the escrowed password
     print("2) escrowed password reproduces the on-wire passwordHash")
     revealed = await device_secrets.reveal(secret, "admin:tester@example.com")
     check("reveal returns a plaintext", bool(revealed))
@@ -169,7 +158,6 @@ async def main():
                                      ph["salt"], ph["iterations"], dklen=128)
     check("passwordHash entropy matches PBKDF2(revealed_password)", recomputed == ph["entropy"])
 
-    #  3) reveal ledger and dispatcher alert
     print("3) break the glass stamps the ledger and raises one alert")
     await secret.refresh_from_db()
     check("reveal stamped the ledger (count=1, broken)",
@@ -188,7 +176,7 @@ async def main():
                                 rule_id="breakglass:managed_admin_password").count()
     check("still a single break-glass alert (updated, not duplicated)", alerts == 1)
 
-    #  4) set_firmware_lock: Apple silicon -> SetRecoveryLock (escrowed)
+    # 4) set_firmware_lock: Apple silicon -> SetRecoveryLock (escrowed)
     print("4) set_firmware_lock chooses the command by architecture")
     rl = await DeviceSecret.get_or_none(device_id=dev.id, kind=DeviceSecret.KIND_RECOVERY_LOCK)
     check("recovery-lock password escrowed for Apple silicon", rl is not None)
@@ -196,7 +184,7 @@ async def main():
     check("SetRecoveryLock sent for Apple silicon", len(recovery_cmds) == 1)
     check("SetRecoveryLock carries a NewPassword", recovery_cmds and "NewPassword" in recovery_cmds[0])
 
-    #  Intel device -> SetFirmwarePassword
+    # Intel device -> SetFirmwarePassword
     RAW_CMDS.clear()
     dev_intel = await new_device("MAC-INTEL", apple_silicon=False)
     await atc.start_flows_for_event(dev_intel, "enroll_dep")
@@ -206,7 +194,7 @@ async def main():
           await DeviceSecret.get_or_none(device_id=dev_intel.id,
                                          kind=DeviceSecret.KIND_FIRMWARE) is not None)
 
-    #  Unknown architecture -> skipped, no command, no escrow
+    # Unknown architecture -> skipped, no command, no escrow
     RAW_CMDS.clear()
     dev_unknown = await new_device("MAC-UNK", apple_silicon=None)
     await atc.start_flows_for_event(dev_unknown, "enroll_dep")
@@ -216,7 +204,6 @@ async def main():
                                      kind__in=[DeviceSecret.KIND_FIRMWARE,
                                                DeviceSecret.KIND_RECOVERY_LOCK]).count()) == 0)
 
-    #  5) validator accepts the good flow, rejects malformed nodes
     print("5) flows.yaml validator handles the new node types")
     valid, errors, warnings = YAMLValidator(tdir).validate_all()
     check("baseline flow with both new nodes validates", valid, )
@@ -247,16 +234,17 @@ async def main():
     check("static firmware lock without a password rejected",
           not v and any("password" in e for e in errs))
 
-    #  6) a static password in a flow node never leaves through the config API
     print("6) flows.yaml static passwords are redacted on every read path")
-    # The import position doesn't matter here; api.main resolves the YAML base per call.
+    # The import position doesn't matter here; config routes resolve the YAML base per call.
     from controller.auth.dependencies import Principal
     from controller.models.tenant import FlowRun, User
-    from controller.api.main import (
-        _REDACTED, _redact_flows_history, _restore_flow_secrets,
-        get_config_history_version, get_flow_run, get_yaml_config,
+    from controller.api.redaction import _REDACTED, _restore_flow_secrets, redact_config_history
+    from controller.api.routes.config import (
         _snapshot_config_history,
+        get_config_history_version,
+        get_yaml_config,
     )
+    from controller.api.routes.flow_runs import get_flow_run
 
     SECRET_PW = "Sup3rSecret-BreakGlass"
     static_flow = {**FLOW, "nodes": [
@@ -299,7 +287,7 @@ async def main():
           SECRET_PW in versions[-1].read_text())
     check("GET /config/flows/history/{id} redacts it", SECRET_PW not in hist["content"])
     check("unparseable history snapshot fails closed",
-          _redact_flows_history("{[not yaml") == "")
+          redact_config_history("flows", "{[not yaml", True) == "")
 
     run = await FlowRun.create(
         tenant=tenant, device=dev, flow_id="acct", flow_hash="x" * 64,
@@ -316,8 +304,6 @@ async def main():
     check("redacting the response leaves the stored snapshot intact",
           run.context["flow"]["nodes"][2]["params"]["password"] == SECRET_PW)
 
-    #  6a) once a run's snapshot is gone, the run viewer falls back to flows.yaml and reports whether that
-    #      fallback still matches what ran.
     print("6a) GET /flow-runs/{id} falls back to flows.yaml once the snapshot is gone")
     pinned_hash = atc._flow_hash(static_flow)
 
@@ -342,13 +328,13 @@ async def main():
     check("the fallback flow gets the same redaction as any other read",
           current_params["fw"]["password"] == _REDACTED)
 
-    # flows.yaml edited after the run's flow_hash was pinned: same run, different current document.
+    # flows.yaml edited after the run's flow_hash was pinned; same run, different current document.
     _write_configs(base, {**static_flow, "name": "Account flow (edited)"})
     edited_data = await get_flow_run(str(snapshot_free_run.id), member)
     check("a fallback edited since the run executed is reported as edited",
           edited_data["flow_source"] == "edited" and edited_data["flow"] is not None)
 
-    # The tenant's flow was since deleted entirely: null, not a raise.
+    # The tenant's flow is deleted entirely; the route returns a null flow and does not raise.
     (tdir / "flows.yaml").unlink()
     gone_data = await get_flow_run(str(snapshot_free_run.id), member)
     check("a run whose flow no longer exists returns a null flow without raising",

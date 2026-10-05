@@ -1,17 +1,5 @@
 """E2E checks for POST /api/v1/devices/{id}/command, on in-memory sqlite.
 
-Sections 1 to 3 cover Lost Mode's message-or-phone-number rule, enforced once in
-services.device_commands.dispatch_catalog_command rather than duplicated in the endpoint: a phone-only request succeeds
-and one with neither is refused.
-
-Sections 4 to 6 cover the response message. set_recovery_lock and set_firmware_password escrow a password and report
-whether that was a first set or a rotation, which the endpoint turns into its own message; every other command gets the
-plain default.
-
-Sections 7 to 9 cover the software-update queries and the custom DeviceInformation. A device answers an unknown query
-key with an error rather than with the rest of the answer, so Apple's key set is transcribed into the catalog, checked
-before anything is sent, and cross-checked against the fixed list the scheduled poll asks for.
-
 Run:  PYTHONPATH=. ./.venv/bin/python tests/verify_command_endpoint.py
 """
 import os
@@ -23,12 +11,11 @@ os.environ["SECRET_ENCRYPTION_KEY"] = Fernet.generate_key().decode()
 from fastapi import HTTPException
 from tortoise import Tortoise
 
+from tests._verify_harness import make_check
+
 PASS, FAIL = [], []
 
-
-def check(label, cond):
-    (PASS if cond else FAIL).append(label)
-    print(f"  [{'PASS' if cond else 'FAIL'}] {label}")
+check = make_check(FAIL, PASS)
 
 
 class FakeConnector:
@@ -57,12 +44,12 @@ async def main():
     await Tortoise.init(db_url="sqlite://:memory:", modules={"models": ["controller.models.tenant"]})
     await Tortoise.generate_schemas()
 
-    import controller.api.main as api_main
-    api_main.MDMConnector = FakeConnector
+    import controller.api.runtime as api_services
+    api_services.MDMConnector = FakeConnector
 
     from controller.auth.dependencies import Principal
     from controller.models.tenant import Tenant, User, Device
-    from controller.api.main import send_device_command, CommandRequest
+    from controller.api.routes.commands import CommandRequest, send_device_command
 
     tenant = await Tenant.create(id="t1", name="Test Tenant")
     admin_user = await User.create(tenant=tenant, email="admin@t1", role="admin")

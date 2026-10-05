@@ -1,16 +1,7 @@
-"""Verify the ATC flow drafts lifecycle: document surgery, secret handling and the invariants a draft has to satisfy
-while it sits beside the flow it copies.
+"""Verifies the ATC flow draft lifecycle: document surgery over services.flow_drafts, secret handling, and that a draft
+never runs.
 
 Run: PYTHONPATH=. ./.venv/bin/python tests/verify_atc_drafts.py
-
-The first sections are pure document work over services.flow_drafts. The last one needs a database, because a draft
-carries the same enrollment starts as the flow it copies, so services.atc executing one would provision every device
-twice. services.atc._load_flows is the only place that filter lives.
-
-Two things here are easy to get subtly wrong and are pinned deliberately. A draft's static passwords live on disk under
-the draft's own flow id, because _restore_flow_secrets keys on (flow_id, node_id) and would otherwise drop the sentinel
-the editor echoes back. And the diff compares authored values while reporting redacted ones:
-redacting first would make a rotated password compare equal to itself.
 """
 
 import copy
@@ -24,27 +15,18 @@ import yaml
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from tests._verify_harness import run
+from tests._verify_harness import make_check, run
 
 FAILED = []
 
-
-def check(desc: str, condition: bool, detail: str = "") -> None:
-    print(f"  [{'PASS' if condition else 'FAIL'}] {desc}" + (f": {detail}" if detail and not condition else ""))
-    if not condition:
-        FAILED.append(desc)
+check = make_check(FAILED)
 
 
 def document_checks():
     print("1) draft document surgery and invariants (flow_drafts.py)")
 
-    from controller.services import flow_drafts, flow_gate, flow_step_catalog, atc
-    from controller.api.main import (
-        _iter_flow_nodes,
-        _redact_flows_config,
-        _redact_flows_history,
-        _restore_flow_secrets,
-    )
+    from controller.services import flow_drafts, flow_gate
+    from controller.api.redaction import _redact_flows_config
 
     v2_base: Dict[str, Any] = {
         "version": 2,
@@ -98,7 +80,6 @@ def document_checks():
         ],
     }
 
-    # 1. Draft creation
     d1 = flow_drafts.create(v2_base, "enrollment", note="Updating firmware step", actor="admin@example.com",
                             at="2026-08-21T12:00:00Z")
     flows1 = d1["flows"]
@@ -113,12 +94,10 @@ def document_checks():
     check("draft does not carry permanent flag", draft_flow.get("permanent") is None)
     check("target flow is untouched", any(f["id"] == "enrollment" and f["permanent"] is True for f in flows1))
 
-    # Secret survival in draft (B1)
     fw_node = next(n for n in draft_flow["nodes"] if n["id"] == "fw-1")
     check("draft creation preserves plaintext secrets on disk",
           fw_node.get("params", {}).get("password") == "super-secret-password-123")
 
-    # Draft creation errors
     try:
         flow_drafts.create(d1, "enrollment")
         check("duplicate draft creation raises 409", False)
@@ -138,7 +117,7 @@ def document_checks():
         check("draft of a draft raises 404", e.status == 404)
 
     print("\n2) secret redaction covers drafts (A8.11)")
-    from controller.api.main import _REDACTED
+    from controller.api.redaction import _REDACTED
     redacted = _redact_flows_config(d1)
     draft_r = next(f for f in redacted["flows"] if f["id"] == "enrollment--draft")
     fw_r = next(n for n in draft_r["nodes"] if n["id"] == "fw-1")
@@ -165,28 +144,24 @@ def document_checks():
     check("diff flags base_drifted as false initially", diff_res["base_drifted"] is False)
 
     print("\n4) base drift detection and force waiving (A8.14)")
-    # Mutate live target in doc
     doc_with_drift = copy.deepcopy(d1)
     target_in_doc = next(f for f in doc_with_drift["flows"] if f["id"] == "enrollment")
     target_in_doc["name"] = "Renamed Live Enrollment"
 
-    # Check diff sees drift
     diff_drift = flow_drafts.diff(target_in_doc, draft_flow)
     check("diff detects base drift when live target changes", diff_drift["base_drifted"] is True)
 
-    # Promote without force fails
     try:
         flow_drafts.promote(doc_with_drift, "enrollment", force=False)
         check("promote on drifted base raises 409", False)
     except flow_drafts.DraftError as e:
         check("promote on drifted base raises 409", e.status == 409 and e.code == "draft-base-drift")
 
-    # Promote with force succeeds in document surgery
     promoted_doc, summary = flow_drafts.promote(doc_with_drift, "enrollment", force=True)
     check("promote with force=True succeeds", any(f["id"] == "enrollment" for f in promoted_doc["flows"]))
     check("promoted document has draft removed", not any(f["id"] == "enrollment--draft" for f in promoted_doc["flows"]))
-    # Promotion makes the two hashes agree again, so nothing downstream can tell afterwards whether force overrode a
-    # real drift. The summary is where the audit row gets its answer.
+    # Promotion makes the two hashes agree again, so only the summary records whether force overrode a real drift (the
+    # audit row reads it from there).
     check("the summary says force overrode a real drift", summary["base_drifted"] is True)
     _, undrifted = flow_drafts.promote(d1, "enrollment", force=True)
     check("and says so honestly when there was nothing to override",
@@ -196,7 +171,7 @@ def document_checks():
           str(sorted(undrifted)))
 
     print("\n5) gate finding split: advisory on draft vs blocking on promote (A8.14)")
-    # Put an illegal node in draft (e.g. release_device inside compliance draft)
+    # An illegal node in the draft: release_device inside the compliance flow.
     d_comp = flow_drafts.create(v2_base, "compliance")
     comp_draft = next(f for f in d_comp["flows"] if f["id"] == "compliance--draft")
     comp_draft["nodes"].insert(1, {
@@ -209,13 +184,12 @@ def document_checks():
     check("scoping violation on draft is marked advisory", all(f.advisory for f in comp_findings))
     check("advisory finding does not block draft save", len(flow_gate.blocking(findings)) == 0)
 
-    # Promote candidate turns draft into target, where it becomes non-advisory and blocks
+    # Promoting turns the draft into the target, where the finding blocks instead of advising.
     cand_doc, _ = flow_drafts.promote(d_comp, "compliance")
     cand_findings = flow_gate.check_flows_document(cand_doc, prior=v2_base)
     check("same violation on promoted target blocks save", len(flow_gate.blocking(cand_findings)) > 0)
 
     print("\n6) scope borrowing for drafts")
-    # Draft of enrollment flow borrows enrollment scope
     d_enr = flow_drafts.create(v2_base, "enrollment")
     enr_findings = flow_gate.check_flows_document(d_enr, prior=v2_base)
     check("release_device inside draft of enrollment flow is valid",
@@ -239,11 +213,10 @@ def document_checks():
 
 
 def secret_round_trip_checks():
-    """The sentinel the editor echoes back has to find the draft's own stored value. _restore_flow_secrets keys on
-    (flow_id, node_id), and a draft's node ids are the target's, so dropping the flow id from that key would collide
-    them."""
+    """A redaction sentinel echoed back on save resolves to the draft's own stored value, not the target's, since
+    _restore_flow_secrets keys on (flow_id, node_id) and a draft reuses the target's node ids."""
     print("\n9) a draft's secrets survive a save that never revealed them")
-    from controller.api.main import _REDACTED, _restore_flow_secrets
+    from controller.api.redaction import _REDACTED, _restore_flow_secrets
     from controller.services import flow_drafts
 
     check("flow_drafts uses the same sentinel as the config API",
@@ -275,8 +248,7 @@ def secret_round_trip_checks():
     check("the draft gets its own, not the flow it was copied from",
           draft_pw == "DRAFT-PW")
 
-    # A draft created without its own copy on disk has nothing under (draft_id, node_id), so the sentinel is dropped
-    # rather than resolved.
+    # A draft with no copy of its own on disk has nothing under (draft_id, node_id), so the sentinel is dropped.
     orphan = {"version": 2, "flows": [
         {"id": "enrollment", "name": "E", "permanent": True, "nodes": [node("LIVE-PW")]},
     ]}
@@ -290,8 +262,8 @@ def secret_round_trip_checks():
           "rather than inheriting somebody else's password",
           "password" not in incoming["flows"][0]["nodes"][0]["params"])
 
-    from controller.api.main import _redact_flows_history
-    snapshot = _redact_flows_history(yaml.safe_dump(on_disk))
+    from controller.api.redaction import redact_config_history
+    snapshot = redact_config_history("flows", yaml.safe_dump(on_disk), True)
     check("a history snapshot redacts the draft too",
           "DRAFT-PW" not in snapshot and "LIVE-PW" not in snapshot)
 
@@ -333,11 +305,10 @@ def diff_secret_checks():
 
 
 def legacy_document_checks():
-    """A tenant that has not saved through the multi-flow editor still has the single-flow document on disk. The draft
-    endpoints read the flow list, so without normalization on the way in they hand those tenants an empty list and 404
-    every draft operation."""
+    """A tenant that has not saved in the multi-flow format still has a single-flow document on disk. The draft
+    endpoints must normalize it on read, or they see an empty flow list and 404 every draft operation."""
     print("\n11) drafts work on a document that predates the v2 shape")
-    from controller.api.main import _flows_document
+    from controller.api.routes.flows import _flows_document
     from controller.services import flow_drafts, tenant_config
 
     base = Path(tempfile.mkdtemp())
@@ -378,13 +349,9 @@ def legacy_document_checks():
 
 
 def setup_script_checks():
-    """Scaffolding writes flows.yaml before there is a controller to ask, so every copy of the default enrollment flow
-    outside the catalog is a second source of truth, and they have drifted before: one copy carried a dead gate key and
-    offered a "Keep waiting" option wired to the release step, which would have released the device.
-
-    Two copies exist. `setup.sh cmd_tenant` still writes a literal heredoc for a newly created tenant, and the example
-    tenant `_scaffold_dev_tenant` installs now lives in deploy/tenant-template/default/ so CI can validate it (it used
-    to be a third heredoc, but yaml-configs/ is gitignored, so the file it produced never reached a checkout).
+    """Scaffolding writes flows.yaml before there is a controller to ask, so each copy of the default enrollment flow
+    outside the catalog has to match the generated one. Two copies exist: the heredoc setup.sh writes in cmd_tenant, and
+    deploy/tenant-template/default/flows.yaml, which _scaffold_dev_tenant installs and CI can validate.
     """
     print("\n12) every scaffolded copy is exactly the generated default flow")
     import re
@@ -415,7 +382,7 @@ def setup_script_checks():
 
 
 async def engine_checks():
-    """The property no document test can reach: services.atc never runs a draft."""
+    """Checks that services.atc never runs a draft, which no document test can show."""
     print("\n13) a draft never runs, on any trigger")
     from tortoise import Tortoise
 
@@ -440,9 +407,8 @@ async def engine_checks():
         doc.update(extra)
         return doc
 
-    # Every flow below carries the same start node id, which is what the editor mints, and the draft carries the same
-    # enrollment trigger as the flow it copies. Those are the two collisions the composite run identity and the draft
-    # filter have to survive.
+    # Every flow has the same start node id, and each draft has the same trigger as the flow it copies. The composite
+    # run identity and the draft filter have to handle both collisions.
     (tdir / "flows.yaml").write_text(yaml.safe_dump({"version": 2, "flows": [
         flow("enrollment", "enroll_dep", permanent=True),
         flow("enrollment--draft", "enroll_dep", draft_of="enrollment"),
@@ -490,8 +456,7 @@ async def engine_checks():
     check("and records nothing against the draft",
           {r.flow_id for r in sweeper_runs} == {"sweeper"})
 
-    # A draft that somebody hand-edited to enabled: true is still inert. The filter is on draft_of, deliberately ahead
-    # of the enabled check.
+    # A draft hand-edited to enabled: true is still inert, since the draft_of filter runs before the enabled check.
     doc = yaml.safe_load((tdir / "flows.yaml").read_text())
     for f in doc["flows"]:
         if f["id"] == "enrollment--draft":
@@ -529,8 +494,8 @@ async def engine_checks():
           ("completed", "failed", "cancelled"))
 
     print("\n15) the flow summary the switcher is built on")
-    # Nothing else calls this endpoint, so nothing else would catch a bad query in it.
-    from controller.api.main import get_flows_summary
+    # No other suite calls this endpoint, so none would catch a bad query in it.
+    from controller.api.routes.flows import get_flows_summary
     from controller.auth.dependencies import Principal
     from controller.models.tenant import User
 
@@ -538,7 +503,6 @@ async def engine_checks():
     member = Principal(tenant=tenant, user=user, email="member@default", role="member")
     summary = await get_flows_summary(member)
     by_id = {f["id"]: f for f in summary["flows"]}
-    # Drafts are in the summary on purpose, along with the note, author and age a caller needs to flag a stale one.
     check("it answers for every flow, drafts included",
           set(by_id) == {"enrollment", "sweeper", "off", "sweeper--draft"},
           str(sorted(by_id)))
@@ -560,11 +524,10 @@ async def engine_checks():
           and by_id["off"]["last_run_at"] is None)
 
     print("\n17) a promotion records what it overrode")
-    # The audit row is the only trace an override leaves, so it has to record what was actually overridden. A client may
-    # send force on every promotion and acknowledge whatever it had on screen, so neither is evidence that a refusal was
-    # walked past.
+    # The audit row is the only trace of an override, so it must record what was actually overridden. A client may send
+    # force and acknowledge on every promotion, so neither proves that a refusal was overridden.
     from fastapi import HTTPException
-    from controller.api.main import PromoteDraftRequest, promote_flow_draft
+    from controller.api.routes.flows import PromoteDraftRequest, promote_flow_draft
     from controller.models.tenant import AuditLog
 
     admin_user = await User.create(tenant=tenant, email="admin@default", role="admin")
@@ -576,8 +539,8 @@ async def engine_checks():
                                     target_id=target).first()
         return dict(row.detail or {}) if row else {}
 
-    # 'off' starts on enrollment without being the enrollment flow, which every promotion below would otherwise have to
-    # acknowledge past.
+    # 'off' is left out: it starts on enrollment without being the enrollment flow, so every promotion below would have
+    # to acknowledge that finding.
     (tdir / "flows.yaml").write_text(yaml.safe_dump({"version": 2, "flows": [
         flow("enrollment", "enroll_dep", permanent=True),
         flow("sweeper", "schedule"),
@@ -592,8 +555,8 @@ async def engine_checks():
           detail.get("force") is True and detail.get("base_drifted") is False
           and detail.get("acknowledged") == [], str(detail))
 
-    # Now one that has to get past both refusals: the live flow moved after the draft was taken, and the content coming
-    # in trips a policy finding.
+    # A draft that hits both refusals: the live flow changed after the draft was taken, and the incoming content trips a
+    # policy finding.
     drifted = flow_drafts.create(
         yaml.safe_load((tdir / "flows.yaml").read_text()), "enrollment",
         note="", actor="admin@default", at="")
@@ -632,7 +595,7 @@ async def engine_checks():
 
     print("\n18) a pre-existing finding does not block an unrelated promotion")
     # 'rogue' starts on enrollment without being the enrollment flow, a blocking finding already in the document before
-    # the promotion touched anything. Only what the promotion introduces may refuse it.
+    # the promotion. Only findings the promotion introduces may refuse it.
     (tdir / "flows.yaml").write_text(yaml.safe_dump({"version": 2, "flows": [
         flow("enrollment", "enroll_dep", permanent=True),
         flow("rogue", "enroll_dep"),
@@ -656,8 +619,8 @@ def unfinished_draft_checks():
 
     from controller.utils.yaml_validator import YAMLValidator
 
-    # Half-wired: a start with nowhere to go and no end anywhere. On a live flow that is several errors from
-    # _flow_edges and _check_flow_graph.
+    # Half-wired: a start with nowhere to go and no end. On a live flow that is several errors from _flow_edges and
+    # _check_flow_graph.
     unfinished = [
         {"id": "start-1", "type": "start", "params": {"kind": "checkin"}},
     ]

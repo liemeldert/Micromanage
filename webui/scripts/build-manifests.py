@@ -1,23 +1,9 @@
 #!/usr/bin/env python3
-"""Generate the profile editor's two generated artifacts.
+"""Generate the profile editor's payload catalog and its index of data keys.
 
-webui/lib/manifests.generated.json is the editor's payload catalog, built from the
-community ProfileManifests project (https://github.com/ProfileManifests/ProfileManifests).
-It enumerates *every* Apple payload manifest (Manifests/ManifestsApple), rather than a
-hand-maintained subset, so the profile editor's payload catalog stays in sync with
-upstream. For each manifest the real (non-PFC, non-Payload-meta) subkeys are extracted
-with full metadata; per-platform variants (...-iOS / ...-macOS / ...-tvOS) are merged with
-per-field platform tags; a single level of nesting under a ``PayloadContent`` container
-dict (SCEP, certificates) is flattened (tagged with ``parent``). Title comes from the
-manifest's ``pfm_title`` and category from a keyword heuristic on the domain/title.
-
-webui/lib/data-keys.generated.json is a separate, much smaller artifact: which keys of
-which payload type a plist carries as <data> and Micromanage therefore holds as base64.
-It is built by a wider scan than the catalog is (all four ProfileManifests directories
-plus Apple's own mdm/profiles schemas, recursing the whole subkey tree instead of one
-level) and stays out of manifests.generated.json because that file is imported into the
-client bundle whole: megabytes of form metadata for two kilobytes of type knowledge.
-Only keys whose manifest says the value is binary are listed; see classify_data_key.
+webui/lib/manifests.generated.json is the catalog, built from the community ProfileManifests project
+(https://github.com/ProfileManifests/ProfileManifests). webui/lib/data-keys.generated.json lists which keys of which
+payload type a plist carries as <data> (base64 in Micromanage), and is also built from Apple's mdm/profiles schemas.
 
 Run:  python3 webui/scripts/build-manifests.py   (needs git + network + PyYAML)
 """
@@ -31,13 +17,11 @@ import tempfile
 REPO = "https://github.com/ProfileManifests/ProfileManifests"
 SUBDIR = os.path.join("Manifests", "ManifestsApple")
 
-# The data-key scan reads all four manifest directories, not just Apple's: a
-# third-party payload is exactly the case the built-in table used to miss.
+# The data-key scan reads all four manifest directories, not just Apple's, so third-party payloads are covered.
 MANIFEST_DIRS = ("ManifestsApple", "ManagedPreferencesApple",
                  "ManagedPreferencesApplications", "ManagedPreferencesDeveloper")
 
-# Apple's own payload schemas, the second data-key source. Sparse-checkout recipe
-# is the one controller/utils/payload_types.py's docstring documents.
+# Apple's own payload schemas, the second data-key source; only mdm/profiles is checked out.
 APPLE_REPO = "https://github.com/apple/device-management"
 APPLE_BRANCH = "release"
 APPLE_SUBDIR = os.path.join("mdm", "profiles")
@@ -186,16 +170,8 @@ def build(apple_dir):
 
 #  data keys
 
-# A plist <data> value is not always a base64 blob. Some keys wrap UTF-8 TEXT:
-# com.apple.vpn.managed SharedSecret is a typed-in passphrase, a login script's
-# filedata is the script itself, and a PEM bundle is armored text. Micromanage
-# base64-decodes every key in this index before it builds the plist, so listing a
-# text key here would corrupt a real deployment whenever the typed-in value
-# happened to be base64-shaped. A key is listed only when its manifest gives
-# positive evidence the value is binary, any evidence of text wins over that, and
-# a key with neither is left out. Both lists are matched against the key's title
-# and description, never against its value, and never against the domain name
-# (com.apple.security.pem holds a DER blob despite the domain).
+# Micromanage base64-decodes every key in the data-key index, and some <data> keys hold text (a typed-in passphrase, a
+# script, a PEM bundle). A key is listed only on positive evidence that it is binary, and any evidence of text wins.
 TEXT_EVIDENCE = ("utf-8", "utf8", "rtf", "plain text", "text file", "script",
                  ".pem", "valid pem", "shared secret", "pre-shared", "preshared",
                  "password", "passphrase", "secret")
@@ -223,15 +199,10 @@ def usable_key(name):
 
 
 def scan(subkeys, containers, seen, elem_name, hit, kind):
-    """Collect (key name, container path, title, description) for every data key.
+    """Call hit with (key name, container path, title, description) for every data key under subkeys.
 
-    ``kind`` is "pfm" for a ProfileManifests plist or "apple" for one of Apple's
-    mdm/profiles schemas; the two spell the same tree with different key names.
-    An array's subkeys describe its elements, which carry no key of their own in
-    a plist, so they answer to the array's name: RawPublicKeysElement inside the
-    RawPublicKeys array is the key RawPublicKeys, at the granularity the decode
-    matches on. Recursion is over the whole tree, not one level, because
-    ManagedPreferences manifests nest several dictionaries deep.
+    kind is "pfm" for a ProfileManifests plist or "apple" for an Apple mdm/profiles schema; the two spell the same tree
+    with different key names. An array's subkeys describe its elements, so they are reported under the array's name.
     """
     if kind == "pfm":
         name_of, type_of, kids_of = "pfm_name", "pfm_type", "pfm_subkeys"

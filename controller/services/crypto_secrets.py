@@ -1,7 +1,4 @@
-"""Symmetric encryption for secrets stored at rest in the database.
-
-See docs/controller/services/crypto_secrets.md for key derivation, envelope binding, and ciphertext
-structure."""
+"""Symmetric encryption for secrets stored at rest in the database."""
 
 import base64
 import json
@@ -97,16 +94,15 @@ def _unwrap(decrypted: str) -> Optional[Tuple[str, str]]:
 def encrypt(plaintext: str, *, aad: Optional[str] = None) -> str:
     """Encrypt a UTF-8 string to a urlsafe token. Raises if no key is configured.
 
-    aad binds the ciphertext to where it is stored (see docs for details)."""
+    aad binds the ciphertext to where it is stored."""
     f = _fernet()
     if f is None:
         # A set-but-malformed SECRET_ENCRYPTION_KEY is named as such: reporting it as "no encryption key configured"
         # would send an operator off to set a value that is already set.
         raise SecretEncryptionUnavailable(
             readiness.fernet_key_error(os.getenv("SECRET_ENCRYPTION_KEY"))
-            or "No encryption key configured. Set SECRET_ENCRYPTION_KEY (a "
-               "Fernet key) or JWT_SECRET to enable encryption-at-rest for DEP "
-               "credentials."
+            or "No encryption key configured. Set SECRET_ENCRYPTION_KEY (a Fernet key) or JWT_SECRET to enable "
+               "encryption-at-rest for DEP credentials."
         )
     payload = _wrap(plaintext, aad) if aad is not None else plaintext
     return f.encrypt(payload.encode("utf-8")).decode("ascii")

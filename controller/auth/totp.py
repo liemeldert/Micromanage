@@ -34,11 +34,7 @@ def provisioning_uri(secret: str, account_label: str, issuer: str) -> str:
     """The otpauth://totp/ URI that a QR code encodes."""
     label = quote(issuer, safe="") + ":" + quote(account_label, safe="")
     params = (
-        f"secret={secret}"
-        f"&issuer={quote(issuer, safe='')}"
-        f"&algorithm=SHA1"
-        f"&digits={_DIGITS}"
-        f"&period={_PERIOD}"
+        f"secret={secret}&issuer={quote(issuer, safe='')}&algorithm=SHA1&digits={_DIGITS}&period={_PERIOD}"
     )
     return f"otpauth://totp/{label}?{params}"
 

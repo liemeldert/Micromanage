@@ -77,11 +77,8 @@ const PALETTE_DRAG_MIME = "application/x-micromanage-flow-node";
 // Edge-peek states for the palette, closed through to click-pinned.
 type PaletteMode = "closed" | "peek" | "open" | "pinned";
 
-// The palette floats over the canvas, in the band left between the toolbar across the top and the canvas floor.
-// Sized to sit alongside the app's navigation rather than outweigh it.
-//
-// The band is symmetric: the top has to clear the toolbar, and the bottom matches it so the panel reads as
-// centred on the canvas whether its block list fills the band or falls short of it.
+// The palette floats over the canvas, in the band between the toolbar across the top and the canvas floor. The top
+// clears the toolbar and the bottom matches it, so the panel stays centred however full its block list is.
 const PALETTE_WIDTH = 260;
 const PALETTE_BAND_TOP = 56;
 const PALETTE_BAND_BOTTOM = 56;
@@ -96,7 +93,7 @@ const GRID = 16;
 // Pointer tools. Pan drags the canvas; select drags a marquee over it.
 type CanvasTool = "pan" | "select";
 
-//  Custom canvas node
+// == Custom canvas node ==
 export function FlowNodeCard({data, selected, isConnectable}: NodeProps) {
     const d = data as FlowNodeData;
     const node = d.node;
@@ -265,7 +262,7 @@ export const MINIMAP_MASK: Record<"light" | "dark", string> = {
     dark: "rgba(0, 0, 0, 0.5)",
 };
 
-//  Editor
+// == Editor ==
 export interface FlowEditorOptions {
     tagNames: string[];
     profileIds: string[];
@@ -278,10 +275,9 @@ export interface FlowEditorOptions {
 }
 
 export interface FlowEditorProps {
-    // Identity of the loaded document on screen: it must change when a different document loads (new id, or a
-    // re-fetch) and must not change while the canvas is edited, because the canvas is rebuilt from initialNodes
-    // whenever it does. Mounting before the document and the node catalog have loaded emits an empty node list upward
-    // and overwrites the saved flow on the next save.
+    // Identity of the loaded document on screen. It must change when a different document loads and not while the
+    // canvas is edited, since the canvas is rebuilt from initialNodes whenever it does. Mounting before the document
+    // and the node catalog have loaded emits an empty node list upward and overwrites the saved flow on the next save.
     docKey: string;
     flowId: string;
     initialNodes: FlowNodeT[];
@@ -658,10 +654,9 @@ function FlowEditorInner({
                         style={{position: "absolute", inset: 0, zIndex: 4, pointerEvents: "none"}}
                     />
                 )}
-                {/* Invisible hover strip down the left edge. It takes pointer events only over its own few
-                    pixels, so canvas clicks elsewhere are untouched. It sits above the panel and stays armed
-                    through the peek: resting in the strip holds the peek, and only moving right off it onto the
-                    panel commits to open. */}
+                {/* Invisible hover strip a few pixels wide on the left edge, so canvas clicks elsewhere are untouched.
+                    It sits above the panel and stays armed through the peek: resting in it holds the peek, and moving
+                    right onto the panel opens it. */}
                 <Box
                     className="atc-palette-edge"
                     data-armed={paletteMode === "closed" || paletteMode === "peek"}

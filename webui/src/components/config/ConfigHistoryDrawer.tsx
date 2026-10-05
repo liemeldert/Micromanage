@@ -10,11 +10,9 @@ import {showConfigConflict} from "../../../lib/config";
 type EditableType = "groups" | "apps" | "profiles" | "declarations";
 
 /**
- * History drawer for a config document: prior versions newest first, a line diff against the live
- * file, and a restore. Restoring replaces the whole file, so currentVersion goes out as If-Match and
- * is refused if someone else has saved since; the server snapshots first, so a restore is undoable.
- * The diff base is the live file's own text, since re-serializing the editors' parsed JSON reformats
- * the YAML and marks every line changed.
+ * History drawer for a config document: prior versions newest first, a line diff against the live file, and a restore.
+ * Restore sends currentVersion as If-Match, so it is refused if someone else has saved since. The diff base is the
+ * live file's own text, since re-serializing the editors' parsed JSON reformats the YAML and marks every line changed.
  */
 export function ConfigHistoryDrawer({
                                         opened,

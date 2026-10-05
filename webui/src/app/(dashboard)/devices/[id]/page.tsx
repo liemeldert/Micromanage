@@ -173,7 +173,7 @@ function pick(obj: unknown, ...keys: string[]): string {
     return "--";
 }
 
-//  Small display primitives
+// == Small display primitives ==
 
 
 // Structured inventory values. Apple reports arrays and dictionaries for keys like the firewall app exceptions and
@@ -601,10 +601,8 @@ function ManagedDeploymentsCard({
                                             {note && (
                                                 <Text fz="xs" c="dimmed" mt={2} style={{maxWidth: 460}}>{note}</Text>
                                             )}
-                                            {/* A compliance rule put this on a device whose own scope never asked
-                          for it, so the rule is worth naming. The sentence about it staying
-                          only holds while the row is still held: a row at unscoped got there
-                          because the rule holding it is gone. */}
+                                            {/* The device's own scope did not ask for this, so name the rule that did.
+                          The "stays" sentence is for held rows; a row at unscoped has lost the rule holding it. */}
                                             {r.remediationRuleId && (
                                                 <Text fz="xs" c="blue" mt={2} style={{maxWidth: 460}}>
                                                     Installed by rule <Code>{r.remediationRuleId}</Code>.
@@ -1081,7 +1079,7 @@ function AutomationSection({
     );
 }
 
-//  Page
+// == Page ==
 
 // Same triage scale the dispatcher AlertBoard uses.
 const SEVERITY_COLOR: Record<string, string> = {
@@ -1097,7 +1095,15 @@ const SECRET_KIND_LABELS: Record<string, string> = {
     firmware_password: "Firmware password",
     recovery_lock: "Recovery lock password",
     filevault_prk: "FileVault recovery key",
+    activation_lock_bypass_code: "Activation Lock bypass code",
 };
+
+function bootstrapAuthLabel(val: unknown): string {
+    if (val === "allowed") return "Allowed";
+    if (val === "disallowed") return "Not allowed";
+    if (val === "not supported") return "Not supported";
+    return "Not reported";
+}
 
 function secretKindLabel(kind: string): string {
     return SECRET_KIND_LABELS[kind] ?? kind.replace(/_/g, " ");
@@ -1482,8 +1488,7 @@ export default function DeviceDetailPage({params}: { params: Promise<{ id: strin
         }
     };
 
-    // Name what is about to be destroyed from the secrets ledger, rather than parse it back out of the server's
-    // prose.
+    // Name what is about to be destroyed from the secrets ledger, rather than parse it back out of the server's prose.
     const confirmDiscardSecrets = async () => {
         let labels: string[] = [];
         try {
@@ -1815,9 +1820,8 @@ export default function DeviceDetailPage({params}: { params: Promise<{ id: strin
                                         if (s.value === "scope") setScopeError(null);
                                         if (s.value === "declarations") setDdmError(null);
                                     }}
-                                    // A row inside a surface that is itself answering the pointer, so it
-                                    // answers more quietly and lends the card its colour rather than
-                                    // competing with it.
+                                    // A row inside a surface that is itself answering the pointer, so it answers more
+                                    // quietly and lends the card its colour rather than competing with it.
                                     className={glassClassName({material: "none", nested: true})}
                                     style={{borderRadius: "var(--mantine-radius-sm)"}}
                                 />
@@ -1861,9 +1865,8 @@ export default function DeviceDetailPage({params}: { params: Promise<{ id: strin
                                     value={new Date(device.enrollment_date).toLocaleDateString()}
                                     copyable={false}
                                 />
-                                {/* last_seen, in the header badge, is when the device last spoke on its own.
-                      This is the poll schedule, which backs off the longer a device stays
-                      quiet. */}
+                                {/* last_seen, in the header badge, is when the device last spoke on its own. This is
+                      the poll schedule, which backs off the longer a device stays quiet. */}
                                 <FactRow
                                     label="Last polled"
                                     value={`${timeSince(device.last_polled_at)}, every ${device.poll_interval_minutes} min`}
@@ -1931,6 +1934,16 @@ export default function DeviceDetailPage({params}: { params: Promise<{ id: strin
                                 <CheckRow label="Activation Lock" value={bool(attrs.IsActivationLockEnabled)}/>
                                 <CheckRow label="Find My" value={bool(attrs.IsDeviceLocatorServiceEnabled)}/>
                                 <CheckRow label="iCloud Backup" value={bool(attrs.IsCloudBackupEnabled)}/>
+                                <FactRow
+                                    label="Bootstrap token"
+                                    value={device.bootstrap_token_escrowed ? "Escrowed" : "Not escrowed"}
+                                    copyable={false}
+                                />
+                                <FactRow
+                                    label="Allowed for authentication"
+                                    value={bootstrapAuthLabel(sec.BootstrapTokenAllowedForAuthentication)}
+                                    copyable={false}
+                                />
                             </SimpleGrid>
                             {Object.keys(sec).length === 0 && (
                                 <Text fz="xs" c="dimmed" mt="xs">
@@ -1973,8 +1986,7 @@ export default function DeviceDetailPage({params}: { params: Promise<{ id: strin
                                         )}
                                     </>
                                 ) : lostMode ? (
-                                    // Already in Lost Mode, so the copy below does not ask for it to be turned
-                                    // on.
+                                    // Already in Lost Mode, so the copy below does not ask for it to be turned on.
                                     <Text fz="sm" c="dimmed">
                                         This device is in Lost Mode but hasn&apos;t reported a location yet.
                                         Use{" "}
@@ -2181,8 +2193,7 @@ export default function DeviceDetailPage({params}: { params: Promise<{ id: strin
                                                    variant="light">{t.status}</Badge>
                                         </Group>
                                         {t.status === "running" && <Progress value={t.progress} size="xs" mt={4}/>}
-                                        {/* Explained, with the raw upstream text one click away inside the
-                          panel. */}
+                                        {/* Explained, with the raw upstream text one click away inside the panel. */}
                                         {t.error && (
                                             <Box mt={4} c="red" onClick={(e) => e.stopPropagation()}
                                                  style={{cursor: "auto"}}>

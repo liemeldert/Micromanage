@@ -1,4 +1,7 @@
-"""Dynamic device-naming templates. Derives a managed device name from a template like IT-{serial}, with placeholders from services.variables."""
+"""Dynamic device-naming templates.
+
+Derives a managed device name from a template like IT-{serial}, with placeholders from services.variables.
+"""
 
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -25,7 +28,9 @@ def select_naming_config(
     groups_config: Optional[List[Dict[str, Any]]],
     group_names: Optional[List[str]],
 ) -> Tuple[Optional[Dict[str, Any]], str]:
-    """Pick the naming config that governs a device. Returns (cfg, source) where source is group:<name>, tenant or none."""
+    """Pick the naming config that governs a device.
+
+    Returns (cfg, source) where source is group:<name>, tenant or none."""
     members = set(group_names or [])
     for group in groups_config or []:
         if group.get("name") in members and _has_template(group.get("device_naming")):

@@ -200,7 +200,7 @@ export function blankPayload(m: PayloadManifest): Record<string, unknown> {
     return out;
 }
 
-//  Enrollment (Automated Device Enrollment / DEP) manifest 
+// == Enrollment (Automated Device Enrollment / DEP) manifest ==
 
 // Setup Assistant panes that can be skipped. Mirrors the controller's skip-key registry, which drops
 // anything it does not recognise, so a stale entry here is harmless. The DEP profile editor also offers

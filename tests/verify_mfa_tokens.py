@@ -1,9 +1,6 @@
-"""Pending-MFA token isolation from session tokens.
+"""Pending-MFA token isolation from session tokens, in both directions.
 
 Run: PYTHONPATH=. python tests/verify_mfa_tokens.py
-
-A correct password with MFA enabled produces a pending-MFA token instead of a session token. That token must never work
-as a session, and a session token must never work as a pending step.
 """
 
 import os
@@ -19,19 +16,16 @@ from controller.auth.tokens import (
     JWT_ISSUER,
     MFA_PENDING_TOKEN_TYPE,
     MFA_PENDING_TTL_SECONDS,
-    TOKEN_TYPE,
     decode_mfa_pending_token,
     decode_session_token,
     issue_mfa_pending_token,
     issue_session_token,
 )
+from tests._verify_harness import make_check
 
 PASS, FAIL = [], []
 
-
-def check(label, cond):
-    (PASS if cond else FAIL).append(label)
-    print(f"  [{'PASS' if cond else 'FAIL'}] {label}")
+check = make_check(FAIL, PASS)
 
 
 def _raw_token(typ, *, role=None, exp_offset_seconds=3600, secret=None):
@@ -54,7 +48,7 @@ def _raw_token(typ, *, role=None, exp_offset_seconds=3600, secret=None):
                       algorithm=JWT_ALGORITHM)
 
 
-# -- 1. Cross-type rejection -----------------------------------------------
+# == 1. Cross-type rejection ==
 
 def test_session_refuses_pending():
     print("1) decode_session_token refuses a pending-MFA token")
@@ -71,7 +65,7 @@ def test_pending_refuses_session():
           decode_mfa_pending_token(session) is None)
 
 
-# -- 2. No role on pending tokens ------------------------------------------
+# == 2. No role on pending tokens ==
 
 def test_pending_has_no_role():
     print("\n3) A pending token carries no role claim")
@@ -81,7 +75,7 @@ def test_pending_has_no_role():
     check("role is absent from the claims", "role" not in claims)
 
 
-# -- 3. Expiry --------------------------------------------------------------
+# == 3. Expiry ==
 
 def test_expired_pending_refused():
     print("\n4) An expired pending token is refused")
@@ -90,7 +84,7 @@ def test_expired_pending_refused():
           decode_mfa_pending_token(token) is None)
 
 
-# -- 4. Wrong secret --------------------------------------------------------
+# == 4. Wrong secret ==
 
 def test_wrong_secret_refused():
     print("\n5) A token signed with a different secret is refused")
@@ -100,14 +94,14 @@ def test_wrong_secret_refused():
           decode_mfa_pending_token(token) is None)
 
 
-# -- 5. Lifetime constant ---------------------------------------------------
+# == 5. Lifetime constant ==
 
 def test_lifetime_constant():
     print("\n6) The lifetime constant is five minutes")
     check("MFA_PENDING_TTL_SECONDS is 300", MFA_PENDING_TTL_SECONDS == 300)
 
 
-# -- 6. Round-trip -----------------------------------------------------------
+# == 6. Round-trip ==
 
 def test_round_trip():
     print("\n7) A freshly minted pending token round-trips")

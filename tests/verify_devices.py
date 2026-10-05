@@ -15,17 +15,15 @@ from controller.models.tenant import (
     Tenant, User, Device, Task, Alert, AppDeployment, DeviceSecret, FlowRun,
 )
 from controller.api.ids import filter_device_id, is_uuid
-from controller.api.main import (
-    forget_device, get_alert, get_device_details, get_task_details,
-    list_device_flow_runs, list_tasks,
-)
+from controller.api.routes.alerts import get_alert
+from controller.api.routes.devices import forget_device, get_device_details
+from controller.api.routes.flow_runs import list_device_flow_runs
+from controller.api.routes.tasks import get_task_details, list_tasks
+from tests._verify_harness import LogCapture, make_check, SqlSpy
 
 PASS, FAIL = [], []
 
-
-def check(label, cond):
-    (PASS if cond else FAIL).append(label)
-    print(f"  [{'PASS' if cond else 'FAIL'}] {label}")
+check = make_check(FAIL, PASS)
 
 
 async def main():
@@ -314,16 +312,9 @@ async def main():
         device_model="MacBookPro18,3", os_version="15.1",
         enrollment_state="unenrolled", groups=[], tags=[])
 
-    tick_errors = []
-
-    class _Capture(logging.Handler):
-        def emit(self, record):
-            if record.levelno >= logging.ERROR:
-                tick_errors.append(f"{record.name}: {record.getMessage()}")
-
     # The parent logger rather than a per-module list: a lazy-field AttributeError can surface in any controller module
     # the flow touches (device_commands, ddm_manager, naming), new ones included.
-    cap = _Capture()
+    cap = LogCapture(level=logging.ERROR)
     logging.getLogger("controller").addHandler(cap)
     summary = await poller.poll_tenant(ptenant)
     await asyncio.sleep(0.3)  # let the spawned pushes and reconcile settle
@@ -332,7 +323,7 @@ async def main():
     check("tick saw only the enrolled devices", summary["devices"] == 2)
     check("only the due device was polled", summary["polled"] == 1)
     check("no errors on the partial-row tick (no lazy-field access blew up)",
-          tick_errors == [])
+          cap.messages == [])
     await p1.refresh_from_db()
     await p2.refresh_from_db()
     check("group membership refreshed from the partial row (Mac matched)",
@@ -421,14 +412,6 @@ async def main():
         return {d.serial_number: d.last_polled_at
                 for d in await Device.filter(tenant=ctenant)}
 
-    class _InfoCapture(logging.Handler):
-        def __init__(self):
-            super().__init__()
-            self.messages = []
-
-        def emit(self, record):
-            self.messages.append(record.getMessage())
-
     poll_log = logging.getLogger("controller.services.poller")
     saved_cap = poller.POLL_MAX_PER_TICK
     try:
@@ -436,7 +419,7 @@ async def main():
         await set_due(cap_devs)
         poller.POLL_MAX_PER_TICK = 10
         before = await snapshot()
-        cap_log = _InfoCapture()
+        cap_log = LogCapture()
         poll_log.addHandler(cap_log)
         poll_log.setLevel(logging.INFO)
         under = await poller.poll_tenant(ctenant)
@@ -451,7 +434,7 @@ async def main():
         await set_due(cap_devs)
         poller.POLL_MAX_PER_TICK = 2
         before = await snapshot()
-        cap_log = _InfoCapture()
+        cap_log = LogCapture()
         poll_log.addHandler(cap_log)
         first = await poller.poll_tenant(ctenant)
         poll_log.removeHandler(cap_log)
@@ -609,12 +592,10 @@ async def main():
     try:
         poller.POLL_MAX_PER_TICK = 2
         budget_tick = await poller.poll_tenant(itenant)
-        check(f"the poll pass spends the tick's budget first "
-              f"(polled {budget_tick['polled']}, inventoried "
+        check(f"the poll pass spends the tick's budget first (polled {budget_tick['polled']}, inventoried "
               f"{budget_tick['inventoried']})",
               budget_tick["polled"] == 2 and budget_tick["inventoried"] == 0)
-        check("...and the devices it could not reach were left with nothing "
-              "queued, so they are still due next tick",
+        check("...and the devices it could not reach were left with nothing queued, so they are still due next tick",
               await Task.filter(tenant=itenant, device_id=budget_devs[0].id,
                                 type__in=("profile_list", "app_list")).count()
               + await Task.filter(tenant=itenant, device_id=budget_devs[1].id,
@@ -688,8 +669,7 @@ async def main():
         tenant=itenant, device=confirm_dev, app_id="pending-app",
         app_version="1.0", status="accepted")
     chased = await poller.poll_tenant(itenant)
-    check(f"a device holding an accepted install is asked what it holds "
-          f"({chased['confirmations']})",
+    check(f"a device holding an accepted install is asked what it holds ({chased['confirmations']})",
           chased["confirmations"] == 1 and await confirm_tasks() == baseline + 1)
     asked = await Task.filter(tenant=itenant, device_id=confirm_dev.id,
                               type="app_list").order_by("-created_at").first()
@@ -710,8 +690,7 @@ async def main():
           soon["confirmations"] == 0 and await confirm_tasks() == baseline + 1)
     await nothing_asked_lately()
     later = await poller.poll_tenant(itenant)
-    check(f"...but it is asked again once the cadence has elapsed "
-          f"({later['confirmations']})",
+    check(f"...but it is asked again once the cadence has elapsed ({later['confirmations']})",
           later["confirmations"] == 1 and await confirm_tasks() == baseline + 2)
 
     # And it stops the moment nothing is waiting.
@@ -800,8 +779,7 @@ async def main():
 
     first_back = await poller.poll_tenant(btenant)
     rows_after_first = await back_tasks()
-    check(f"the first tick tries, and the tries fail "
-          f"(polled {first_back['polled']}, {rows_after_first} task rows)",
+    check(f"the first tick tries, and the tries fail (polled {first_back['polled']}, {rows_after_first} task rows)",
           first_back["polled"] == 1 and rows_after_first > 0
           and await Task.filter(tenant=btenant, status="failed").count()
           == rows_after_first)
@@ -844,13 +822,11 @@ async def main():
     resumed = await poller.poll_tenant(btenant)
     await b_dev.refresh_from_db()
     resumed_state = (b_dev.attributes or {}).get(poller.ENQUEUE_BACKOFF_KEY) or {}
-    check(f"a check-in resumes it before the interval is up "
-          f"(backed off {resumed['enqueue_backoff']}, "
+    check(f"a check-in resumes it before the interval is up (backed off {resumed['enqueue_backoff']}, "
           f"{await back_tasks()} rows from {rows_before_recovery})",
           resumed["enqueue_backoff"] == 0
           and await back_tasks() > rows_before_recovery)
-    check(f"...and the ladder it had climbed is wiped, not continued "
-          f"(failures {resumed_state.get('failures')})",
+    check(f"...and the ladder it had climbed is wiped, not continued (failures {resumed_state.get('failures')})",
           resumed_state.get("failures") == 1)
 
     # And a send that works clears the record outright.
@@ -866,43 +842,17 @@ async def main():
                             command_uuid__isnull=False).count() > 0)
     poller.MDMConnector = FakeConnector
 
-    # ==narrowed reads on the api.main list endpoints==
+    # ==narrowed reads on the api list endpoints==
     print("api list endpoints: narrowed row loads and the alerts count aggregate")
     from tortoise import connections
 
-    from controller.api.main import (
-        _DECLARATION_SCOPE_FIELDS, _DEVICE_SUMMARY_FIELDS, _device_summary,  # imported as an existence guard
-        list_alerts, list_declarations, list_devices,
-    )
+    from controller.api.device_summary import _DEVICE_SUMMARY_FIELDS, _device_summary
+    from controller.api.routes.alerts import list_alerts
+    from controller.api.routes.declarations import list_declarations
+    from controller.api.routes.devices import list_devices
     conn = connections.get("default")
-    seen_sql = []
-
-    class _Spy:
-        """Records the SQL a block of endpoint calls issues, so a guard can assert on the query itself and not only on
-        its result."""
-
-        def __enter__(self):
-            self._q, self._qd = conn.execute_query, conn.execute_query_dict
-
-            async def spy_q(sql, values=None):
-                seen_sql.append(sql)
-                return await self._q(sql, values)
-
-            async def spy_qd(sql, values=None):
-                seen_sql.append(sql)
-                return await self._qd(sql, values)
-
-            seen_sql.clear()
-            conn.execute_query, conn.execute_query_dict = spy_q, spy_qd
-            return self
-
-        def __exit__(self, *exc):
-            conn.execute_query, conn.execute_query_dict = self._q, self._qd
-            return False
-
-    def _selects(table):
-        return [s for s in seen_sql
-                if s.lstrip().upper().startswith("SELECT") and f'"{table}"' in s]
+    spy = SqlSpy(conn)
+    _selects = spy.selects
 
     # Config tests that every field in _DECLARATION_SCOPE_FIELDS is read; the guard fails on missing fields.
     ldir = base / "tenants" / "tlist"
@@ -959,7 +909,7 @@ async def main():
         enrollment_state="unenrolled", groups=[], tags=[])
 
     # The device list page.
-    with _Spy():
+    with spy:
         page = await list_devices(skip=0, limit=100, group=None, tag=None,
                                   model=None, os_version=None, search=None, state=None,
                                   principal=lprin)
@@ -1030,7 +980,7 @@ async def main():
           unmatched["total"] == 0 and unmatched["devices"] == [])
 
     # The declarations scoped-count fleet walk.
-    with _Spy():
+    with spy:
         listing = await list_declarations(principal=lprin)
     by_id = {d["id"]: d for d in listing["declarations"]}
     dev_selects = _selects("devices")
@@ -1065,7 +1015,7 @@ async def main():
           by_id["dec-scope"]["scoped_count"] == expected_scoped == 1)
 
     # Always-on declarations must have names in _DDM_AUTO_NAMES table for the device's DDM tab.
-    from controller.api.main import _DDM_AUTO_NAMES, _ddm_desired_entry
+    from controller.api.routes.declarations import _DDM_AUTO_NAMES, _ddm_desired_entry
     from controller.services.ddm_manager import DDMManager
 
     auto = DDMManager(ltenant)._auto_declarations(l1, ["list-macs"], {})
@@ -1079,7 +1029,7 @@ async def main():
 
     # Scope-explain covers declarations, so why a device did not get one is answerable in the same place as the profile
     # and app versions of the question.
-    from controller.api.main import explain_device_scope
+    from controller.api.routes.devices import explain_device_scope
 
     explained = await explain_device_scope(str(l1.id), principal=lprin)
     check("scope-explain answers about declarations too", "declarations" in explained)
@@ -1099,7 +1049,7 @@ async def main():
           and "platform" in ipad_by_id["dec-scope"]["reason"])
 
     # Force sync: a refused enqueue is a 502 naming the reason, not a cheerful report that there was nothing to do.
-    from controller.api.main import force_device_ddm_sync
+    from controller.api.routes.declarations import force_device_ddm_sync
     from controller.models.tenant import AuditLog
     from controller.services import ddm_manager
 
@@ -1198,8 +1148,8 @@ async def main():
         else:
             os.environ["PUBLIC_API_URL"] = saved_public
 
-    # "accepted" deployments are in-flight; count them separately from installed.
-    from controller.api.main import get_overview_stats
+    # apps_in_flight counts accepted, pending and installing deployments, separately from installed.
+    from controller.api.routes.reports import get_overview_stats
 
     for app_id, status in (("com.installed.a", "installed"),
                            ("com.installed.b", "installed"),
@@ -1223,7 +1173,7 @@ async def main():
     import plistlib
 
     import controller.services.app_manager as am
-    from controller.api.main import get_app_manifest, get_app_package
+    from controller.api.routes.manifests import get_app_manifest, get_app_package
     from starlette.requests import Request as StarletteRequest
 
     class FakeS3Client:
@@ -1341,7 +1291,7 @@ async def main():
             # A remediation ledger the size a per-row count would have to drag along.
             detail={"ledger": [{"attempt": i} for i in range(50)]})
 
-    with _Spy():
+    with spy:
         board = await list_alerts(severity=None, status=None, device_id=None,
                                   principal=lprin)
     agg = [s for s in _selects("alerts") if "GROUP BY" in s.upper()]
@@ -1369,8 +1319,8 @@ async def main():
 
     print("POST /api/v1/scope/preview: the count the save-time modal shows")
     # Two key behaviors: empty-scope semantics and trigger-kind narrowing by enrollment source.
-    import controller.api.main as main_mod
-    from controller.api.main import (
+    import controller.api.routes.declarations as main_mod
+    from controller.api.routes.declarations import (
         _SCOPE_PREVIEW_FIELDS, _scope_is_empty, preview_scope, ScopePreviewRequest,
     )
     from controller.models.tenant import AuditLog
@@ -1623,8 +1573,7 @@ async def main():
         empty = _scope_is_empty(sample)
         for engine, fn in (("atc", atc_matches), ("dispatcher", disp_matches)):
             if fn(probe, [], sample) != empty:
-                drift.append((engine, sample, f"engine={fn(probe, [], sample)} "
-                                              f"preview={empty}"))
+                drift.append((engine, sample, f"engine={fn(probe, [], sample)} preview={empty}"))
     check(f"the preview's emptiness predicate matches both engines ({drift})",
           not drift)
 

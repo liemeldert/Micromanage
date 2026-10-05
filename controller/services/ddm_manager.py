@@ -1,17 +1,10 @@
 """Apple Declarative Device Management (DDM) core.
 
-Works out each device's desired declaration set from declarations.yaml, plus the auto-managed status-subscription,
-org-info and device-properties declarations. Serves that to NanoMDM's -dm check-in proxy (controller/api/ddm.py), takes
-in device StatusReports, and queues the DeclarativeManagement command that tells a device to resynchronize.
+Computes each device's declaration set from declarations.yaml plus the auto-managed ones, serves it to NanoMDM's -dm
+check-in proxy (controller/api/ddm.py), ingests device StatusReports and queues the DeclarativeManagement command that
+tells a device to resynchronize. Nothing is stored, and removal is by omission from the manifest.
 
-No stored declaration table; everything is computed on the fly. Removal is by omission from the manifest.
-
-Identifiers have to stay stable, because devices key on them:
-
-  mm.cfg.<yaml id> / mm.act.<yaml id>      YAML-authored configuration + activation
-  mm.cfg.status-subscriptions (+ mm.act.)  auto status subscriptions
-  mm.mgmt.org-info / mm.mgmt.properties    auto management declarations
-  mm.mgmt.server-capabilities              auto protocol-feature advertisement
+Declaration identifiers (mm.cfg.*, mm.act.*, mm.mgmt.*) have to stay stable, because devices key on them.
 """
 
 import base64
@@ -32,6 +25,8 @@ from controller.services import readiness
 from controller.services.group_manager import GroupManager
 from controller.services.profile_manager import ProfileManager
 from controller.services.scoping import device_in_rollout, device_platform_category, evaluate_scope
+from controller.utils import compare
+from controller.utils.timeutil import parse_iso_utc
 from packaging import version
 
 logger = logging.getLogger(__name__)
@@ -148,18 +143,7 @@ def _ddm_secret() -> str:
     return readiness.ddm_secret()
 
 
-def _sig_eq(provided: Optional[str], expected: str) -> bool:
-    """Constant-time signature compare that survives arbitrary attacker input.
-
-    hmac.compare_digest over two str raises TypeError on a non-ASCII character, and provided comes straight off an
-    unauthenticated request, so encode to bytes first. Same approach as enrollment._token_eq.
-    """
-    try:
-        provided_b = (provided or "").encode("utf-8", "surrogatepass")
-        expected_b = expected.encode("utf-8", "surrogatepass")
-    except Exception:
-        return False
-    return hmac.compare_digest(provided_b, expected_b)
+_sig_eq = compare.constant_time_eq
 
 
 def verify_hmac_signature(body: bytes, signature: str) -> bool:
@@ -198,20 +182,16 @@ def _warn_bridge_host(public_host: str, server_host: str) -> None:
     Cached on its arguments so this logs once rather than once per declaration build (per device per sync burst).
     """
     logger.warning(
-        "DDM: the bridged ProfileURL host '%s' is not the MDM server host '%s'; "
-        "com.apple.configuration.legacy expects the profile to be hosted by the "
-        "MDM server, so a device may refuse to download it",
+        "DDM: the bridged ProfileURL host '%s' is not the MDM server host '%s'; com.apple.configuration.legacy expects "
+        "the profile to be hosted by the MDM server, so a device may refuse to download it",
         public_host, server_host,
     )
 
 
 @lru_cache(maxsize=256)
 def _warn_undeliverable(tenant_id: str, declaration_id: str, reason: str) -> None:
-    """Say once that an authored declaration cannot be served to anybody.
-
-    Cached on its arguments, like the host warning above, so this logs once per declaration per reason rather than once
-    per device per cycle for as long as it stays authored.
-    """
+    """Say once that an authored declaration cannot be served to anybody. Cached on its arguments, so it logs once per
+    declaration and reason rather than once per device per cycle."""
     logger.warning(
         "DDM[%s]: declaration '%s' is authored but cannot be served to any "
         "device: %s. No device will receive it until this is fixed.",
@@ -222,12 +202,8 @@ def _warn_undeliverable(tenant_id: str, declaration_id: str, reason: str) -> Non
 def undeliverable_reason(item: Dict[str, Any], tenant_id: str,
                          profiles_by_id: Optional[Dict[str, Any]] = None,
                          ) -> Optional[str]:
-    """Why an authored declaration can reach no device at all, or None.
-
-    Separate from scoping: scope picks which devices an item applies to, this covers an item scoped fine that still
-    cannot be built for anybody because something outside declarations.yaml is missing. Only the legacy bridge can be
-    in this state today, since it is the one declaration type whose payload is not self-contained.
-    """
+    """Why an authored declaration can reach no device at all, or None. Unlike scoping, this covers an item that is in
+    scope but cannot be built because something outside declarations.yaml is missing (only the legacy bridge today)."""
     if item.get("type") != "com.apple.configuration.legacy":
         return None
     profile_id = item.get("profile")
@@ -246,12 +222,8 @@ def undeliverable_reason(item: Dict[str, Any], tenant_id: str,
 
 
 def profile_bridge_url(tenant_id: str, profile_id: str) -> Optional[str]:
-    """Public download URL for a bridged legacy profile.
-
-    None when PUBLIC_API_URL cannot carry one. Callers on the build path ask undeliverable_reason first, which answers
-    the same question with something an author can be shown, so a None here is either a direct caller or the two
-    disagreeing.
-    """
+    """Public download URL for a bridged legacy profile, or None when PUBLIC_API_URL cannot carry one. The build path
+    asks undeliverable_reason first, which answers the same question with a reason string."""
     if not readiness.check(readiness.DDM_BRIDGE).ready:
         return None
     public = readiness.public_api_url()
@@ -274,10 +246,8 @@ def profile_bridge_url(tenant_id: str, profile_id: str) -> Optional[str]:
 def json_safe(value: Any) -> Any:
     """A date/datetime leaf as the ISO string the DDM schemas ask for; anything else is returned untouched.
 
-    YAML turns an unquoted timestamp into datetime.datetime and json.dumps refuses that, so without this an authored
-    declaration would 500 the device-facing GET on every sync. Naive datetimes keep wall-clock form (local time); aware
-    ones normalize to UTC with a Z suffix.
-    """
+    YAML turns an unquoted timestamp into datetime.datetime, which json.dumps refuses. Naive datetimes keep wall-clock
+    form (local time); aware ones normalize to UTC with a Z suffix."""
     if isinstance(value, datetime):
         if value.tzinfo is not None:
             return value.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -311,11 +281,8 @@ def _device_context(device: Device) -> Dict[str, str]:
 # ==Status report merging==
 
 def _is_identifier_list(value: Any) -> bool:
-    """Whether a delta array can be merged per element.
-
-    identifier must be a string, not merely present: it becomes a dict key here and a set member downstream, and an
-    unhashable value there would raise. A failing array is not malformed, only unmergeable, so it replaces wholesale.
-    """
+    """Whether a delta array can be merged per element. identifier must be a string, since it becomes a dict key here
+    and a set member downstream and an unhashable value would raise; an array that fails this replaces wholesale."""
     return (isinstance(value, list) and value
             and all(isinstance(x, dict) and isinstance(x.get("identifier"), str)
                     for x in value))
@@ -323,12 +290,10 @@ def _is_identifier_list(value: Any) -> bool:
 
 def _merge_identifier_list(current: List[Dict[str, Any]],
                            delta: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """Apply an incremental array delta keyed by "identifier": replace/insert entries, drop the ones flagged
-    _removed. Existing order is kept.
+    """Apply an incremental array delta keyed by "identifier": replace/insert entries, drop the ones flagged _removed.
+    Existing order is kept.
 
-    Not every array defines _removed (management.declarations does not), so a vanished entry is not by itself a
-    removal there; see prune_unserved_declarations for what stands in for the marker in that case.
-    """
+    management.declarations has no _removed, so removals there are handled by prune_unserved_declarations."""
     merged = {x["identifier"]: x for x in current
               if isinstance(x, dict) and isinstance(x.get("identifier"), str)}
     for item in delta:
@@ -343,9 +308,8 @@ def _merge_identifier_list(current: List[Dict[str, Any]],
 def merge_status_items(base: Dict[str, Any], delta: Dict[str, Any]) -> Dict[str, Any]:
     """Deep-merge an incremental StatusItems delta into the stored state.
 
-    Dicts merge recursively; identifier-keyed arrays merge per element (with _removed honored); everything else
-    (scalars, non-keyed arrays) replaces. An empty array against a stored identifier-keyed one is kept as-is rather
-    than treated as a clearing delta.
+    Dicts merge recursively, identifier-keyed arrays merge per element, and everything else replaces. An empty array
+    against a stored identifier-keyed one leaves it as it is instead of clearing it.
 
     https://raw.githubusercontent.com/apple/device-management/release/declarative/status/management.declarations.yaml
     https://raw.githubusercontent.com/apple/device-management/release/declarative/protocol/statusreport.yaml
@@ -389,13 +353,10 @@ def declaration_identifiers(declarations_status: Any) -> set:
 
 def prune_unserved_declarations(declarations_status: Dict[str, Any],
                                 served: set, mentioned: set) -> Dict[str, Any]:
-    """Drop reported declarations this server has stopped publishing. Returns a fresh four-array value; the input is
-    left alone.
+    """Drop reported declarations this server has stopped publishing. Returns a new value; the input is left alone.
 
-    management.declarations has no _removed marker, so absence from a (usually incremental) report is not evidence of
-    removal. An entry drops only when it is in neither served (what this server currently publishes) nor mentioned
-    (what this report named), so one a device fails to drop comes back on its next safety sync rather than vanishing
-    quietly.
+    management.declarations has no _removed marker, so absence from an incremental report is not evidence of removal.
+    An entry drops only when it is in neither served (published by this server) nor mentioned (named in this report).
 
     https://developer.apple.com/documentation/devicemanagement/statusmanagementdeclarations
     https://raw.githubusercontent.com/apple/device-management/release/declarative/protocol/statusreport.yaml
@@ -416,10 +377,8 @@ def prune_unserved_declarations(declarations_status: Dict[str, Any],
     return pruned
 
 
-# Recorded on the device row under this attributes key when NanoMDM refuses a DeclarativeManagement enqueue: the
-# timestamp, the consecutive attempt count, the reason and the declarations token. In attributes rather than a column of
-# its own, next to enrollment_source, which is the other piece of server-side bookkeeping kept there. Not in ddm_status:
-# that tree is what the device reports about itself, and a full report replaces it wholesale.
+# Device attributes key recording a refused DeclarativeManagement enqueue: timestamp, consecutive attempt count, reason
+# and declarations token. Not in ddm_status, which holds what the device reports and is replaced by a full report.
 SYNC_FAILURE_KEY = "ddm_sync_failure"
 
 # Ceiling on the failure phrase below. It goes into a log line, Task.error, the record on the device row and an HTTP
@@ -431,9 +390,8 @@ _REASON_MAX_CHARS = 300
 class EnqueueFailed(int):
     """A refused DeclarativeManagement enqueue (NanoMDM down, or no enrollment for this device).
 
-    Falsy, so a caller that only asks whether something went out reads it like the False a no-op gives, but it carries
-    reason for a caller that wants to tell the two apart. Raising instead would put an exception into a fleet loop.
-    """
+    Falsy like the False a no-op gives, but carries reason so a caller can tell them apart. Returned, not raised, so a
+    fleet loop keeps going."""
 
     reason: str
 
@@ -449,10 +407,8 @@ class EnqueueFailed(int):
 class SyncHeldOff(int):
     """A sync left unattempted, because the last one was refused.
 
-    Falsy like EnqueueFailed, so a fleet loop still counts nothing, but distinguishable so a caller reporting to a
-    person can say which silence this is (plain False would misread as "already in sync"). Not a subclass of
-    EnqueueFailed: a held-off device is the backoff working, not a fresh error. retry_at is when the next attempt is due.
-    """
+    Falsy like EnqueueFailed, but not a subclass of it, since a held-off device is the backoff working and not a fresh
+    error. A plain False would read as "already in sync". retry_at is when the next attempt is due."""
 
     reason: str
     retry_at: Optional[datetime]
@@ -469,13 +425,8 @@ class SyncHeldOff(int):
 
 
 def _enqueue_failure_reason(exc: BaseException) -> Tuple[str, bool]:
-    """One short phrase for a refused enqueue, and whether it earns a traceback.
-
-    Ordinary operational states (no enrollment row, NanoMDM unreachable) say all they need to in a sentence; a
-    traceback per device per cycle for either buries the log. Anything else keeps its traceback. The phrase is the
-    entire diagnostic an operator gets (warning line, Task.error, device row, force-sync error detail), so it carries
-    NanoMDM's own words wherever there are any rather than just a bare status code.
-    """
+    """A short phrase for a refused enqueue, and whether the failure keeps its traceback. Expected states (no enrollment
+    row, NanoMDM unreachable) log one line; anything else logs a traceback."""
     try:
         import httpx
 
@@ -512,12 +463,10 @@ class DDMManager:
         groups_config: List[Dict[str, Any]],
         device_groups: Optional[List[str]] = None,
     ) -> List[Dict[str, Any]]:
-        """The full desired declaration set ({Type, Identifier, ServerToken, Payload}) for a device: scoped YAML items
-        (config + paired activation), then the auto-managed declarations, then client-capabilities filtering.
+        """The desired declarations for a device, as dicts with Type, Identifier, ServerToken and Payload: scoped YAML
+        items (configuration and activation), then the auto-managed ones, filtered by client capabilities.
 
-        device_groups is an optional pre-computed membership list, so a caller iterating a fleet doesn't re-walk the
-        group graph per device.
-        """
+        device_groups is an optional pre-computed membership list, so a fleet loop does not re-walk the group graph."""
         if device_groups is None:
             device_groups = self.group_manager.evaluate_device_groups(device, groups_config)
         device_platform = ProfileManager._device_platform(device)
@@ -664,9 +613,8 @@ class DDMManager:
     def _capability_payloads(device: Device) -> Dict[str, Any]:
         """The device's advertised supported-payloads tree, or {}.
 
-        A non-object anywhere on the way down reads as having said nothing rather than raising, so a row poisoned
-        before the ingest guard existed degrades to unknown-serve-everything instead of 500ing the device's endpoints.
-        """
+        A non-object anywhere on the way down reads as nothing advertised rather than raising, so a malformed stored
+        value means unknown capabilities (everything is served), not an error on the device's endpoints."""
         caps = getattr(device, "ddm_client_capabilities", None)
         payloads = caps.get("supported-payloads") if isinstance(caps, dict) else None
         return payloads if isinstance(payloads, dict) else {}
@@ -714,16 +662,14 @@ class DDMManager:
     async def ingest_status_report(self, device: Device, report: Dict[str, Any]) -> None:
         """Merge a device StatusReport into stored state and fan out signals.
 
-        A report that does not answer to the schema is dropped or ingested in part rather than raised out of: the only
-        caller is the device-facing endpoint, and an exception there is a 500 the device retries forever.
-        """
+        A malformed report is dropped or ingested in part rather than raised, since an exception in the device-facing
+        endpoint becomes a 500 the device retries."""
         status_items = report.get("StatusItems")
         if status_items is None:
             status_items = {}
         elif not isinstance(status_items, dict):
             logger.warning(
-                "DDM[%s]: status report from %s carries a non-object StatusItems "
-                "(%s); ignoring the report",
+                "DDM[%s]: status report from %s carries a non-object StatusItems (%s); ignoring the report",
                 self.tenant.id, device.serial_number, type(status_items).__name__,
             )
             return
@@ -753,8 +699,8 @@ class DDMManager:
 
         decls = management.get("declarations")
         if isinstance(decls, dict):
-            # Declarations no longer served drop out here, not in the merge above: a device that stops holding one
-            # sends no removal marker. See prune_unserved_declarations.
+            # Declarations no longer served drop out here, not in the merge above, because a device that stops holding
+            # one sends no removal marker. See prune_unserved_declarations.
             served = await self._served_identifiers(device)
             if served:
                 decls = prune_unserved_declarations(decls, served, mentioned)
@@ -784,8 +730,7 @@ class DDMManager:
             if "supported-payloads" in caps \
                 and not isinstance(caps["supported-payloads"], dict):
                 logger.warning(
-                    "DDM[%s]: %s advertised a non-object supported-payloads (%s); "
-                    "ignoring it",
+                    "DDM[%s]: %s advertised a non-object supported-payloads (%s); ignoring it",
                     self.tenant.id, device.serial_number,
                     type(caps["supported-payloads"]).__name__,
                 )
@@ -817,16 +762,13 @@ class DDMManager:
     async def _served_identifiers(self, device: Device) -> set:
         """Identifiers this server currently publishes to a device.
 
-        Empty both when DDM does not apply and when the set cannot be worked out at all: status ingest treats both the
-        same, as absence of evidence, so it leaves the reported set alone rather than guessing. Uses the cached build
-        (usually just a fingerprint hash, since a status report arrives at the end of the burst that just warmed it).
-        """
+        Empty both when DDM does not apply and when the set cannot be computed; status ingest treats both as no evidence
+        and leaves the reported set alone. Uses the cached build."""
         try:
             served = await compute_device_declarations_cached(device, self.tenant)
         except Exception:
             logger.warning(
-                "DDM[%s]: could not compute the served declaration set for %s; "
-                "leaving the reported declarations alone",
+                "DDM[%s]: could not compute the served declaration set for %s; leaving the reported declarations alone",
                 self.tenant.id, device.serial_number, exc_info=True,
             )
             return set()
@@ -852,11 +794,8 @@ class DDMManager:
 
     async def _dispatcher_eval(self, device_id: Any) -> None:
         try:
-            device = await Device.get_or_none(id=device_id)
-            if device is None:
-                return
             from controller.services import dispatcher
-            await dispatcher.evaluate_device(device, reason="ddm")
+            await dispatcher.evaluate_device_id(device_id, "ddm")
         except Exception:
             logger.exception("DDM: dispatcher evaluate failed for device %s", device_id)
 
@@ -894,11 +833,7 @@ class DDMManager:
     def _retry_wait_minutes(attempts: Any) -> int:
         """How long to leave a refused enqueue alone before trying it again.
 
-        Same curve services.reconciler applies to a failed deployment: RETRY_MINUTES after the first failure, doubling
-        per consecutive failure, capped at RETRY_MAX_MINUTES. Constants imported, not restated, so retuning the
-        deployment retry retunes this too. A flat interval would cost an attempt and a log line every cycle forever for
-        a device NanoMDM will never accept.
-        """
+        Same curve as the failed-deployment retry in services.reconciler, so retuning that retunes this."""
         from controller.services.reconciler import RETRY_MAX_MINUTES, RETRY_MINUTES
         exponent = min(max(int(attempts or 0) - 1, 0), 20)
         return min(RETRY_MINUTES * (2 ** exponent), RETRY_MAX_MINUTES)
@@ -907,19 +842,13 @@ class DDMManager:
                     now: datetime) -> Optional[datetime]:
         """When the next attempt at this set is due, or None if it is due now.
 
-        Keyed on the declarations token, mirroring the deployment rule that a definition which has moved on since the
-        failure is not the thing that failed: editing the declaration takes effect next cycle, not at the end of the
-        backoff.
-        """
+        Keyed on the declarations token, so editing a declaration takes effect next cycle, not after the backoff."""
         state = self._failure_state(device)
         if not state or state.get("declarations_token") != token:
             return None
-        try:
-            failed_at = datetime.fromisoformat(state.get("at") or "")
-        except (TypeError, ValueError):
+        failed_at = parse_iso_utc(state.get("at"))
+        if failed_at is None:
             return None  # unreadable stamp: treat it as no backoff at all
-        if failed_at.tzinfo is None:
-            failed_at = failed_at.replace(tzinfo=timezone.utc)
         due = failed_at + timedelta(
             minutes=self._retry_wait_minutes(state.get("attempts"))
         )
@@ -930,11 +859,8 @@ class DDMManager:
     ) -> Optional[Dict[str, Any]]:
         """Store or clear the enqueue-failure record, touching nothing else. Returns what was stored.
 
-        build takes the record as it stands on the row right now and returns the one to store, or None to clear: a
-        callback rather than a value, so the attempt count is derived from a fresh re-read rather than a stale copy a
-        fleet loop has held since the top of the cycle. The re-read plus targeted UPDATE also narrows the window for
-        clobbering a concurrent inventory write.
-        """
+        build takes the record as it stands on the row now (re-read, not the caller's possibly stale copy) and returns
+        the record to store, or None to clear."""
         row = await Device.filter(id=device.id).only("id", "attributes").first()
         attributes = dict((row.attributes if row else device.attributes) or {})
         current = attributes.get(SYNC_FAILURE_KEY)
@@ -956,9 +882,8 @@ class DDMManager:
                                       exc: BaseException) -> EnqueueFailed:
         """Log, record and audit one refused enqueue, then hand back a falsy result.
 
-        Leaves three things behind: a log line naming the device and the cause, a failed ddm_sync task against the
-        device alongside its profile and app failures, and the state on the device row that makes the next attempt wait.
-        """
+        Leaves three things: a log line naming the device and the cause, a failed ddm_sync task against the device, and
+        the state on the device row that makes the next attempt wait."""
         summary, unexpected = _enqueue_failure_reason(exc)
 
         def build(current: Dict[str, Any]) -> Dict[str, Any]:
@@ -983,8 +908,7 @@ class DDMManager:
             state = build(self._failure_state(device))
         attempts = int((state or {}).get("attempts") or 1)
 
-        message = ("DDM[%s]: declarative sync for %s not queued: %s "
-                   "(attempt %d, next attempt in %dm)")
+        message = "DDM[%s]: declarative sync for %s not queued: %s (attempt %d, next attempt in %dm)"
         args = (self.tenant.id, device.serial_number or device.udid, summary,
                 attempts, self._retry_wait_minutes(attempts))
         if unexpected:
@@ -1024,17 +948,10 @@ class DDMManager:
                           ) -> Union[bool, EnqueueFailed, SyncHeldOff]:
         """Enqueue a DeclarativeManagement command when the published token is stale.
 
-        Four answers, three of them falsy:
-
-          True           a command went out
-          False          nothing to send (unsupported, or the set is unchanged)
-          EnqueueFailed  NanoMDM refused this attempt
-          SyncHeldOff    not attempted, waiting out an earlier refusal
-
-        Only False means the device is already in the state it should be; a caller reporting to a person should tell
-        the three falsy cases apart rather than treat them as one. ignore_backoff skips the wait without discarding the
-        failure record, for a caller acting on an explicit request. The three config keyword arguments let a fleet loop
-        hand in config it already read, instead of re-parsing declarations.yaml and groups.yaml per device.
+        Returns True when a command was queued, False when there is nothing to send (unsupported, or the set is
+        unchanged), EnqueueFailed when NanoMDM refused this attempt, or SyncHeldOff when an earlier refusal is still
+        being waited out. The last two are falsy too, so only False means the device is in the state it should be.
+        ignore_backoff skips the wait without discarding the failure record, for a caller acting on an explicit request.
         """
         if not self.tenant.ddm_enabled or not device.udid \
             or device.enrollment_state != "enrolled" or not device_supports_ddm(device):
@@ -1059,9 +976,8 @@ class DDMManager:
                 # per cycle forever. SyncHeldOff still tells the caller which silence this is.
                 state = self._failure_state(device)
                 return SyncHeldOff(
-                    f"waiting until {held_until.strftime('%Y-%m-%dT%H:%M:%SZ')} "
-                    f"after {state.get('attempts')} refused attempt(s): "
-                    f"{state.get('reason')}",
+                    f"waiting until {held_until.strftime('%Y-%m-%dT%H:%M:%SZ')} after {state.get('attempts')} refused "
+                    f"attempt(s): {state.get('reason')}",
                     held_until,
                 )
 
@@ -1080,8 +996,7 @@ class DDMManager:
                 await connector.close()
         if enqueue_error is not None:
             return await self._record_enqueue_failure(device, reason, token, enqueue_error)
-        # It went through, so the device is no longer stuck: drop the record, or a stale one delays the next real
-        # failure.
+        # It went through, so drop the failure record; a stale one would carry its attempt count into a later failure.
         await self._clear_failure_state(device)
 
         # A task row so the sync is recorded against the device; the webhook completes/fails it by command_uuid (type
@@ -1112,8 +1027,8 @@ async def compute_device_declarations(
     device: Device, tenant: Optional[Tenant] = None,
     device_groups: Optional[List[str]] = None,
 ) -> List[Dict[str, Any]]:
-    """Desired declaration set for a device. Empty when DDM doesn't apply, either because the tenant disabled it or the
-    device can't do it, which is the clean neutralization the device-facing endpoints lean on."""
+    """Desired declaration set for a device; empty when the tenant is missing or has DDM disabled, or the device does
+    not support DDM. The device-facing endpoints serve that empty set and make no DDM check of their own."""
     tenant = tenant or await Tenant.get_or_none(id=device.tenant_id)
     if tenant is None or not tenant.ddm_enabled or not device_supports_ddm(device):
         return []
@@ -1125,11 +1040,9 @@ async def compute_device_declarations(
 
 
 # ==Device-facing declaration cache (serves the NanoMDM -dm endpoints)==
-# One device sync is N+2 requests (tokens, declaration-items, one GET per declaration); rebuilding the full set each
-# time made a sync cost O(N^2) builds. This short-TTL per-device memo serves the whole burst from one build instead.
-#
-# A hit must be identical to a fresh build, so the fingerprint covers everything the build reads, with the clock as the
-# one exception (bounded by the TTL).
+# One sync is N+2 requests (tokens, declaration-items, one GET per declaration) that each need the full set, so a
+# short-TTL per-device memo serves the whole burst from one build. A hit must be identical to a fresh build, so the
+# fingerprint covers everything the build reads, with the clock as the one exception (bounded by the TTL).
 
 _DECL_CACHE: "OrderedDict[str, Tuple[str, float, List[Dict[str, Any]]]]" = OrderedDict()
 
@@ -1149,8 +1062,8 @@ def _decl_cache_max() -> int:
 
 
 def invalidate_declaration_cache() -> None:
-    """Manual escape hatch (tests, out-of-band edits). Normal invalidation is the fingerprint itself; nothing in the
-    serve path needs to call this."""
+    """Clear the declaration cache by hand (tests, out-of-band edits). Normal invalidation is the fingerprint itself;
+    nothing in the serve path needs to call this."""
     _DECL_CACHE.clear()
 
 
@@ -1220,10 +1133,8 @@ async def compute_device_declarations_cached(
 ) -> List[Dict[str, Any]]:
     """compute_device_declarations behind the per-device memo above.
 
-    Membership is always derived, never taken from the caller, so this returns the set the device-facing endpoints
-    serve no matter who asks. A caller holding a pre-computed membership list wants the uncached
-    compute_device_declarations instead. Callers must treat the result as read-only: the same list object serves every
-    request of a sync burst."""
+    Membership is always derived, never taken from the caller, so every caller gets the set the device-facing endpoints
+    serve. Treat the result as read-only: the same list object serves every request of a sync burst."""
     tenant = tenant or await Tenant.get_or_none(id=device.tenant_id)
     if tenant is None or not tenant.ddm_enabled or not device_supports_ddm(device):
         return []
@@ -1260,12 +1171,8 @@ async def sync_device(device: Device, reason: str,
                       device_groups: Optional[List[str]] = None,
                       ignore_backoff: bool = False,
                       ) -> Union[bool, EnqueueFailed, SyncHeldOff]:
-    """Sync one device. A fleet loop should pass tenant and the pre-read config; otherwise this costs a Tenant lookup
-    and two YAML parses per device.
-
-    Falsy in three cases: nothing to send, a refusal on this attempt (EnqueueFailed), and an attempt held back until an
-    earlier refusal's retry is due (SyncHeldOff). Only the first means the device is where it should be, so a caller
-    that says so in words needs to check which it got."""
+    """Sync one device, returning what DDMManager.sync_device returns. A fleet loop should pass tenant and the pre-read
+    config, or this costs a Tenant lookup and two YAML parses per device."""
     manager = await _manager_for(device, tenant)
     if manager is None:
         return False

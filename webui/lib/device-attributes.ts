@@ -24,7 +24,7 @@ export const ATTR_CATEGORIES: AttrCategory[] = [
 ];
 
 const ATTRS: Record<string, AttrDef> = {
-    //  Hardware
+    // == Hardware ==
     SerialNumber: {label: "Serial number", category: "Hardware"},
     Model: {label: "Model identifier", category: "Hardware"},
     ModelName: {label: "Model name", category: "Hardware"},
@@ -36,7 +36,7 @@ const ATTRS: Record<string, AttrDef> = {
     HasBattery: {label: "Has battery", category: "Hardware", format: "bool"},
     BatteryLevel: {label: "Battery level", category: "Hardware", format: "percent"},
 
-    //  Software
+    // == Software ==
     OSVersion: {label: "OS version", category: "Software"},
     SupplementalBuildVersion: {label: "Supplemental build", category: "Software"},
     BuildVersion: {label: "Build", category: "Software"},
@@ -47,7 +47,7 @@ const ATTRS: Record<string, AttrDef> = {
     MaximumResidentUsers: {label: "Max resident users", category: "Software"},
     SoftwareUpdateDeviceID: {label: "Software update ID", category: "Software"},
 
-    //  Security
+    // == Security ==
     IsSupervised: {label: "Supervised", category: "Security", format: "bool"},
     IsActivationLockEnabled: {label: "Activation Lock", category: "Security", format: "bool"},
     IsMDMLostModeEnabled: {label: "MDM Lost Mode", category: "Security", format: "bool"},
@@ -61,7 +61,7 @@ const ATTRS: Record<string, AttrDef> = {
     FDE_Enabled: {label: "FileVault enabled", category: "Security", format: "bool"},
     FDE_HasPersonalRecoveryKey: {label: "FileVault personal key", category: "Security", format: "bool"},
     FDE_HasInstitutionalRecoveryKey: {label: "FileVault institutional key", category: "Security", format: "bool"},
-    // Also where FirewallSettings.FirewallEnabled lands once flattened, so both spellings share a label.
+    // Also where FirewallSettings.FirewallEnabled ends up once flattened, so both spellings share a label.
     FirewallEnabled: {label: "Firewall enabled", category: "Security", format: "bool"},
     BlockAllIncoming: {label: "Block all incoming connections", category: "Security", format: "bool"},
     StealthMode: {label: "Stealth mode", category: "Security", format: "bool"},
@@ -83,7 +83,7 @@ const ATTRS: Record<string, AttrDef> = {
     PasscodeCompliantWithProfiles: {label: "Passcode meets profiles", category: "Security", format: "bool"},
     RemoteDesktopEnabled: {label: "Remote Desktop", category: "Security", format: "bool"},
 
-    //  Network
+    // == Network ==
     WiFiMAC: {label: "Wi-Fi MAC", category: "Network"},
     BluetoothMAC: {label: "Bluetooth MAC", category: "Network"},
     EthernetMAC: {label: "Ethernet MAC", category: "Network"},
@@ -91,7 +91,7 @@ const ATTRS: Record<string, AttrDef> = {
     PersonalHotspotEnabled: {label: "Personal Hotspot", category: "Network", format: "bool"},
     DataRoamingEnabled: {label: "Data roaming", category: "Network", format: "bool"},
 
-    //  Cellular
+    // == Cellular ==
     IMEI: {label: "IMEI", category: "Cellular"},
     MEID: {label: "MEID", category: "Cellular"},
     ICCID: {label: "ICCID", category: "Cellular"},
@@ -101,7 +101,7 @@ const ATTRS: Record<string, AttrDef> = {
     CurrentCarrierNetwork: {label: "Carrier", category: "Cellular"},
     CarrierSettingsVersion: {label: "Carrier settings", category: "Cellular"},
 
-    //  Management
+    // == Management ==
     UDID: {label: "UDID", category: "Management"},
     ProvisioningUDID: {label: "Provisioning UDID", category: "Management"},
     EASDeviceIdentifier: {label: "EAS device ID", category: "Management"},

@@ -1,8 +1,5 @@
-// One alert in the dashboard board, built from SwipeActions for the two triage gestures and Interactable for
-// the hover, press and peek.
-//
-// Acknowledging runs on the drag itself. Resolving ends an alert, so it waits for a press on the revealed
-// action instead.
+// One alert in the dashboard board, with SwipeActions for triage and Interactable for hover, press and peek.
+// Acknowledging runs on the drag itself; resolving ends the alert, so it waits for a press on the revealed action.
 
 import {Text} from "@mantine/core";
 import {IconArrowBackUp, IconCheck} from "@tabler/icons-react";

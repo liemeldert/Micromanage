@@ -1,8 +1,5 @@
-// A surface with an action behind each edge, reached by dragging it aside. The drag tracks the pointer the
-// whole way rather than snapping once a threshold is crossed.
-//
-// A touch swipe, a mouse press and drag, and a trackpad's two-finger horizontal scroll all reach it. The
-// wheel listener is attached by hand, since a passive one cannot refuse the browser's back-and-forward swipe.
+// A surface with an action behind each edge, reached by touch swipe, mouse drag or a trackpad's horizontal scroll.
+// The wheel listener is attached by hand, since a passive one cannot refuse the browser's back-and-forward swipe.
 
 import type {PointerEvent as ReactPointerEvent, ReactNode} from "react";
 import {useCallback, useEffect, useRef, useState} from "react";
@@ -45,13 +42,20 @@ export function SwipeActions({
     onDismissed?: () => void;
     children: ReactNode;
 }) {
-    const [offset, setOffset] = useState(0);
+    const [offset, setOffsetState] = useState(0);
     const [dragging, setDragging] = useState(false);
     const [clearing, setClearing] = useState(false);
     const surface = useRef<HTMLDivElement | null>(null);
     const origin = useRef<number | null>(null);
     const settleTimer = useRef<number | null>(null);
     const moved = useRef(false);
+    // The latest offset for handlers that run between renders, such as the wheel timer and the pointer release.
+    const offsetNow = useRef(0);
+
+    const setOffset = useCallback((next: number) => {
+        offsetNow.current = next;
+        setOffsetState(next);
+    }, []);
 
     const limit = useCallback((next: number) => {
         const min = right ? -REST_PX : 0;
@@ -77,15 +81,12 @@ export function SwipeActions({
             return;
         }
         setOffset(at < 0 ? -REST_PX : REST_PX);
-    }, [left, right, onDismissed]);
+    }, [left, right, onDismissed, setOffset]);
 
     const endDrag = useCallback(() => {
         origin.current = null;
         setDragging(false);
-        setOffset((current) => {
-            settle(current);
-            return current;
-        });
+        settle(offsetNow.current);
     }, [settle]);
 
     useEffect(() => {
@@ -97,7 +98,7 @@ export function SwipeActions({
             // Without this the browser reads the same gesture as back or forward.
             event.preventDefault();
             setDragging(true);
-            setOffset((current) => limit(current - event.deltaX));
+            setOffset(limit(offsetNow.current - event.deltaX));
 
             if (settleTimer.current !== null) window.clearTimeout(settleTimer.current);
             settleTimer.current = window.setTimeout(endDrag, WHEEL_SETTLE_MS);
@@ -108,18 +109,18 @@ export function SwipeActions({
             element.removeEventListener("wheel", onWheel);
             if (settleTimer.current !== null) window.clearTimeout(settleTimer.current);
         };
-    }, [disabled, limit, endDrag]);
+    }, [disabled, limit, endDrag, setOffset]);
 
     const onPointerDown = (event: ReactPointerEvent<HTMLDivElement>) => {
         if (disabled || event.button !== 0) return;
-        origin.current = event.clientX - offset;
+        origin.current = event.clientX - offsetNow.current;
         moved.current = false;
     };
 
     const onPointerMove = (event: ReactPointerEvent<HTMLDivElement>) => {
         if (origin.current === null) return;
         const next = limit(event.clientX - origin.current);
-        if (Math.abs(next - offset) > 2) {
+        if (Math.abs(next - offsetNow.current) > 2) {
             moved.current = true;
             setDragging(true);
         }
@@ -141,7 +142,7 @@ export function SwipeActions({
         };
         document.addEventListener("pointerdown", close);
         return () => document.removeEventListener("pointerdown", close);
-    }, [held]);
+    }, [held, setOffset]);
 
     return (
         <Box

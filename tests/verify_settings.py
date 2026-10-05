@@ -1,14 +1,12 @@
 """E2E checks for tenant-settings S3 secret handling (sqlite in-memory).
 
 Run: PYTHONPATH=. .venv/bin/python tests/verify_settings.py
-See docs/tests/verify_settings.md for detailed walkthrough.
 """
 import os
 import tempfile
 from pathlib import Path
 
-# Redirect config base to temp tree before importing api.main; all writes stay in temp, never touch the checkout.
-# See docs/tests/verify_settings.md for why t1 is special and how the redirection works.
+# Redirect config base to temp tree before importing config modules; all writes stay in temp, never touch the checkout.
 _YAML_BASE = tempfile.mkdtemp()
 os.environ["YAML_CONFIG_PATH"] = _YAML_BASE
 
@@ -19,20 +17,14 @@ from tortoise import Tortoise  # noqa: E402
 from controller.auth.dependencies import Principal  # noqa: E402
 from controller.models.tenant import Tenant, User  # noqa: E402
 from controller.services.app_manager import REQUIRED_TENANT_S3_KEYS  # noqa: E402
-from controller.api.main import (  # noqa: E402
-    _restore_tenant_s3_secrets,
-    _tenant_config_doc,
-    _REDACTED,
-    TenantUpdate,
-    update_tenant,
-)
+from controller.api.config_io import _tenant_config_doc  # noqa: E402
+from controller.api.redaction import _REDACTED, _restore_tenant_s3_secrets  # noqa: E402
+from controller.api.routes.tenants import TenantUpdate, update_tenant  # noqa: E402
+from tests._verify_harness import make_check
 
 PASS, FAIL = [], []
 
-
-def check(label, cond):
-    (PASS if cond else FAIL).append(label)
-    print(f"  [{'PASS' if cond else 'FAIL'}] {label}")
+check = make_check(FAIL, PASS)
 
 
 def test_restore_helper():
@@ -303,10 +295,7 @@ async def test_config_yaml_mirror():
 
 
 def seed_t1_mirror() -> Path:
-    """Seed t1's config.yaml in temp tree (update_tenant only mirrors to existing files).
-
-    See docs/tests/verify_settings.md for why t1 is chosen and redirection mechanics.
-    """
+    """Seed t1's config.yaml in temp tree (update_tenant only mirrors to existing files)."""
     path = Path(_YAML_BASE) / "tenants" / "t1" / "config.yaml"
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(yaml.safe_dump(

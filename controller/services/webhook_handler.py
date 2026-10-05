@@ -1,15 +1,22 @@
 import asyncio
-import base64
 import logging
 import os
-import plistlib
 import time
-import weakref
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional, Tuple
 
-from controller.models.tenant import (AppDeployment, Device, EnrollmentAttempt, ProfileDeployment, Task, Tenant)
-from controller.services.enrollment import verify_tenant_url_token
+from controller.models.tenant import (AppDeployment, Device, ProfileDeployment, Task, Tenant)
+
+from controller.services.webhook_parsing import (
+    _ENROLLMENT_STATE_TOPICS, _PROFILE_INVENTORY_TASK_TYPES, _app_install_refusal, _app_install_state, _decode_plist,
+    _error_chain, _error_line, _inventory_bundle_versions, _is_device_channel, _json_safe,
+    _reconciled_enrollment_source, _reported_hostname, _summarize_certificates, _version_fingerprint,
+)
+from controller.services.webhook_tenant import (
+    _audit_rekey, _first_param, _log_attempt, _refuse_conflicting_claim, _rekey_serial, _require_known_serial,
+    _resolve_tenant, _serial_from_nanomdm,
+)
+from controller.utils.per_loop import KeyedLocks
 
 logger = logging.getLogger(__name__)
 
@@ -17,594 +24,8 @@ logger = logging.getLogger(__name__)
 # looks exactly once.
 _LATE_RESPONSE_WAIT_SECONDS = float(os.getenv("MDM_LATE_RESPONSE_WAIT_SECONDS", "2"))
 _LATE_RESPONSE_POLL_SECONDS = float(os.getenv("MDM_LATE_RESPONSE_POLL_SECONDS", "0.25"))
-# Covers the one send path whose in-flight window _dispatch_in_flight cannot see (the DDM sync path).
+# Polls taken before _dispatch_in_flight is consulted, since it cannot see the DDM sync path.
 _LATE_RESPONSE_GRACE_POLLS = int(os.getenv("MDM_LATE_RESPONSE_GRACE_POLLS", "2"))
-
-# Not app installs: InstallApplication acknowledges before the download/install, so asking then would record state
-# before the change.
-_PROFILE_INVENTORY_TASK_TYPES = ("profile_install", "profile_remove")
-
-# Only the device channel says anything about whether the DEVICE is enrolled; a per-user message must not write
-# enrollment state (https://github.com/micromdm/nanomdm/blob/v0.9.0/service/webhook/event.go).
-_DEVICE_CHANNEL_TYPES = ("Device", "User Enrollment (Device)")
-
-# The rest of what NanoMDM posts is proof of life with no evidence about enrollment either way, and must not flip a
-# checked-out device back to enrolled.
-_ENROLLMENT_STATE_TOPICS = ("mdm.Authenticate", "mdm.TokenUpdate", "mdm.Connect")
-
-
-def _is_device_channel(event: Dict[str, Any]) -> bool:
-    """True when the event arrived on the device channel rather than a user channel.
-
-    Absent or unreadable ids reads as the device channel, for compatibility with pre-0.9.0 NanoMDM.
-    """
-    ids = event.get("ids")
-    channel = ids.get("type") if isinstance(ids, dict) else None
-    if not channel:
-        return True
-    return channel in _DEVICE_CHANNEL_TYPES
-
-
-# Every value _resolve_tenant can report, in one place so a typo in a caller's comparison is greppable instead of
-# silently falsy.
-TENANT_RESOLUTION_REASONS = (
-    "signed",  # ?tenant= carried a valid ?tsig= for that id
-    "sole_tenant",  # only one tenant exists, so there is no boundary to cross
-    "legacy_unsigned",  # unsigned claim honoured under MDM_ALLOW_UNSIGNED_TENANT_CLAIM
-    "bad_signature",  # a real tenant was claimed without a valid signature
-    "unknown_tenant",  # the claimed id matches no tenant row
-    "inactive_tenant",  # the claim checks out, but that tenant is deactivated
-    "ambiguous",  # no claim at all, and more than one tenant to choose from
-)
-
-
-def _decode_plist(raw_b64: Optional[str]) -> Dict[str, Any]:
-    """Decode a NanoMDM webhook raw_payload (base64-encoded plist) into a dict."""
-    if not raw_b64:
-        return {}
-    try:
-        return plistlib.loads(base64.b64decode(raw_b64))
-    except Exception as e:  # malformed / non-plist body
-        logger.warning(f"webhook: could not decode raw_payload: {e}")
-        return {}
-
-
-def _json_safe(value: Any):
-    """Make a decoded plist JSON-serializable (datetimes -> ISO strings, bytes dropped)."""
-    if isinstance(value, dict):
-        return {k: _json_safe(v) for k, v in value.items() if not isinstance(v, bytes)}
-    if isinstance(value, (list, tuple)):
-        return [_json_safe(v) for v in value if not isinstance(v, bytes)]
-    if isinstance(value, datetime):
-        return value.isoformat()
-    return value
-
-
-def _error_chain(response: Dict[str, Any]) -> list:
-    """The device's ErrorChain, normalized to a list of dictionaries.
-
-    Anything that is not a list of dictionaries reads as no chain, so a malformed answer degrades to the caller's
-    fallback text instead of raising.
-    """
-    chain = response.get("ErrorChain")
-    if not isinstance(chain, list):
-        return []
-    return [entry for entry in chain if isinstance(entry, dict)]
-
-
-def _error_line(entry: Dict[str, Any], fallback: str) -> str:
-    """One readable line for a single ErrorChain entry: "domain code: description".
-
-    Domain and code are the only part identical across devices and languages, so failures can be searched and
-    compared on them.
-    """
-    domain = str(entry.get("ErrorDomain") or "").strip()
-    code = entry.get("ErrorCode")
-    description = str(
-        entry.get("USEnglishDescription") or entry.get("LocalizedDescription") or ""
-    ).strip()
-    prefix = " ".join(p for p in (domain, "" if code is None else str(code)) if p)
-    if not description:
-        return f"{prefix}: {fallback}" if prefix else fallback
-    return f"{prefix}: {description}" if prefix else description
-
-
-# InstallApplication State values that mean the app is not going to arrive
-# (https://github.com/apple/device-management/blob/release/mdm/commands/application.install.yaml); every other value
-# is the install in progress or already done.
-_APP_INSTALL_REFUSED_STATES = (
-    "Failed", "UserRejected", "UpdateRejected", "ManagementRejected",
-)
-
-# Two RejectionReason values do not mean the install failed: the app is already there, or an earlier request for it
-# is still pending.
-_APP_INSTALL_BENIGN_REASONS = ("AppAlreadyInstalled", "AppAlreadyQueued")
-
-
-def _app_install_state(response: Dict[str, Any]) -> Dict[str, Any]:
-    """What an InstallApplication acknowledgement said about the app, if anything. Every key is optional, so this is
-    often empty."""
-    return {
-        key: response[key]
-        for key in ("State", "RejectionReason", "Identifier")
-        if response.get(key) is not None
-    }
-
-
-def _app_install_refusal(app_state: Dict[str, Any]) -> Optional[str]:
-    """A readable reason when an acknowledgement is really a refusal.
-
-    Apple answers a refused install with Status: Acknowledged, so an acknowledgement alone is not a success.
-    """
-    state = app_state.get("State")
-    reason = app_state.get("RejectionReason")
-    refused = (
-        state in _APP_INSTALL_REFUSED_STATES
-        or (bool(reason) and reason not in _APP_INSTALL_BENIGN_REASONS)
-    )
-    if not refused:
-        return None
-    named = state or "refused"
-    return f"The device did not install the app ({named}{f': {reason}' if reason else ''})"
-
-
-def _reconciled_enrollment_source(attrs: Dict[str, Any]) -> Optional[str]:
-    """What enrollment_source should say, once the device has answered.
-
-    SecurityInfo's ManagementStatus.EnrolledViaDEP is what actually happened, overriding the server-side inference
-    from ABM assignment. None when the device has said nothing.
-    """
-    sec = attrs.get("SecurityInfo")
-    mgmt = sec.get("ManagementStatus") if isinstance(sec, dict) else None
-    if isinstance(mgmt, dict) and isinstance(mgmt.get("EnrolledViaDEP"), bool):
-        return "ade" if mgmt["EnrolledViaDEP"] else "ota"
-    return None
-
-
-def _reported_hostname(info: Dict[str, Any]) -> Optional[str]:
-    """The device's network hostname out of a check-in or DeviceInformation.
-
-    HostName is the stable ASCII network name; DeviceName is a free-form label used only as a fallback until the
-    device answers a DeviceInformation query.
-    """
-    # 表示名は「マイクロ仮想マシン」のような任意の文字列になりうる。ホスト名とは別物。
-    return info.get("HostName") or info.get("DeviceName")
-
-
-def _summarize_certificates(items: Any) -> Any:
-    """Turn a CertificateList answer into stored fields.
-
-    Data is DER-encoded X.509 bytes that _json_safe drops, parsed here into the issuer, serial and expiry instead
-    (https://github.com/apple/device-management/blob/release/mdm/commands/certificate.list.yaml).
-    """
-    if not isinstance(items, list):
-        return items
-    from cryptography import x509
-    from cryptography.hazmat.primitives import hashes
-
-    summarized = []
-    for item in items:
-        if not isinstance(item, dict):
-            summarized.append(item)
-            continue
-        out = {"CommonName": item.get("CommonName"), "IsIdentity": item.get("IsIdentity")}
-        der = item.get("Data")
-        if not isinstance(der, bytes):
-            summarized.append(out)
-            continue
-        try:
-            cert = x509.load_der_x509_certificate(der)
-            out.update({
-                "Subject": cert.subject.rfc4514_string(),
-                "Issuer": cert.issuer.rfc4514_string(),
-                # Hex, and unbounded width: a certificate serial is a big integer, not a machine word.
-                "SerialNumber": format(cert.serial_number, "x"),
-                "NotBefore": cert.not_valid_before_utc.isoformat(),
-                "NotAfter": cert.not_valid_after_utc.isoformat(),
-                "SHA256Fingerprint": cert.fingerprint(hashes.SHA256()).hex(),
-            })
-        except Exception as exc:
-            out["ParseError"] = str(exc)[:200]
-        summarized.append(out)
-    return summarized
-
-
-def _first_param(url_params: Optional[Dict[str, Any]], key: str) -> Optional[str]:
-    """One value out of the query string NanoMDM forwarded.
-
-    NanoMDM flattens the query string to one value per key on the wire, but the list unwrap covers a future version
-    that stops flattening (https://github.com/micromdm/nanomdm/blob/v0.9.0/service/webhook/event.go).
-    """
-    value = (url_params or {}).get(key)
-    if isinstance(value, (list, tuple)):
-        value = value[0] if value else None
-    return value if isinstance(value, str) and value else None
-
-
-def _allow_unsigned_tenant_claim() -> bool:
-    """Migration escape hatch: accept the pre-signature ?tenant= again.
-
-    Restores the cross-tenant enrollment hole exactly; only for draining enrollments still on old .mobileconfigs."""
-    return os.getenv("MDM_ALLOW_UNSIGNED_TENANT_CLAIM", "false").strip().lower() in (
-        "1", "true", "yes", "on")
-
-
-def _require_known_serial() -> bool:
-    """When true, only a pre-provisioned serial (an ADE placeholder or an existing row) may become a Device. Off by
-    default so OTA fleets keep self-registering."""
-    return os.getenv("MDM_ENROLL_REQUIRE_KNOWN_SERIAL", "false").strip().lower() in (
-        "1", "true", "yes", "on")
-
-
-def _require_signed_tenant_claim() -> bool:
-    """Post-migration hardening: refuse a check-in on a known udid with no verified tenant claim.
-
-    Off by default: a device enrolled before tsig existed has an unsigned ServerURL baked into its profile. Turn on
-    only once the whole fleet is re-enrolled onto signed profiles, or it cuts those devices off."""
-    return os.getenv("MDM_REQUIRE_SIGNED_TENANT_CLAIM", "false").strip().lower() in (
-        "1", "true", "yes", "on")
-
-
-async def _resolve_tenant(url_params: Dict[str, Any]) -> Tuple[Optional[Tenant], str]:
-    """Map an enrolling device to a tenant. Returns (tenant, reason).
-
-    ?tenant=<id> is a claim, not a fact, honoured only with a matching ?tsig=. Only reached for an unknown udid. See
-    doc: "Why sole_tenant resolution stays unconditional" for the fallback order.
-    """
-    tid = _first_param(url_params, "tenant")
-    tsig = _first_param(url_params, "tsig")
-    signed = bool(tid) and verify_tenant_url_token(tid, tsig or "")
-    # Looked up once, unfiltered, and reused: the tail of this function has to tell no such tenant, real tenant
-    # deactivated, and real tenant with a forged claim apart from each other.
-    claimed = await Tenant.get_or_none(id=tid) if tid else None
-
-    if signed:
-        if claimed is None:
-            return None, "unknown_tenant"
-        if claimed.is_active:
-            return claimed, "signed"
-        # Deactivated: fall through, so a single-tenant install still resolves via sole_tenant instead of having signed
-        # check-ins fail while unsigned ones succeed.
-
-    elif tid and _allow_unsigned_tenant_claim() and claimed is not None and claimed.is_active:
-        logger.warning(
-            "webhook: honouring UNSIGNED tenant claim %r "
-            "(MDM_ALLOW_UNSIGNED_TENANT_CLAIM is set; this reopens cross-tenant enrollment)",
-            tid,
-        )
-        return claimed, "legacy_unsigned"
-
-    tenants = await Tenant.all().limit(2)
-    if len(tenants) == 1:
-        return tenants[0], "sole_tenant"
-
-    if _allow_unsigned_tenant_claim():
-        fallback = await Tenant.get_or_none(id="default", is_active=True)
-        if fallback:
-            return fallback, "legacy_unsigned"
-
-    if tid:
-        # Only an existing tenant id can be an attack; a claim for one that was never here could not have been granted
-        # anything and is a stale or malformed profile.
-        if claimed is None:
-            return None, "unknown_tenant"
-        if not signed:
-            logger.warning(
-                "webhook: refusing tenant claim %r without a valid signature", tid
-            )
-            return None, "bad_signature"
-        # Signed, real and deactivated: a correctly-provisioned device whose tenant was switched off, not an attack.
-        logger.warning(
-            "webhook: refusing enrollment into deactivated tenant %r", tid
-        )
-        return None, "inactive_tenant"
-    return None, "ambiguous"
-
-
-def _verified_tenant_claim(url_params: Dict[str, Any]) -> Optional[str]:
-    """The tenant id on this request, but only if it carries a signature this server minted.
-
-    The same test _resolve_tenant makes, for the known-udid path. None for an absent, unsigned or forged claim: those
-    prove nothing, and treating them as a conflict would break devices on pre-signature profiles."""
-    tid = _first_param(url_params, "tenant")
-    if tid and verify_tenant_url_token(tid, _first_param(url_params, "tsig") or ""):
-        return tid
-    return None
-
-
-async def _rekey_serial(device: Device, reported: str,
-                        topic: Optional[str] = None) -> bool:
-    """Audit a device row's serial change, and say whether it may be written.
-
-    False when another row in the tenant already holds reported. An unenrolled placeholder holding it is not a
-    conflict.
-    """
-    tenant = await Tenant.get_or_none(id=device.tenant_id)
-    siblings = [
-        row for row in await Device.filter(
-            tenant_id=device.tenant_id, serial_number=reported)
-        if str(row.id) != str(device.id)
-    ]
-    blockers = [row for row in siblings
-                if row.udid or row.enrollment_state != "pending"]
-    if blockers:
-        logger.error(
-            "webhook: refusing to re-key device %s from serial=%r to %r: "
-            "device %s in the same tenant already holds it",
-            device.id, device.serial_number, reported, blockers[0].id,
-        )
-        await _log_attempt(
-            "serial_conflict", tenant=tenant, udid=device.udid,
-            serial_number=reported, topic=topic,
-            detail={"held_by_device": str(blockers[0].id),
-                    "old_serial": device.serial_number},
-        )
-        return False
-    for stub in siblings:
-        if getattr(stub, "dep_server_id", None) and not getattr(device, "dep_server_id", None):
-            device.dep_server_id = stub.dep_server_id
-            await device.save(update_fields=["dep_server_id"])
-        logger.info(
-            "webhook: merging unenrolled placeholder %s (serial=%r) into device %s",
-            stub.id, reported, device.id,
-        )
-        await stub.delete()
-    # Filling in a serial the row never had takes over nothing, so it is not what the rekey audit records.
-    if device.serial_number:
-        await _audit_rekey(tenant, device, new_serial=reported)
-    return True
-
-
-async def _serial_from_nanomdm(udid: str) -> str:
-    """The serial NanoMDM recorded for this enrollment, or "".
-
-    Only Authenticate carries a serial and NanoMDM never redelivers it, so a lost Authenticate needs this fallback or
-    the device never gets a row. Best-effort: NanoMDM's database being unreachable must not fail webhook processing.
-    """
-    try:
-        from controller.services.nanomdm_store import get_serial_number
-
-        return (await get_serial_number(udid) or "").strip()
-    except Exception as exc:
-        logger.warning("webhook: could not recover a serial for udid=%s from "
-                       "NanoMDM's store: %s", udid, exc)
-        return ""
-
-
-async def _audit_rekey(tenant: Optional[Tenant], device: Device, *,
-                       new_udid: Optional[str] = None,
-                       new_serial: Optional[str] = None) -> None:
-    """Record that a device row's hardware identity changed under it. Best-effort.
-
-    tenant is the row's own tenant, read from the database and never an id off the request; None skips the write.
-    Imported lazily since the audit module pulls in the FastAPI auth stack.
-    """
-    if tenant is None:
-        return
-    effective_serial = new_serial or device.serial_number
-    try:
-        from controller.services.audit import record_system_audit
-
-        await record_system_audit(
-            tenant, "device.rekey",
-            target_type="device", target_id=str(device.id),
-            detail={
-                "old_udid": device.udid,
-                "new_udid": new_udid or device.udid,
-                # Kept for readers written against the serial-matched form, where it was the one serial involved.
-                "serial": effective_serial,
-                "old_serial": device.serial_number,
-                "new_serial": effective_serial,
-                "matched_on": "udid" if new_serial else "serial",
-                "prior_state": device.enrollment_state,
-            },
-        )
-    except Exception:
-        logger.exception("webhook: failed to audit re-key of device %s", device.id)
-
-
-# ==Deferred fan-out==
-# Row writes stay inline; dispatcher/ATC fan-out runs after the response, off the NanoMDM connect path.
-
-# Keyed per event loop, like reconciler's semaphores, so a fresh loop never inherits a lock bound to a dead one.
-_deferred_locks: "weakref.WeakKeyDictionary" = weakref.WeakKeyDictionary()
-
-
-def _device_lock(device_id: str) -> asyncio.Lock:
-    loop = asyncio.get_running_loop()
-    locks = _deferred_locks.get(loop)
-    if locks is None:
-        locks = {}
-        _deferred_locks[loop] = locks
-    lock = locks.get(device_id)
-    if lock is None:
-        lock = asyncio.Lock()
-        locks[device_id] = lock
-    return lock
-
-
-def _spawn_deferred(coro) -> None:
-    """Strong-ref create_task onto the reconciler's shared background set.
-
-    Not reconciler._spawn: that wraps the coroutine in the semaphore before it runs, and _defer needs the device lock
-    taken first. Split out so tests can intercept what _defer queues."""
-    from controller.services import reconciler
-    t = asyncio.create_task(coro)
-    reconciler._background_tasks.add(t)
-    t.add_done_callback(reconciler._background_tasks.discard)
-
-
-def _defer(device_id: Any, coro) -> None:
-    """Run dispatcher/ATC fan-out for a device off the webhook request path.
-
-    Returns immediately; runs once the per-device lock is free, inside the reconciler's spawn semaphore. Callers must
-    finish every row write the coroutine depends on first, since it reads that state back out of the database.
-    """
-    device_id = str(device_id)
-
-    async def _serialized():
-        try:
-            async with _device_lock(device_id):
-                from controller.services import reconciler
-                async with reconciler._semaphore():
-                    await coro
-        except Exception:
-            # _atc_signal and _dispatcher_eval log their own failures with context; this catches anything else, so a
-            # deferred error cannot surface as an unretrieved task exception with no device attached.
-            logger.exception("webhook: deferred fan-out failed for device %s", device_id)
-
-    _spawn_deferred(_serialized())
-
-
-async def drain_deferred() -> None:
-    """Wait until every deferred fan-out coroutine has finished. Test hook.
-
-    Deferred work rides the reconciler's shared background set, so this also drains anything else spawned there.
-    Production code never calls it."""
-    from controller.services import reconciler
-    while reconciler._background_tasks:
-        await asyncio.gather(*list(reconciler._background_tasks), return_exceptions=True)
-
-
-async def _atc_signal(device_id: Any, signal: str, ref: Optional[str] = None) -> None:
-    """Best-effort: advance any ATC flow runs waiting on a device signal.
-
-    Runs deferred (see _defer), so it logs failures and swallows them. The webhook returns 200 either way."""
-    try:
-        from controller.services import atc
-        await atc.advance_on_signal(str(device_id), signal, ref)
-    except Exception:
-        logger.exception("ATC: signal %s (ref=%s) failed for device %s", signal, ref, device_id)
-
-
-async def _dispatcher_eval(device_id: Any) -> None:
-    """Best-effort: re-evaluate Dispatcher compliance rules against fresh device state. Runs deferred (see _defer).
-
-    Takes the id, not the object: re-reading keeps the queue entry id-sized rather than pinning the JSONB blobs just
-    persisted, and rules see committed state rather than what the capturing request held in memory."""
-    try:
-        device = await Device.get_or_none(id=device_id)
-        if device is None:
-            return
-        from controller.services import dispatcher
-        await dispatcher.evaluate_device(device, reason="inventory")
-    except Exception:
-        logger.exception("Dispatcher: evaluate_device failed for device %s", device_id)
-
-
-async def _refuse_conflicting_claim(
-    device: Device, url_params: Dict[str, Any], *,
-    topic: Optional[str] = None, info: Optional[Dict[str, Any]] = None,
-) -> bool:
-    """True when this request must be refused before it touches this device's row.
-
-    A udid is not a secret, so a verified tenant claim must agree with the row, or asserting a victim's udid could
-    rewrite it.
-    """
-    info = info or {}
-    udid = device.udid
-    claimed = _verified_tenant_claim(url_params)
-    if claimed is not None and claimed != device.tenant_id:
-        logger.warning(
-            "webhook: refusing check-in for udid=%s: verified claim for tenant %r "
-            "contradicts the device's own tenant %r",
-            udid, claimed, device.tenant_id,
-        )
-        # Recorded against the row's own tenant, a database fact, not the caller's claim. No audit row: AuditLog has
-        # no dedupe and a hostile device would re-trigger this every check-in; EnrollmentAttempt does dedupe.
-        await _log_attempt(
-            "bad_tenant_claim",
-            tenant=await Tenant.get_or_none(id=device.tenant_id),
-            udid=udid,
-            serial_number=device.serial_number,
-            topic=topic,
-            detail={
-                "reason": "tenant_conflict",
-                "claimed_tenant": claimed[:100],
-                "reported_serial": (info.get("SerialNumber") or "")[:64] or None,
-            },
-        )
-        return True
-
-    # Opt-in hardening for a fully re-enrolled fleet. Own outcome, separate from bad_tenant_claim: that one is always
-    # an attack, this one almost always means an old profile still in the field.
-    if claimed is None and _require_signed_tenant_claim():
-        if _allow_unsigned_tenant_claim():
-            # The two flags contradict each other; the migration-in-progress one wins, since cutting off exactly the
-            # devices ALLOW_UNSIGNED was set for is the worse surprise.
-            logger.warning(
-                "webhook: MDM_REQUIRE_SIGNED_TENANT_CLAIM and "
-                "MDM_ALLOW_UNSIGNED_TENANT_CLAIM are both set; that's "
-                "contradictory (one assumes the fleet migration is "
-                "finished, the other that it isn't). "
-                "MDM_ALLOW_UNSIGNED_TENANT_CLAIM wins: the unsigned "
-                "check-in for udid=%s is still accepted.",
-                udid,
-            )
-            return False
-        logger.warning(
-            "webhook: refusing check-in for udid=%s: no verified "
-            "tenant claim (MDM_REQUIRE_SIGNED_TENANT_CLAIM is set); "
-            "most likely a device still carrying a pre-signature "
-            "profile that needs re-enrolling",
-            udid,
-        )
-        requested = _first_param(url_params, "tenant")
-        await _log_attempt(
-            "unsigned_tenant_claim",
-            tenant=await Tenant.get_or_none(id=device.tenant_id),
-            udid=udid,
-            serial_number=device.serial_number,
-            topic=topic,
-            detail={
-                "reason": "no_verified_claim",
-                "requested_tenant": requested[:100] if requested else None,
-                "reported_serial": (info.get("SerialNumber") or "")[:64] or None,
-            },
-        )
-        return True
-    return False
-
-
-# InstalledApplicationList keys that mean an entry is on its way and not there yet
-# (https://github.com/apple/device-management/blob/release/mdm/commands/application.installed.list.yaml). An iOS
-# device lists an app while still fetching it; a Mac does not, so these only arrive from the other platforms.
-_INVENTORY_PENDING_KEYS = (
-    "Installing", "DownloadFailed", "DownloadWaiting", "DownloadPaused",
-    "DownloadCancelled",
-)
-
-
-def _inventory_bundle_versions(installed_apps: Any) -> Dict[str, set]:
-    """Bundle id to the versions the device reported, for apps it really holds.
-
-    An entry with neither Version nor ShortVersion maps to an empty set. Entries still fetching are left out; that
-    would be the same mistake as counting the install command's acknowledgement.
-    """
-    out: Dict[str, set] = {}
-    if not isinstance(installed_apps, list):
-        return out
-    for entry in installed_apps:
-        if not isinstance(entry, dict):
-            continue
-        identifier = entry.get("Identifier")
-        if not identifier:
-            continue
-        if any(entry.get(key) is True for key in _INVENTORY_PENDING_KEYS):
-            continue
-        versions = {str(entry[key]) for key in ("Version", "ShortVersion")
-                    if entry.get(key) not in (None, "")}
-        out.setdefault(str(identifier), set()).update(versions)
-    return out
-
-
-def _version_fingerprint(versions: set) -> str:
-    """The versions an inventory entry named, as one comparable string.
-
-    Compares the pair as a whole, since which of CFBundleVersion/CFBundleShortVersionString moves on an upgrade isn't
-    knowable in advance. Empty means the device named no version, which differs from never having been asked.
-    """
-    return "/".join(sorted(versions))
 
 
 async def _confirm_accepted_apps(device: Device) -> list:
@@ -623,8 +44,7 @@ async def _confirm_accepted_apps(device: Device) -> list:
         }
     except Exception:
         logger.exception(
-            "webhook: could not read apps.yaml for %s; leaving accepted "
-            "deployments unconfirmed", device.udid)
+            "webhook: could not read apps.yaml for %s; leaving accepted deployments unconfirmed", device.udid)
         return []
 
     reported = _inventory_bundle_versions(device.installed_apps)
@@ -650,8 +70,7 @@ async def _confirm_accepted_apps(device: Device) -> list:
             # Either the two version strings are written differently or the device holds a different build than the one
             # sent, and this line is how the second case is found. Presence is confirmed either way.
             logger.info(
-                "webhook: %s reports %s at %s, deployed as %s; confirming "
-                "presence anyway",
+                "webhook: %s reports %s at %s, deployed as %s; confirming presence anyway",
                 device.udid, bundle_id, fingerprint, deployment.app_version,
             )
         deployment.status = "installed"
@@ -713,51 +132,6 @@ async def _refresh_app_inventory(device_id: Any) -> None:
     await _refresh_reported_inventory(device_id, "app_list", "App install")
 
 
-async def _log_attempt(
-    outcome: str,
-    *,
-    tenant: Optional[Tenant] = None,
-    udid: Optional[str] = None,
-    serial_number: Optional[str] = None,
-    topic: Optional[str] = None,
-    detail: Optional[Dict[str, Any]] = None,
-) -> None:
-    """Record a webhook check-in dropped without matching a device row, so enrollment failures are visible somewhere.
-
-    Best-effort; the webhook returns 200 either way. tenant must be a row the caller looked up, never an id off the
-    request: anyone can put ?tenant=<victim> on the ServerURL. An unresolved id belongs in detail only.
-    """
-    try:
-        # One row per (tenant, udid, outcome), updated in place with a repeat count. Tenant is part of the key, not
-        # just the payload.
-        query = EnrollmentAttempt.filter(udid=udid, outcome=outcome)
-        query = (
-            query.filter(tenant_id=tenant.id) if tenant is not None
-            else query.filter(tenant_id__isnull=True)
-        )
-        existing = await query.first() if udid else None
-        if existing is not None:
-            merged = dict(existing.detail or {})
-            merged.update(detail or {})
-            merged["count"] = int(merged.get("count", 1)) + 1
-            # No tenant reassignment: it is part of the key just matched on, so a row cannot migrate between tenants.
-            existing.serial_number = serial_number
-            existing.topic = topic
-            existing.detail = merged
-            await existing.save()
-        else:
-            await EnrollmentAttempt.create(
-                tenant=tenant,
-                udid=udid,
-                serial_number=serial_number,
-                topic=topic,
-                outcome=outcome,
-                detail={**(detail or {}), "count": 1},
-            )
-    except Exception:
-        logger.exception("webhook: failed to log enrollment attempt (outcome=%s)", outcome)
-
-
 def _naming_cache_ttl() -> float:
     return float(os.getenv("MDM_NAMING_CACHE_TTL_SECONDS", "60"))
 
@@ -778,6 +152,81 @@ def _naming_cfg_fingerprint(tenant_id: str) -> Optional[Tuple[int, int, int]]:
     except OSError:
         return None
     return (st.st_mtime_ns, st.st_size, st.st_ino)
+
+
+# ==Deferred fan-out==
+# Row writes stay inline; dispatcher/ATC fan-out runs after the response, off the NanoMDM connect path.
+
+_deferred_locks = KeyedLocks()
+
+
+def _device_lock(device_id: str) -> asyncio.Lock:
+    return _deferred_locks.get(device_id)
+
+
+def _spawn_deferred(coro) -> None:
+    """Strong-ref create_task onto the reconciler's shared background set.
+
+    Not reconciler._spawn: that wraps the coroutine in the semaphore before it runs, and _defer needs the device lock
+    taken first. Split out so tests can intercept what _defer queues."""
+    from controller.services import reconciler
+    t = asyncio.create_task(coro)
+    reconciler._background_tasks.add(t)
+    t.add_done_callback(reconciler._background_tasks.discard)
+
+
+def _defer(device_id: Any, coro) -> None:
+    """Run dispatcher/ATC fan-out for a device off the webhook request path; returns immediately.
+
+    Callers must finish every row write the coroutine depends on first; it reads that state back from the database.
+    """
+    device_id = str(device_id)
+
+    async def _serialized():
+        try:
+            async with _device_lock(device_id):
+                from controller.services import reconciler
+                async with reconciler._semaphore():
+                    await coro
+        except Exception:
+            # _atc_signal and _dispatcher_eval log their own failures with context; this catches anything else, so a
+            # deferred error cannot surface as an unretrieved task exception with no device attached.
+            logger.exception("webhook: deferred fan-out failed for device %s", device_id)
+
+    _spawn_deferred(_serialized())
+
+
+async def drain_deferred() -> None:
+    """Wait until every deferred fan-out coroutine has finished. Test hook.
+
+    Deferred work rides the reconciler's shared background set, so this also drains anything else spawned there.
+    Production code never calls it."""
+    from controller.services import reconciler
+    while reconciler._background_tasks:
+        await asyncio.gather(*list(reconciler._background_tasks), return_exceptions=True)
+
+
+async def _atc_signal(device_id: Any, signal: str, ref: Optional[str] = None) -> None:
+    """Best-effort: advance any ATC flow runs waiting on a device signal.
+
+    Runs deferred (see _defer), so it logs failures and swallows them. The webhook returns 200 either way."""
+    try:
+        from controller.services import atc
+        await atc.advance_on_signal(str(device_id), signal, ref)
+    except Exception:
+        logger.exception("ATC: signal %s (ref=%s) failed for device %s", signal, ref, device_id)
+
+
+async def _dispatcher_eval(device_id: Any) -> None:
+    """Best-effort: re-evaluate Dispatcher compliance rules against fresh device state. Runs deferred (see _defer).
+
+    Takes the id, not the object: re-reading keeps the queue entry id-sized rather than pinning the JSONB blobs just
+    persisted, and rules see committed state rather than what the capturing request held in memory."""
+    try:
+        from controller.services import dispatcher
+        await dispatcher.evaluate_device_id(device_id, "inventory")
+    except Exception:
+        logger.exception("Dispatcher: evaluate_device failed for device %s", device_id)
 
 
 class WebhookHandler:
@@ -810,6 +259,10 @@ class WebhookHandler:
             await self._handle_checkout(udid, url_params, topic=topic)
             return
 
+        if topic == "mdm.SetBootstrapToken":
+            await self._handle_set_bootstrap_token(udid, url_params, event)
+            return
+
         # Not evidence about enrollment (a per-user channel, the /ddm-proxied DeclarativeManagement duplicate, a
         # token topic): note the device was heard from, change nothing else, never create a row.
         if not _is_device_channel(event) or topic not in _ENROLLMENT_STATE_TOPICS:
@@ -822,12 +275,27 @@ class WebhookHandler:
         await self._upsert_device(udid, url_params, info, topic=topic)
 
     @staticmethod
+    async def _handle_set_bootstrap_token(udid: str, url_params: Dict[str, Any],
+                                          event: Dict[str, Any]) -> None:
+        """Handle SetBootstrapToken check-in, tracking escrow state without storing token bytes."""
+        device = await Device.get_or_none(udid=udid)
+        if device is None:
+            return
+        if await _refuse_conflicting_claim(device, url_params, topic="mdm.SetBootstrapToken"):
+            return
+        plist = _decode_plist(event.get("raw_payload"))
+        token = plist.get("BootstrapToken")
+        escrowed = bool(token and len(token) > 0)
+        device.bootstrap_token_escrowed = escrowed
+        await device.save(update_fields=["bootstrap_token_escrowed"])
+        logger.info("webhook: SetBootstrapToken for %s (escrowed=%s)", udid, escrowed)
+
+    @staticmethod
     async def _note_liveness(udid: str, url_params: Dict[str, Any],
                              topic: Optional[str] = None) -> None:
         """Record that a known device was heard from, and nothing else.
 
-        Only touches a row that already exists; still goes through the tenant-claim guard, since last_seen is a
-        field admins read and an unauthenticated write to it would bypass what that check protects.
+        Only touches an existing row, and still runs the tenant-claim guard, so last_seen is not an unguarded write.
         """
         device = await Device.get_or_none(udid=udid)
         if device is None:
@@ -858,8 +326,7 @@ class WebhookHandler:
             tenant, reason = await _resolve_tenant(url_params)
             if tenant is None:
                 logger.warning(
-                    f"webhook: no tenant resolvable for new device {udid} "
-                    f"(reason={reason}); skipping"
+                    f"webhook: no tenant resolvable for new device {udid} (reason={reason}); skipping"
                 )
                 # The requested tenant id was never verified, so it stays out of the FK: anyone could pass
                 # ?tenant=<victim> to pollute that tenant's attempt log. Diagnostic detail only.
@@ -935,14 +402,15 @@ class WebhookHandler:
                 )
                 rekey_refused = not await _rekey_serial(device, reported, topic=topic)
 
-        # Mark (re-)enrolled and enrich from a fresh Authenticate. A returning device keeps its tasks and attributes;
-        # the reconciler re-pushes config.
         was_inactive = device.enrollment_state != "enrolled"
         device.enrollment_state = "enrolled"
         device.unenrolled_at = None
         # Tracked rather than a full-row save: every Connect, including a bare Idle poll, comes through here, and a
         # full save would rewrite the multi-KB JSONB columns each time.
         dirty = {"udid", "enrollment_state", "unenrolled_at", "last_seen"}
+        if was_inactive and (device.attributes or {}).get("bypass_code_attempted"):
+            device.attributes = {**(device.attributes or {}), "bypass_code_attempted": False}
+            dirty.add("attributes")
         if info.get("SerialNumber") and not rekey_refused:
             device.serial_number = info["SerialNumber"]
             dirty.add("serial_number")
@@ -1064,8 +532,10 @@ class WebhookHandler:
         device.ddm_last_published_token = None
         device.enrollment_state = "unenrolled"
         device.unenrolled_at = datetime.now(timezone.utc)
+        device.bootstrap_token_escrowed = False
         await device.save(update_fields=["enrollment_state", "unenrolled_at",
-                                         "last_seen", "ddm_last_published_token"])
+                                         "last_seen", "ddm_last_published_token",
+                                         "bootstrap_token_escrowed"])
         logger.info(f"webhook: device {udid} checked out (unenrolled, record retained)")
 
     # ==Command results (Connect with an acknowledge_event)==
@@ -1092,8 +562,7 @@ class WebhookHandler:
     async def _find_task(device: Device, command_uuid: str) -> Optional[Task]:
         """The task waiting on this CommandUUID, if there is one.
 
-        Exact lookup on the mirrored column (Task.save keeps it in step with details; no JSONB fallback needed).
-        CommandUUIDs are uuid4, so at most one row matches; newest-first is belt and braces.
+        Exact lookup on the command_uuid column, which Task.save keeps in step with details (no JSONB fallback needed).
         """
         return await (
             Task.filter(device=device, command_uuid=command_uuid)
@@ -1115,10 +584,9 @@ class WebhookHandler:
     async def _resolve_late_response(
         self, device: Device, command_uuid: str, status: str, response: Dict[str, Any]
     ) -> None:
-        """Second look at a response that arrived before its own task row.
+        """Second look at a response that arrived before its own task row. Runs deferred, under the per-device lock.
 
-        Runs under the per-device lock (see
-        _defer); only a command another process is mid-enqueue of needs _await_late_task's further wait.
+        Only a command another process is still enqueuing needs the further wait in _await_late_task.
         """
         task = await self._find_task(device, command_uuid)
         if task is not None:
@@ -1141,10 +609,9 @@ class WebhookHandler:
     async def _await_late_task(
         self, device: Device, command_uuid: str, status: str, response: Dict[str, Any]
     ) -> None:
-        """Wait, briefly and cheaply, for a row another process is still writing.
+        """Wait briefly for a task row another process is still writing.
 
-        Spawned bare instead of through _defer, since holding the lock/semaphore for it would let a burst of
-        orphaned responses stall other work fleet wide.
+        Spawned directly, not through _defer, so a burst of orphaned responses does not tie up the lock and semaphore.
         """
         deadline = time.monotonic() + _LATE_RESPONSE_WAIT_SECONDS
         grace = _LATE_RESPONSE_GRACE_POLLS
@@ -1230,8 +697,7 @@ class WebhookHandler:
     async def _record_error(task: Task, response: Dict[str, Any], fallback: str) -> str:
         """Put a device's rejection on its task, and return the summary line.
 
-        Two forms: task.error is one searchable line, task.details["error_chain"] is the whole chain. Saved before
-        the caller's update_progress, which never touches details.
+        task.error is one searchable line; task.details holds the whole chain and is saved here, not by update_progress.
         """
         chain = _error_chain(response)
         if chain:
@@ -1241,9 +707,74 @@ class WebhookHandler:
         task.error = message
         return message
 
+    async def _fail_bypass_fetch(self, task: Task, response: Dict[str, Any], message: str) -> None:
+        await self._record_error(task, response, message)
+        await task.update_progress(task.progress, "failed")
+        _defer(task.device_id, _atc_signal(task.device_id, "command_ack", ref=str(task.id)))
+
     async def _handle_generic_response(self, task: Task, response: Dict[str, Any], status: str):
         """Complete/fail a plain command task from the device's response."""
+        bypass_code = (response.pop("ActivationLockBypassCode", None)
+                       if task.type == "fetch_activation_lock_bypass_code" else None)
+
         if status == "Acknowledged":
+            if task.type == "fetch_activation_lock_bypass_code":
+                resp_uuid = response.get("CommandUUID")
+                task_uuid = task.command_uuid or (task.details or {}).get("command_uuid")
+                if resp_uuid and task_uuid and resp_uuid != task_uuid:
+                    logger.warning("webhook: command UUID mismatch on bypass code fetch for task %s", task.id)
+                    await self._fail_bypass_fetch(task, response, "CommandUUID mismatch on bypass code fetch")
+                    return
+                code = bypass_code.strip() if isinstance(bypass_code, str) else None
+                if not code:
+                    # An empty answer never replaces an escrowed code, so a stored one stays.
+                    await self._fail_bypass_fetch(
+                        task, response, "The device has no bypass code available. Apple provides it only within "
+                                        "15 days of supervision.")
+                    return
+                try:
+                    from controller.models.tenant import DeviceSecret
+                    from controller.services import audit, device_secrets
+                    device = await Device.get_or_none(id=task.device_id)
+                    if device is not None:
+                        await device_secrets.escrow(
+                            device,
+                            DeviceSecret.KIND_ACTIVATION_LOCK_BYPASS_CODE,
+                            code,
+                            label="Activation Lock bypass code",
+                            created_by=task.user or "system:activation_lock",
+                        )
+                        tenant = await Tenant.get_or_none(id=task.tenant_id)
+                        if tenant is not None:
+                            await audit.record_system_audit(
+                                tenant,
+                                "secret.escrow",
+                                target_type="device",
+                                target_id=str(device.id),
+                                detail={
+                                    "kind": DeviceSecret.KIND_ACTIVATION_LOCK_BYPASS_CODE,
+                                    "serial_number": device.serial_number,
+                                    "task_id": str(task.id),
+                                },
+                            )
+                except Exception:
+                    logger.exception("webhook: escrowing bypass code failed for task %s", task.id)
+                    await self._fail_bypass_fetch(task, response, "Escrowing the bypass code failed")
+                    return
+
+            if task.type in ("erase", "erase_device"):
+                try:
+                    from controller.services import device_secrets
+                    await device_secrets.on_device_wiped(task.device_id)
+                    device = await Device.get_or_none(id=task.device_id)
+                    if device is not None:
+                        attrs = dict(device.attributes or {})
+                        attrs["bypass_code_attempted"] = False
+                        device.attributes = attrs
+                        await device.save(update_fields=["attributes"])
+                except Exception:
+                    logger.exception("webhook: on_device_wiped failed for task %s", task.id)
+
             # A rotated FileVault key comes back CMS-encrypted in RotateResult, as <data> that _json_safe would drop.
             # Escrow it from the raw response before that, off the same device the task belongs to.
             if task.type == "rotate_filevault_key":
@@ -1253,8 +784,7 @@ class WebhookHandler:
                     if device is not None:
                         await filevault_escrow.ingest_rotate_result(device, response)
                 except Exception:
-                    logger.exception("filevault: escrow from RotateFileVaultKey "
-                                     "failed for task %s", task.id)
+                    logger.exception("filevault: escrow from RotateFileVaultKey failed for task %s", task.id)
             # Keep a trimmed copy of the response, so what the device answered (DeviceInformation QueryResponses, for
             # one) survives on the task.
             trimmed = {
@@ -1283,10 +813,9 @@ class WebhookHandler:
 
     @staticmethod
     async def _escrow_filevault_key(device: Device, sec: Dict[str, Any]) -> None:
-        """Escrow a FileVault recovery key a SecurityInfo answer carries.
+        """Escrow a FileVault recovery key a SecurityInfo answer carries, before _json_safe strips the raw CMS bytes.
 
-        Split out so the raw CMS bytes reach filevault_escrow before _json_safe strips them. Swallows its own
-        errors: this is one part of a posture update and must not undo the rest.
+        Swallows its own errors, so a failure here does not undo the rest of the posture update.
         """
         try:
             from controller.services import filevault_escrow
@@ -1336,12 +865,9 @@ class WebhookHandler:
                 dirty.add("hostname")
             # Fresh facts can change group membership, so recompute.
             try:
-                from controller.services.group_manager import GroupManager
-                from controller.services.tenant_config import load_groups_readonly
+                from controller.services.group_manager import current_groups
                 # Readonly for the same reason as the check-in path: the loaded document is read and discarded here.
-                device.groups = GroupManager(str(device.tenant_id)).evaluate_device_groups(
-                    device, load_groups_readonly(device.tenant_id)
-                )
+                device.groups = current_groups(device, readonly=True)
                 dirty.add("groups")
             except Exception:
                 logger.exception("group recompute after device info failed for %s", device.udid)
@@ -1407,6 +933,7 @@ class WebhookHandler:
             return
 
         await device.save(update_fields=sorted(dirty))
+        await self._maybe_auto_queue_bypass_code(device, task, response)
         # ATC: an app the device now confirms it holds satisfies a wait_for(app_installed) for that app. Emitted here
         # rather than on the install acknowledgement, which says only that the device took the command.
         for app_id in confirmed_apps:
@@ -1416,6 +943,69 @@ class WebhookHandler:
         # Dispatcher: fresh posture or inventory may change compliance. Rule evaluation is the most expensive part of
         # the response path and nothing NanoMDM waits on depends on it, so it runs deferred.
         _defer(device.id, _dispatcher_eval(device.id))
+
+    @staticmethod
+    async def _maybe_auto_queue_bypass_code(device: Device, task: Task, response: Dict[str, Any]) -> None:
+        """Queue fetch_activation_lock_bypass_code if eligible after inventory or security update."""
+        if not device.udid or device.enrollment_state != "enrolled":
+            return
+        from controller.models.tenant import DeviceSecret
+        from controller.services.scoping import device_platform_category
+        platform = device_platform_category(device.device_model)
+
+        should_queue = False
+        if task.type == "security_info" and platform == "Mac":
+            sec = response.get("SecurityInfo")
+            if isinstance(sec, dict):
+                mgmt = sec.get("ManagementStatus")
+                if isinstance(mgmt, dict) and mgmt.get("IsActivationLockManageable") is True:
+                    should_queue = True
+        elif task.type == "refresh_info" and platform in ("iPhone", "iPad", "iPod", "Apple Vision"):
+            info = response.get("QueryResponses")
+            if isinstance(info, dict) and info.get("IsSupervised") is True:
+                should_queue = True
+
+        if not should_queue:
+            return
+
+        if (device.attributes or {}).get("bypass_code_attempted") is True:
+            return
+        has_secret = await DeviceSecret.filter(
+            device_id=device.id,
+            kind=DeviceSecret.KIND_ACTIVATION_LOCK_BYPASS_CODE,
+        ).exists()
+        if has_secret:
+            return
+
+        existing = await Task.filter(
+            device_id=device.id,
+            type="fetch_activation_lock_bypass_code",
+            status__in=("pending", "running"),
+        ).exists()
+        if existing:
+            return
+
+        tenant = await Tenant.get_or_none(id=device.tenant_id)
+        if tenant is None:
+            return
+
+        from controller.services.device_commands import dispatch_catalog_command
+        try:
+            device.attributes = {**(device.attributes or {}), "bypass_code_attempted": True}
+            await device.save(update_fields=["attributes"])
+            await dispatch_catalog_command(
+                device,
+                "fetch_activation_lock_bypass_code",
+                params={},
+                user="system:activation_lock",
+                tenant=tenant,
+                allow_destructive=False,
+            )
+        except Exception:
+            logger.exception("webhook: auto-queueing activation lock bypass code failed for %s", device.udid)
+            # Nothing reached the device, so the next poll may try again.
+            device.attributes = {**(device.attributes or {}), "bypass_code_attempted": False}
+            await device.save(update_fields=["attributes"])
 
     # ==Per-command response handlers==
     # Apple MDM semantics: Acknowledged means the device executed the command. NotNow means busy, so the task stays
@@ -1457,9 +1047,8 @@ class WebhookHandler:
                 **(task.details or {}),
                 "install_confirmation": {
                     "confirmed": False,
-                    "note": "The device accepted the install command. Whether the "
-                            "app installed is unconfirmed until the device reports "
-                            "it in its own application inventory.",
+                    "note": "The device accepted the install command. Whether the app installed is unconfirmed until "
+                            "the device reports it in its own application inventory.",
                 },
             }
             await task.save(update_fields=["details"])
@@ -1472,8 +1061,7 @@ class WebhookHandler:
                 # accepted app with a failure hanging off it.
                 deployment.last_error = None
                 # failed_attempts is not cleared here, or the retry backoff would hold at its first rung; it clears
-                # only on device confirmation. reported_version resets unless this row was already installed. See
-                # doc: "Why app confirmation compares reported_version instead of the identifier alone".
+                # only on device confirmation. reported_version resets unless this row was already installed.
                 if previous_status != 'installed':
                     deployment.reported_version = None
                 await deployment.save()
@@ -1491,14 +1079,18 @@ class WebhookHandler:
                 deployment.last_error = error_msg
                 await deployment.save()
 
-    async def _handle_app_remove_response(self, task: Task, response: Dict[str, Any], status: str):
-        """No AppDeployment bookkeeping here: removals run outside the deploy loop, and whether the row is unscoped or
-        deleted belongs to the reconciler."""
+    async def _simple_ack(self, task: Task, response: Dict[str, Any], status: str, error_prefix: str):
+        """Complete the task on Acknowledged, or record the error under error_prefix and fail it."""
         if status == 'Acknowledged':
             await task.update_progress(100, 'completed')
         elif status in ('Error', 'CommandFormatError'):
-            await self._record_error(task, response, 'App removal failed')
+            await self._record_error(task, response, error_prefix)
             await task.update_progress(task.progress, 'failed')
+
+    async def _handle_app_remove_response(self, task: Task, response: Dict[str, Any], status: str):
+        """No AppDeployment bookkeeping here: removals run outside the deploy loop, and whether the row is unscoped or
+        deleted belongs to the reconciler."""
+        await self._simple_ack(task, response, status, 'App removal failed')
 
     async def _handle_profile_install_response(self, task: Task, response: Dict[str, Any], status: str):
         """Unlike InstallApplication, an Acknowledged InstallProfile means the profile is installed, so the row goes
@@ -1514,8 +1106,8 @@ class WebhookHandler:
                 deployment.status = 'installed'
                 deployment.install_date = datetime.utcnow()
                 deployment.last_error = None
-                # Same as the app path: the device is no longer stuck on this, so the retry backoff starts over if it
-                # fails again. Cleared here and never incremented here.
+                # An acknowledged InstallProfile is the install itself, so the retry backoff restarts if it fails again.
+                # failed_attempts is cleared here and never incremented here.
                 deployment.failed_attempts = 0
                 await deployment.save()
             # ATC: satisfies a wait_for(profile_installed) for this profile.
@@ -1545,8 +1137,4 @@ class WebhookHandler:
     async def _handle_profile_remove_response(self, task: Task, response: Dict[str, Any], status: str):
         """Handle a profile removal response. Only reached for a removal task carrying profile_info with a remove
         marker; the reconciler's own removal task carries a bare profile_id and takes the generic branch instead."""
-        if status == 'Acknowledged':
-            await task.update_progress(100, 'completed')
-        elif status in ('Error', 'CommandFormatError'):
-            await self._record_error(task, response, 'Profile removal failed')
-            await task.update_progress(task.progress, 'failed')
+        await self._simple_ack(task, response, status, 'Profile removal failed')

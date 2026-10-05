@@ -3,14 +3,12 @@
 import logging
 import os
 
-import yaml
 from controller.services import flow_step_catalog, tenant_config
+from controller.utils.coerce import env_flag
 
 logger = logging.getLogger(__name__)
 
-ATC_PROVISION_EXISTING_TENANTS = bool(
-    os.getenv("ATC_PROVISION_EXISTING_TENANTS", "0").strip().lower() in ("1", "true", "yes", "on")
-)
+ATC_PROVISION_EXISTING_TENANTS = env_flag("ATC_PROVISION_EXISTING_TENANTS")
 
 
 def ensure_enrollment_flow(tenant_id: str) -> bool:
@@ -27,10 +25,7 @@ def ensure_enrollment_flow(tenant_id: str) -> bool:
             "version": 2,
             "flows": [flow_step_catalog.default_enrollment_flow()],
         }
-        tmp_path = tdir / f".flows.yaml.tmp.{os.getpid()}"
-        with open(tmp_path, "w", encoding="utf-8") as f:
-            yaml.safe_dump(doc, f, default_flow_style=False, sort_keys=False)
-        tmp_path.replace(flows_path)
+        tenant_config.write_yaml_atomic(flows_path, doc, tmp=tdir / f".flows.yaml.tmp.{os.getpid()}")
         tenant_config.invalidate(tenant_id)
         logger.info("ATC: provisioned default enrollment flow for tenant %s", tenant_id)
         return True

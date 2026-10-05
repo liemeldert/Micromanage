@@ -1,9 +1,5 @@
-// The device list's one filter control. Committed filters sit in the box as removable chips, and whatever is
-// still being typed stays plain text beside them. A named attribute with a value narrows the list as it is
-// typed; Space, Enter or picking a suggestion turns it into a chip.
-//
-// The suggestion list is a plain positioned element rather than a Popover, so it works inside the table toolbar
-// without depending on the overlay stack.
+// The device list's one filter control. Committed filters are removable chips, and the text still being typed stays
+// plain beside them. Suggestions are a plain positioned element, not a Popover, so they work inside the table toolbar.
 
 import {useEffect, useMemo, useRef, useState} from "react";
 import {ActionIcon, Badge, Box, CloseButton, Text, Tooltip} from "@mantine/core";

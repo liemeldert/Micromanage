@@ -36,8 +36,7 @@ import {confirmDiscard} from "../../../lib/use-unsaved-changes";
 import {RolloutEditor} from "./RolloutEditor";
 import {ScopeEditor} from "./ScopeEditor";
 
-// Where the package comes from. "storage" means the file is already in the bucket and only needs
-// pointing at.
+// Where the package comes from. "storage" means the file is already in the bucket and only needs pointing at.
 type PackageSource = "storage" | "upload" | "manual";
 
 // Binary units, matching the controller's own quota message.
@@ -185,7 +184,7 @@ export function AppWizard({
 
     const effectiveAppId = addVersion ? existingApp!.id : id;
 
-    //  per-step validity
+    // == per-step validity ==
     const identityValid =
         SLUG_RE.test(id) && !takenIds.includes(id) && name.trim().length > 0 && BUNDLE_ID_RE.test(bundleId);
     const packageValid = version.trim().length > 0 && s3Key.trim().length > 0 && SHA256_RE.test(sha256);

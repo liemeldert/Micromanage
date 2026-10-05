@@ -3,13 +3,9 @@ import {IconAlertTriangle, IconCircleCheck, IconExclamationCircle} from "@tabler
 import type {FlowWarning} from "../../../lib/api";
 import type {FlowIssue} from "./flow-utils";
 
-/** The flow's issues and warnings as a list, opened from the toolbar or by a blocked Save. The canvas shows the same
- * things on the blocks themselves. Neither belongs in a panel above the canvas, where one line per unfinished block
- * pushes the editor down the page mid-edit.
- *
- * Issues mirror the server's structural checks (flow-utils.validateFlowClient), so a save the server would refuse is
- * caught here. Warnings come from the server and never block. An issue naming a node is a button that selects and
- * centres it; flow-level issues, such as no start node, read as plain text. */
+/** The flow's issues and warnings as a list, opened from the toolbar or by a blocked Save; the canvas shows the same
+ * things on the blocks. Issues mirror the server's structural checks (flow-utils.validateFlowClient); warnings come
+ * from the server and never block; an issue naming a node is a button that selects it. */
 export function FlowIssuesModal({
                                     opened,
                                     blocking,

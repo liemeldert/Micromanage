@@ -1,9 +1,11 @@
 """Catalog of ATC flow node types.
 
-Registry of node types for flow.yaml; validator and web UI read from this. See docs for detailed format.
+Registry of node types for flow.yaml; validator and web UI read from this.
 """
 
 from typing import Any, Dict, FrozenSet, List, Optional, Set, Tuple
+
+from controller.services import severity
 
 # The one sentence the configure_accounts node, the flow validator and the editor all say about Apple's managed-admin
 # rule. Both AccountConfiguration keys the node's non-admin modes set require AutoSetupAdminAccounts, which is the
@@ -21,22 +23,18 @@ WAIT_SIGNALS: List[Dict[str, str]] = [
     {"value": "checkin", "label": "Device checks in",
      "description": "The device next contacts the server (any acknowledge)."},
     {"value": "ddm_status", "label": "A DDM status report arrives",
-     "description": "The device delivers a Declarative Device Management status "
-                    "report (any content)."},
+     "description": "The device delivers a Declarative Device Management status report (any content)."},
     {"value": "profile_installed", "label": "Every queued profile is installed",
-     "description": "The device has acknowledged each InstallProfile the flow "
-                    "queued. One profile the device never installs holds the "
-                    "barrier until it times out."},
+     "description": "The device has acknowledged each InstallProfile the flow queued. One profile the device never "
+                    "installs holds the barrier until it times out."},
     {"value": "app_installed", "label": "Every queued app install is accepted",
-     "description": "The device has accepted each InstallApplication the flow "
-                    "queued. The downloads may still be running: MDM acknowledges "
-                    "acceptance, not completion."},
+     "description": "The device has accepted each InstallApplication the flow queued. The downloads may still be "
+                    "running: MDM acknowledges acceptance, not completion."},
     {"value": "command_ack", "label": "Every queued command is acknowledged",
      "description": "The device has answered each send_command step's command."},
     {"value": "declaration_applied", "label": "Every queued declaration is applied",
-     "description": "Each declaration a sync_declarations step queued is reported "
-                    "active and valid. Refs are the declaration's yaml id from "
-                    "declarations.yaml."},
+     "description": "Each declaration a sync_declarations step queued is reported active and valid. Refs are the "
+                    "declaration's yaml id from declarations.yaml."},
 ]
 
 _WAIT_SIGNAL_VALUES = frozenset(s["value"] for s in WAIT_SIGNALS)
@@ -45,23 +43,18 @@ _WAIT_SIGNAL_VALUES = frozenset(s["value"] for s in WAIT_SIGNALS)
 # from the enroll / checkin / schedule hooks.
 START_KINDS: List[Dict[str, str]] = [
     {"value": "enroll_dep", "scope": "enrollment", "label": "Enrollment (Automated / DEP)",
-     "description": "Runs when a device from Automated Device Enrollment (ABM/ASM) "
-                    "enrolls or re-enrolls."},
+     "description": "Runs when a device from Automated Device Enrollment (ABM/ASM) enrolls or re-enrolls."},
     {"value": "enroll_profile", "scope": "enrollment", "label": "Enrollment (OTA / manual)",
      "description": "Runs when a device enrolls over-the-air or by installing the "
                     "enrollment profile manually (not DEP-assigned)."},
     {"value": "checkin", "scope": "universal", "label": "Device check-in",
-     "description": "Runs when the device contacts the server, at most once per "
-                    "cooldown (60 minutes unless you set one) and never while a run "
-                    "from this start is still going. The cooldown matters because "
-                    "almost every step worth putting under this trigger makes the "
-                    "device connect again, and that connection is another check-in. "
-                    "It still re-runs every cooldown, so a step that installs "
-                    "something installs it again each time; use 'Run once per "
-                    "device' for a one-shot."},
+     "description": "Runs when the device contacts the server, at most once per cooldown (60 minutes unless you set "
+                    "one) and never while a run from this start is still going. The cooldown matters because almost "
+                    "every step worth putting under this trigger makes the device connect again, and that connection "
+                    "is another check-in. It still re-runs every cooldown, so a step that installs something installs "
+                    "it again each time; use 'Run once per device' for a one-shot."},
     {"value": "schedule", "scope": "universal", "label": "Scheduled interval",
-     "description": "Runs periodically for in-scope devices; set the interval in "
-                    "minutes."},
+     "description": "Runs periodically for in-scope devices; set the interval in minutes."},
 ]
 
 _START_KIND_VALUES = frozenset(s["value"] for s in START_KINDS)
@@ -74,9 +67,8 @@ FLOW_STEP_CATALOG: List[Dict[str, Any]] = [
     {
         "type": "start",
         "label": "Start",
-        "description": "Entry point of the flow. Runs on an event (enrollment, "
-                       "check-in or a schedule) for devices matching its scope, then "
-                       "flows into the graph. A flow can have several starts.",
+        "description": "Entry point of the flow. Runs on an event (enrollment, check-in or a schedule) for devices "
+                       "matching its scope, then flows into the graph. A flow can have several starts.",
         "category": "Flow",
         "scope": "universal",
         "waits": False,
@@ -92,20 +84,16 @@ FLOW_STEP_CATALOG: List[Dict[str, Any]] = [
              "help": "Required for a Scheduled interval start; ignored otherwise."},
             {"name": "cooldown_minutes", "label": "Cooldown (minutes)", "type": "int",
              "required": False,
-             "help": "Device check-in starts only. Shortest gap between two runs on "
-                     "one device; 60 if you leave it empty. Set 0 only when no step "
-                     "below this start touches the device, since anything that does "
+             "help": "Device check-in starts only. Shortest gap between two runs on one device; 60 if you leave it "
+                     "empty. Set 0 only when no step below this start touches the device, since anything that does "
                      "makes the device check in again."},
             {"name": "once", "label": "Run once per device", "type": "bool",
              "required": False,
-             "help": "Device check-in starts only. After one run this start does not "
-                     "run again for that device on its own, for as long as that run "
-                     "is kept: flow runs are pruned after FLOW_RUN_RETENTION_DAYS (30 "
-                     "by default), and once the record is gone the start is due again. "
-                     "For a one-shot that has to hold for good, have the flow tag the "
-                     "device and exclude that tag in this start's scope. You can still "
-                     "start it by hand from the device page, which restarts the "
-                     "cooldown."},
+             "help": "Device check-in starts only. After one run this start does not run again for that device on its "
+                     "own, for as long as that run is kept: flow runs are pruned after FLOW_RUN_RETENTION_DAYS (30 by "
+                     "default), and once the record is gone the start is due again. For a one-shot that has to hold "
+                     "for good, have the flow tag the device and exclude that tag in this start's scope. You can still "
+                     "start it by hand from the device page, which restarts the cooldown."},
         ],
     },
     {
@@ -125,8 +113,7 @@ FLOW_STEP_CATALOG: List[Dict[str, Any]] = [
     {
         "type": "remove_tag",
         "label": "Remove tags",
-        "description": "Remove the named tags from the device (only those named; "
-                       "other tags are left in place).",
+        "description": "Remove the named tags from the device (only those named; other tags are left in place).",
         "category": "Tags",
         "scope": "universal",
         "waits": False,
@@ -138,9 +125,8 @@ FLOW_STEP_CATALOG: List[Dict[str, Any]] = [
     {
         "type": "set_name",
         "label": "Set device name",
-        "description": "Apply a naming template and push the managed name to the "
-                       "device. The step does not wait; follow it with a wait_for to "
-                       "hold the run until the device answers.",
+        "description": "Apply a naming template and push the managed name to the device. The step does not wait; "
+                       "follow it with a wait_for to hold the run until the device answers.",
         "category": "Naming",
         "scope": "universal",
         "waits": False,
@@ -153,11 +139,10 @@ FLOW_STEP_CATALOG: List[Dict[str, Any]] = [
     {
         "type": "install_profiles",
         "label": "Install profiles",
-        "description": "Queue InstallProfile for the selected profiles now, while the "
-                       "device is connected. Profiles stay installed only while the "
-                       "device is scoped into them: to keep one, assign a tag here and "
-                       "target the profile at that tag in profiles.yaml. Otherwise the "
-                       "reconciler removes a profile the device is not scoped into.",
+        "description": "Queue InstallProfile for the selected profiles now, while the device is connected. Profiles "
+                       "stay installed only while the device is scoped into them: to keep one, assign a tag here and "
+                       "target the profile at that tag in profiles.yaml. Otherwise the reconciler removes a profile "
+                       "the device is not scoped into.",
         "category": "Deploy",
         "scope": "universal",
         "waits": False,
@@ -166,21 +151,18 @@ FLOW_STEP_CATALOG: List[Dict[str, Any]] = [
             {"name": "profile_ids", "label": "Profiles", "type": "profile_ids", "required": True},
             {"name": "gate", "label": "Wait for these before releasing the device",
              "type": "bool", "required": False,
-             "help": "On by default. A wait step below this one holds the "
-                     "run until every profile here is installed, and if the device "
-                     "leaves Setup Assistant without one of them, the run is recorded "
-                     "as failed and the device appears on the alert board. Turn this "
-                     "off for profiles the device does not need before somebody starts "
-                     "using it."},
+             "help": "On by default. A wait step below this one holds the run until every profile here is installed, "
+                     "and if the device leaves Setup Assistant without one of them, the run is recorded as failed and "
+                     "the device appears on the alert board. Turn this off for profiles the device does not need "
+                     "before somebody starts using it."},
         ],
     },
     {
         "type": "install_apps",
         "label": "Install apps",
-        "description": "Queue InstallApplication for the selected apps now, using the "
-                       "version the device is entitled to (apps.yaml scoping/rollout). An "
-                       "app the device is not scoped into is skipped, so pair it with a "
-                       "tag and scope the app version at that tag to install it.",
+        "description": "Queue InstallApplication for the selected apps now, using the version the device is entitled "
+                       "to (apps.yaml scoping/rollout). An app the device is not scoped into is skipped, so pair it "
+                       "with a tag and scope the app version at that tag to install it.",
         "category": "Deploy",
         "scope": "universal",
         "waits": False,
@@ -189,22 +171,19 @@ FLOW_STEP_CATALOG: List[Dict[str, Any]] = [
             {"name": "app_ids", "label": "Apps", "type": "app_ids", "required": True},
             {"name": "gate", "label": "Wait for these before releasing the device",
              "type": "bool", "required": False,
-             "help": "On by default. A wait step below this one holds the "
-                     "run until every app here is accepted, and if the device leaves "
-                     "Setup Assistant without one of them, the run is recorded as "
-                     "failed and the device appears on the alert board. Turn it off "
-                     "when an app is on a gradual rollout, or when it is optional: a "
-                     "device outside today's rollout wave gets no app to wait for, and "
-                     "with this on that counts as a device released unverified."},
+             "help": "On by default. A wait step below this one holds the run until every app here is accepted, and if "
+                     "the device leaves Setup Assistant without one of them, the run is recorded as failed and the "
+                     "device appears on the alert board. Turn it off when an app is on a gradual rollout, or when it "
+                     "is optional: a device outside today's rollout wave gets no app to wait for, and with this on "
+                     "that counts as a device released unverified."},
         ],
     },
     {
         "type": "sync_declarations",
         "label": "Sync declarations",
-        "description": "Queue a DeclarativeManagement sync so the device pulls its "
-                       "current declaration set (DDM). When the tenant has DDM "
-                       "disabled or the device does not support it, the step is "
-                       "skipped with a note. The run continues either way.",
+        "description": "Queue a DeclarativeManagement sync so the device pulls its current declaration set (DDM). When "
+                       "the tenant has DDM disabled or the device does not support it, the step is skipped with a "
+                       "note. The run continues either way.",
         "category": "Deploy",
         "scope": "universal",
         "waits": False,
@@ -212,12 +191,10 @@ FLOW_STEP_CATALOG: List[Dict[str, Any]] = [
         "params": [
             {"name": "gate", "label": "Wait for these before releasing the device",
              "type": "bool", "required": False,
-             "help": "On by default. A wait step below this one holds the "
-                     "run until the device reports its declarations active. Turn it "
-                     "off if this tenant does not use DDM, or if no declarations are "
-                     "scoped to the devices this flow runs on: there would be nothing "
-                     "to wait for, and with this on that counts as a device released "
-                     "unverified."},
+             "help": "On by default. A wait step below this one holds the run until the device reports its "
+                     "declarations active. Turn it off if this tenant does not use DDM, or if no declarations are "
+                     "scoped to the devices this flow runs on: there would be nothing to wait for, and with this on "
+                     "that counts as a device released unverified."},
         ],
     },
     {
@@ -235,9 +212,8 @@ FLOW_STEP_CATALOG: List[Dict[str, Any]] = [
             {"name": "params", "label": "Parameters", "type": "command_params", "required": False},
             {"name": "gate", "label": "Wait for the acknowledgement before releasing",
              "type": "bool", "required": False,
-             "help": "On by default. A wait step below this one holds the "
-                     "run until the device answers this command. Turn it off for a "
-                     "command whose answer the rest of the flow does not depend on."},
+             "help": "On by default. A wait step below this one holds the run until the device answers this command. "
+                     "Turn it off for a command whose answer the rest of the flow does not depend on."},
         ],
     },
     {
@@ -255,11 +231,9 @@ FLOW_STEP_CATALOG: List[Dict[str, Any]] = [
     {
         "type": "wait_for",
         "label": "Wait for signal",
-        "description": "Pause the run until the device produces the signal, or the "
-                       "timeout elapses (follows the timeout edge, else fails the "
-                       "run). Signals that refer to work the flow queued wait for "
-                       "all of it, so put this after the steps whose results the "
-                       "rest of the flow depends on.",
+        "description": "Pause the run until the device produces the signal, or the timeout elapses (follows the "
+                       "timeout edge, else fails the run). Signals that refer to work the flow queued wait for all of "
+                       "it, so put this after the steps whose results the rest of the flow depends on.",
         "category": "Flow",
         "scope": "universal",
         "waits": True,
@@ -271,27 +245,22 @@ FLOW_STEP_CATALOG: List[Dict[str, Any]] = [
              "required": True, "help": "How long to wait before taking the timeout edge."},
             {"name": "gate", "label": "This wait must have something to wait for",
              "type": "bool", "required": False,
-             "help": "On by default. If the steps above queued nothing, "
-                     "this wait has nothing to hold and the run walks straight past "
-                     "it, releasing a device before its profiles arrive. With this on "
-                     "that is recorded, and a device released afterwards goes on the "
-                     "alert board. Turn it off for a wait that is allowed to find "
-                     "nothing waiting."},
+             "help": "On by default. If the steps above queued nothing, this wait has nothing to hold and the run "
+                     "walks straight past it, releasing a device before its profiles arrive. With this on that is "
+                     "recorded, and a device released afterwards goes on the alert board. Turn it off for a wait that "
+                     "is allowed to find nothing waiting."},
         ],
     },
     {
         "type": "release_device",
         "label": "Release from Setup Assistant",
-        "description": "Send DeviceConfigured to let an Automated Enrollment (ADE) "
-                       "device leave Setup Assistant. Put this LAST, after your "
-                       "mandatory profiles/apps are installed, so the user only "
-                       "reaches the home screen once the device is fully provisioned. "
-                       "Needs the DEP profile's 'Await device configured' option. A "
-                       "device that enrolled over the air was never held in setup, so "
-                       "the step is skipped there with a note. If anything the flow "
-                       "queued above never arrived, the device is still released, but "
-                       "the run is recorded as failed and the device goes on the alert "
-                       "board naming what it is missing.",
+        "description": "Send DeviceConfigured to let an Automated Enrollment (ADE) device leave Setup Assistant. Put "
+                       "this LAST, after your mandatory profiles/apps are installed, so the user only reaches the home "
+                       "screen once the device is fully provisioned. Needs the DEP profile's 'Await device configured' "
+                       "option. A device that enrolled over the air was never held in setup, so the step is skipped "
+                       "there with a note. If anything the flow queued above never arrived, the device is still "
+                       "released, but the run is recorded as failed and the device goes on the alert board naming what "
+                       "it is missing.",
         "category": "Flow",
         "scope": "enrollment",
         "waits": False,
@@ -301,14 +270,12 @@ FLOW_STEP_CATALOG: List[Dict[str, Any]] = [
     {
         "type": "configure_accounts",
         "label": "Configure setup accounts",
-        "description": "Decide which local accounts a Mac creates during Setup Assistant, "
-                       "and optionally add a managed admin whose password is escrowed. "
-                       "macOS only, only on a Mac that enrolled through Automated Device "
-                       "Enrollment, and only while it is still awaiting configuration, so "
-                       "keep it before the release step. Both the Standard and the skip "
-                       "mode need the managed admin turned on: " + ACCOUNT_ADMIN_REQUIREMENT
-                       + ". The step refuses to send without one rather than leave a Mac "
-                         "with no administrator.",
+        "description": "Decide which local accounts a Mac creates during Setup Assistant, and optionally add a managed "
+                       "admin whose password is escrowed. macOS only, only on a Mac that enrolled through Automated "
+                       "Device Enrollment, and only while it is still awaiting configuration, so keep it before the "
+                       "release step. Both the Standard and the skip mode need the "
+                       "managed admin turned on: " + ACCOUNT_ADMIN_REQUIREMENT
+                       + ". The step refuses to send without one rather than leave a Mac with no administrator.",
         "category": "Accounts",
         "scope": "enrollment",
         "waits": False,
@@ -324,8 +291,7 @@ FLOW_STEP_CATALOG: List[Dict[str, Any]] = [
                        "managed admin, or the step will not send: " +
                        ACCOUNT_ADMIN_REQUIREMENT + "."},
             {"name": "lock_primary_account", "label": "Lock the account fields", "type": "bool",
-             "required": False, "help": "The pre-filled name / short name can't be edited "
-                                        "by the user during setup."},
+             "required": False, "help": "The pre-filled name / short name can't be edited by the user during setup."},
             {"name": "primary_full_name", "label": "Pre-fill full name", "type": "string",
              "required": False},
             {"name": "primary_short_name", "label": "Pre-fill short name", "type": "string",
@@ -352,12 +318,11 @@ FLOW_STEP_CATALOG: List[Dict[str, Any]] = [
     {
         "type": "set_firmware_lock",
         "label": "Set firmware lock",
-        "description": "Lock a Mac's firmware and escrow the password so an admin can retrieve it. "
-                       "Apple silicon gets a Recovery Lock; Intel gets an EFI firmware "
-                       "password, which restarts the Mac when it is set. Put this after a "
-                       "wait for device information, since the step needs to know the "
-                       "architecture before it can pick the command. Skipped on a re-run "
-                       "when the Mac already has a lock we hold the password for.",
+        "description": "Lock a Mac's firmware and escrow the password so an admin can retrieve it. Apple silicon gets "
+                       "a Recovery Lock; Intel gets an EFI firmware password, which restarts the Mac when it is set. "
+                       "Put this after a wait for device information, since the step needs to know the architecture "
+                       "before it can pick the command. Skipped on a re-run when the Mac already has a lock we hold "
+                       "the password for.",
         "category": "Security",
         "scope": "universal",
         "waits": False,
@@ -370,21 +335,18 @@ FLOW_STEP_CATALOG: List[Dict[str, Any]] = [
              ]},
             {"name": "password", "label": "Static password", "type": "string", "required": False,
              "secret": True,
-             "help": "Used only when the source is 'Use the value entered below'. Editing it "
-                     "later rotates the lock on the next run; the escrow keeps the old "
-                     "password until the Mac confirms the new one."},
+             "help": "Used only when the source is 'Use the value entered below'. Editing it later rotates the lock on "
+                     "the next run; the escrow keeps the old password until the Mac confirms the new one."},
         ],
     },
     {
         "type": "manual_gate",
         "label": "Hold for manual intervention",
-        "description": "Raise a Dispatcher alert and PAUSE the run until an admin "
-                       "picks an option from the alert board. Typically wired to a "
-                       "wait_for's timeout edge so a stuck device escalates to an "
-                       "admin to review, who chooses whether to release it from Setup "
-                       "Assistant, cancel the flow, or keep waiting. An unanswered "
-                       "gate does not wait forever: its alert escalates on a "
-                       "schedule and the run eventually fails.",
+        "description": "Raise a Dispatcher alert and PAUSE the run until an admin picks an option from the alert "
+                       "board. Typically wired to a wait_for's timeout edge so a stuck device escalates to an admin to "
+                       "review, who chooses whether to release it from Setup Assistant, cancel the flow, or keep "
+                       "waiting. An unanswered gate does not wait forever: its alert escalates on a schedule and the "
+                       "run eventually fails.",
         "category": "Flow",
         "scope": "universal",
         "waits": True,
@@ -393,18 +355,16 @@ FLOW_STEP_CATALOG: List[Dict[str, Any]] = [
             {"name": "summary", "label": "Alert summary", "type": "string", "required": True,
              "help": "Shown on the alert board, e.g. 'Device stuck in setup > 30m'."},
             {"name": "severity", "label": "Severity", "type": "select", "required": True,
-             "options": [{"value": s, "label": s} for s in ("green", "yellow", "red", "black")]},
+             "options": [{"value": s, "label": s} for s in severity.ORDER]},
             {"name": "options", "label": "Decision options", "type": "gate_options",
              "required": True,
              "help": "Each option is a button on the alert. 'edge' is the handle the "
                      "run follows when chosen (on_release / on_cancel / on_wait)."},
             {"name": "timeout_minutes", "label": "Time limit (minutes)", "type": "int",
              "required": False,
-             "help": "Optional. Total minutes this gate may wait before the run "
-                     "fails. Escalations that fall inside the limit still run. "
-                     "Without it the gate follows the server's ladder: by default "
-                     "the alert escalates one step after 4 hours, again 24 hours "
-                     "later, and the run fails 7 days after that."},
+             "help": "Optional. Total minutes this gate may wait before the run fails. Escalations that fall inside "
+                     "the limit still run. Without it the gate follows the server's ladder: by default the alert "
+                     "escalates one step after 4 hours, again 24 hours later, and the run fails 7 days after that."},
         ],
     },
     {
@@ -433,7 +393,7 @@ ENROLLMENT_ONLY_START_KINDS = frozenset(
     k["value"] for k in START_KINDS if k.get("scope") == "enrollment"
 )
 
-# Enrollment flow id; immutable for backward compat (see docs).
+# Enrollment flow id; immutable for backward compat.
 DEFAULT_ENROLLMENT_FLOW_ID = "enrollment"
 
 # Flow-level keys that mark a draft. A draft is a working copy of another flow that services.atc never executes; see
@@ -477,6 +437,12 @@ def is_wait_signal(signal: Any) -> bool:
 
 def is_start_kind(kind: Any) -> bool:
     return kind in _START_KIND_VALUES
+
+
+def flow_id_of(flow: Dict[str, Any]) -> str:
+    """A flow's id with whitespace stripped, or empty when the id is not a string."""
+    raw = flow.get("id")
+    return raw.strip() if isinstance(raw, str) else ""
 
 
 def is_draft(flow: Any) -> bool:
@@ -572,16 +538,14 @@ def _collapse_legacy_v0(entries: List[Dict[str, Any]],
     }] + nodes
 
     warnings.append(
-        f"flows.yaml uses the original pre-start-node format; migrated to one flow "
-        f"(kept '{chosen.get('id')}'"
-        + (f", dropped {dropped}" if dropped else "") + "). "
-                                                        "Re-save from the ATC editor to persist the current format."
+        f"flows.yaml uses the original pre-start-node format; migrated to one flow (kept '{chosen.get('id')}'"
+        + (f", dropped {dropped}" if dropped else "") + "). Re-save from the ATC editor to persist the current format."
     )
     return migrated
 
 
 def normalize_flow_document(data: Any) -> Tuple[List[Dict[str, Any]], List[str]]:
-    """Normalize flows.yaml into (flows, warnings). Reads v0/v1/v2 formats and repairs silently (see docs)."""
+    """Normalize flows.yaml into (flows, warnings). Reads v0/v1/v2 formats and repairs silently."""
     warnings: List[str] = []
     try:
         if not isinstance(data, dict) or not data:

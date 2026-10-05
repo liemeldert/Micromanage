@@ -1,8 +1,6 @@
-// Device command UI driven by the server's command catalog (GET /api/v1/commands/catalog) rather than a hardcoded
-// list. QuickActionsCard renders the catalog's common commands on the device page's left rail, and CommandsPanel
-// renders every command grouped by category with the role requirement and device constraints from the catalog.
-// Commands named in KNOWN_FLOWS get a tailored confirmation; anything else falls back to a generic modal that
-// warns it is a passthrough and renders the fields from params. Descriptive text comes from the catalog entry.
+// Device command UI driven by the server's command catalog (GET /api/v1/commands/catalog). QuickActionsCard lists the
+// common commands in the device page's left rail and CommandsPanel lists all of them by category. Commands named in
+// KNOWN_FLOWS get a tailored confirmation; any other command gets a generic modal that warns it is a passthrough.
 
 import {useEffect, useState} from "react";
 import {
@@ -51,7 +49,7 @@ import {
     secretLifecycle,
 } from "../../lib/api";
 import {devicePlatformCategory} from "../../lib/config";
-import {describeTaskType} from "../../lib/task-errors";
+import {describeTaskType, explainError} from "../../lib/task-errors";
 import {useAuth} from "../../lib/auth-context";
 import {GlassCard} from "./ui/GlassCard";
 
@@ -63,23 +61,15 @@ function withPushStatus(res: { message?: string; result?: { push_failed?: boolea
         : message;
 }
 
-// Commands whose confirmation needs more than a parameter form. The description text comes from the catalog;
-// these are the extra behaviours the modal layers on top.
-//
-//  danger           red alert and red confirm button, for a command that destroys data
-//  serialConfirm    the serial number has to be typed before the command can be sent
-//  returnToService  the erase modal's re-enroll section
-//  escrowKind       the DeviceSecret this command writes or reads, so the modal can name the recovery credential
-//                   already stored for this Mac
-//  ackRestart       an explicit acknowledgement that the Mac restarts
+// Commands whose confirmation needs more than a parameter form.
 const KNOWN_FLOWS: Record<
     string,
     {
-        danger?: boolean;
-        serialConfirm?: boolean;
-        returnToService?: boolean;
-        escrowKind?: string;
-        ackRestart?: boolean;
+        danger?: boolean; // red alert and confirm button, for a command that destroys data
+        serialConfirm?: boolean; // the serial number has to be typed before the command can be sent
+        returnToService?: boolean; // the erase modal's re-enroll section
+        escrowKind?: string; // the DeviceSecret kind it writes or reads, so the modal can name the stored credential
+        ackRestart?: boolean; // an explicit acknowledgement that the Mac restarts
     }
 > = {
     restart: {},
@@ -98,6 +88,7 @@ const KNOWN_FLOWS: Record<
     verify_recovery_lock: {escrowKind: "recovery_lock"},
     set_firmware_password: {escrowKind: "firmware_password", danger: true, ackRestart: true},
     verify_firmware_password: {escrowKind: "firmware_password"},
+    fetch_activation_lock_bypass_code: {},
 };
 
 // Erase params handled by the tailored Return to Service section, so the generic param loop skips them.
@@ -155,6 +146,21 @@ function unsupportedReason(entry: CatalogCommand, device: Device): string | null
             `${entry.label} is an ${wants ? "Apple silicon" : "Intel"} command. ` +
             `This Mac reports as ${has ? "Apple silicon" : "Intel"}.`
         );
+    }
+    return null;
+}
+
+// A caution shown in the confirmation that never blocks the send. The enrollment date only approximates when the
+// device was supervised, so an old enrollment can still return a code.
+function commandWarning(entry: CatalogCommand, device: Device): string | null {
+    if (entry.type === "fetch_activation_lock_bypass_code" && device.enrollment_date) {
+        const enrolledAt = new Date(device.enrollment_date).getTime();
+        if (!Number.isNaN(enrolledAt) && (Date.now() - enrolledAt) / (1000 * 86400) > 15) {
+            return (
+                "This device enrolled more than 15 days ago. Apple only provides the bypass code within 15 days of " +
+                "supervision, so the device may return no code."
+            );
+        }
     }
     return null;
 }
@@ -303,7 +309,7 @@ function EscrowNote({entry, secret}: { entry: CatalogCommand; secret: DeviceSecr
     );
 }
 
-//  The modal (custom or generic, decided by the catalog entry)
+// == The modal (custom or generic, decided by the catalog entry) ==
 function CommandModal({
                           device, entry, opened, onClose, onDone,
                       }: {
@@ -356,6 +362,7 @@ function CommandModal({
     // A wiped device stops at the activation screen if Activation Lock is still on, since Return to Service
     // cannot get past it to re-enroll.
     const activationLockOn = attrs.IsActivationLockEnabled === true;
+    const warning = commandWarning(entry, device);
 
     const requiredMissing = entry.params.some((p) => {
         if (RTS_PARAMS.has(p.name)) return false; // validated separately below
@@ -468,6 +475,12 @@ function CommandModal({
                         )}
 
                         {escrowKind && escrow !== undefined && <EscrowNote entry={entry} secret={escrow}/>}
+
+                        {warning && (
+                            <Alert color="orange" variant="light" icon={<IconAlertTriangle size={16}/>}>
+                                <Text fz="sm">{warning}</Text>
+                            </Alert>
+                        )}
 
                         {entry.params.filter((p) => !RTS_PARAMS.has(p.name)).map((p) => {
                             const need = p.required === true || (p.required === "mac" && mac);
@@ -615,15 +628,16 @@ function CommandModal({
     );
 }
 
-//  Shared runner hook: sends simple commands directly, opens a modal for the rest
+// == Shared runner hook: sends simple commands directly, opens a modal for the rest ==
 function useCommandRunner(device: Device, onDispatched: () => void) {
     const {token} = useAuth();
     const [modalEntry, setModalEntry] = useState<CatalogCommand | null>(null);
     const [busyType, setBusyType] = useState<string | null>(null);
 
     const runOrOpen = async (entry: CatalogCommand) => {
-        // Plain refreshes go straight out; anything destructive or parameterized goes through a modal.
-        if (!entry.destructive && entry.params.length === 0) {
+        // Plain refreshes go straight out; anything destructive, parameterized or carrying a warning goes through
+        // a modal.
+        if (!entry.destructive && entry.params.length === 0 && !commandWarning(entry, device)) {
             if (!token) return;
             setBusyType(entry.type);
             try {
@@ -634,7 +648,13 @@ function useCommandRunner(device: Device, onDispatched: () => void) {
                 });
                 onDispatched();
             } catch (e) {
-                notifications.show({color: "red", title: "Command failed", message: (e as Error).message});
+                const rawMsg = (e as Error).message;
+                const explained = explainError(rawMsg);
+                notifications.show({
+                    color: "red",
+                    title: "Command failed",
+                    message: explained ? `${explained.headline} ${explained.nextStep ?? ""}`.trim() : rawMsg,
+                });
             } finally {
                 setBusyType(null);
             }
@@ -656,7 +676,7 @@ function useCommandRunner(device: Device, onDispatched: () => void) {
     return {runOrOpen, busyType, modal};
 }
 
-//  Quick actions (left rail)
+// == Quick actions (left rail) ==
 export function QuickActionsCard({
                                      device, catalog, onDispatched, onShowAll,
                                  }: {
@@ -825,7 +845,7 @@ export function QuickActionsCard({
     );
 }
 
-//  Full catalog, grouped by category
+// == Full catalog, grouped by category ==
 export function CommandsPanel({
                                   device, catalog, onDispatched,
                               }: {

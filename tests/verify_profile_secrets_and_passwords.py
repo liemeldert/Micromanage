@@ -2,14 +2,8 @@
 
 Run: PYTHONPATH=. python tests/verify_profile_secrets_and_passwords.py
 
-profiles.yaml holds Wi-Fi PSKs, 802.1X passwords and SCEP challenges, and every member can read GET
-/api/v1/config/{type}. Members get those values redacted in the structured view, the raw view and history snapshots,
-while admins see the file as written. A save that echoes the sentinel back restores the value on disk, matched by
-profile id and then by payload, so a reordered payload cannot inherit another payload's secret.
-
-Passwords: a length floor on every path that sets one (API create and update, the CLI, and a warning at bootstrap), and
-POST /api/v1/auth/password so a member can change their own without an admin. That route proves the current password
-first, is throttled like sign-in, and returns a fresh token because the change ends every session minted before it.
+Members read profiles.yaml with Wi-Fi PSKs, 802.1X passwords and SCEP challenges redacted, and a save that echoes the
+redaction sentinel back restores the stored value.
 """
 import os
 import tempfile
@@ -24,20 +18,28 @@ os.environ["YAML_CONFIG_PATH"] = str(_BASE)
 # The password-change route hands back a session token, which needs a signing key.
 os.environ.setdefault("JWT_SECRET", "verify-profile-secrets-suite-key-long-enough-for-hs256")
 
-import controller.api.main as apimain  # noqa: E402
+import controller.api.runtime as api_services  # noqa: E402
+from controller.api.redaction import _restore_profile_secrets  # noqa: E402
+from controller.api.routes.auth import PasswordChangeRequest, change_own_password  # noqa: E402
+from controller.api.routes.config import (  # noqa: E402
+    get_config_history_version,
+    get_yaml_config,
+    list_config_history,
+    update_yaml_config,
+)
+from controller.api.routes.users import UserCreate, UserUpdate, create_user, update_user  # noqa: E402
 from controller.auth import passwords as pw  # noqa: E402
 from controller.auth.dependencies import Principal  # noqa: E402
 from controller.auth.tokens import decode_session_token  # noqa: E402
 from controller.models.tenant import AuditLog, Tenant, User  # noqa: E402
+from tests._verify_harness import make_check
 
 PASS, FAIL = [], []
 TENANT_ID = "t1"
 REDACTED = "***redacted***"
 
 
-def check(label, cond):
-    (PASS if cond else FAIL).append(label)
-    print(f"  [{'PASS' if cond else 'FAIL'}] {label}")
+check = make_check(FAIL, PASS)
 
 
 async def status_of(coro):
@@ -114,10 +116,10 @@ async def main():
         password_hash=pw.hash_password("member-password-12345"))
     admin = Principal(tenant=tenant, user=admin_user, email="admin@t1", role="admin")
     member = Principal(tenant=tenant, user=member_user, email="member@t1", role="member")
-    apimain._spawn_tenant_reconcile = lambda tenant_id: None
+    api_services._spawn_tenant_reconcile = lambda tenant_id: None
 
     print("1) members read profiles.yaml with the secrets taken out")
-    doc = await apimain.get_yaml_config("profiles", False, member)
+    doc = await get_yaml_config("profiles", False, member)
     wifi = doc["profiles"][0]["payloads"][0]
     scep = doc["profiles"][0]["payloads"][1]
     check("the Wi-Fi password is redacted", wifi["Password"] == REDACTED)
@@ -129,8 +131,7 @@ async def main():
           wifi["SSID_STR"] == "CampusNet"
           and wifi["EAPClientConfiguration"]["UserName"] == "svc"
           and scep["PayloadContent"]["URL"] == "https://ca/scep")
-    check("a boolean under a secret-named key survives unredacted beside "
-          "a redacted string sibling",
+    check("a boolean under a secret-named key survives unredacted beside a redacted string sibling",
           wifi["EAPClientConfiguration"]["OneTimeUserPassword"] is False
           and wifi["EAPClientConfiguration"]["UserPassword"] == REDACTED)
 
@@ -148,15 +149,15 @@ async def main():
           sorted(redact_hits) == ["PIN", "Password"])
     check("a passcode policy with nothing secret in it is untouched",
           doc["profiles"][1]["payload"] == PROFILES["profiles"][1]["payload"])
-    raw = await apimain.get_yaml_config("profiles", True, member)
+    raw = await get_yaml_config("profiles", True, member)
     check("the raw view carries no secret either",
           "hunter2" not in raw.body.decode() and "scep-secret" not in raw.body.decode())
 
     print("2) admins read it as authored")
-    doc = await apimain.get_yaml_config("profiles", False, admin)
+    doc = await get_yaml_config("profiles", False, admin)
     check("the Wi-Fi password is present for an admin",
           doc["profiles"][0]["payloads"][0]["Password"] == "hunter2hunter2")
-    raw = await apimain.get_yaml_config("profiles", True, admin)
+    raw = await get_yaml_config("profiles", True, admin)
     check("and the raw view is the file itself, comment included",
           raw.body.decode().startswith("# Authored by hand"))
 
@@ -167,7 +168,7 @@ async def main():
     edited["profiles"][0]["payloads"][1]["PayloadContent"]["Challenge"] = REDACTED
     edited["profiles"][0]["payloads"][0]["SSID_STR"] = "CampusNet-5G"
     try:
-        await apimain.update_yaml_config("profiles", edited, admin)
+        await update_yaml_config("profiles", edited, admin)
         code = 200
     except HTTPException as exc:
         code = exc.status_code
@@ -187,7 +188,7 @@ async def main():
     swapped["profiles"][0]["payloads"].reverse()
     swapped["profiles"][0]["payloads"][0]["PayloadContent"]["Challenge"] = REDACTED  # scep, now first
     swapped["profiles"][0]["payloads"][1]["Password"] = REDACTED  # wifi, now second
-    apimain._restore_profile_secrets(TENANT_ID, swapped)
+    _restore_profile_secrets(TENANT_ID, swapped)
     check("the SCEP payload got its own challenge back",
           swapped["profiles"][0]["payloads"][0]["PayloadContent"]["Challenge"] == "scep-secret")
     check("the Wi-Fi payload got its own password back",
@@ -198,15 +199,15 @@ async def main():
                            "groups": ["all"],
                            "payloads": [{"PayloadType": "com.apple.wifi.managed",
                                          "SSID_STR": "x", "Password": REDACTED}]}]}
-    apimain._restore_profile_secrets(TENANT_ID, fresh)
+    _restore_profile_secrets(TENANT_ID, fresh)
     check("the key is gone rather than holding the sentinel",
           "Password" not in fresh["profiles"][0]["payloads"][0])
 
     print("6) history snapshots follow the same rule")
-    versions = await apimain.list_config_history("profiles", admin)
+    versions = await list_config_history("profiles", admin)
     vid = versions["versions"][0]["id"]
-    as_member = await apimain.get_config_history_version("profiles", vid, member)
-    as_admin = await apimain.get_config_history_version("profiles", vid, admin)
+    as_member = await get_config_history_version("profiles", vid, member)
+    as_admin = await get_config_history_version("profiles", vid, admin)
     check("a member sees the snapshot redacted", "hunter2" not in as_member["content"]
           and REDACTED in as_member["content"])
     check("an admin sees the snapshot as saved", "hunter2hunter2" in as_admin["content"])
@@ -220,35 +221,35 @@ async def main():
     check("a passphrase passes", pw.password_policy_error("correct horse battery staple") is None)
 
     print("8) the API applies it")
-    code = await status_of(apimain.create_user(
-        apimain.UserCreate(email="new@t1", password="short", role="member"), admin))
+    code = await status_of(create_user(
+        UserCreate(email="new@t1", password="short", role="member"), admin))
     check("create_user refuses a short password (400)", code == 400)
     check("and made no user", await User.get_or_none(tenant=tenant, email="new@t1") is None)
-    code = await status_of(apimain.create_user(
-        apimain.UserCreate(email="new@t1", password="a perfectly fine password", role="member"), admin))
+    code = await status_of(create_user(
+        UserCreate(email="new@t1", password="a perfectly fine password", role="member"), admin))
     check("create_user accepts one that meets it", code == 200)
     new_user = await User.get_or_none(tenant=tenant, email="new@t1")
-    code = await status_of(apimain.update_user(
-        str(new_user.id), apimain.UserUpdate(password="short"), admin))
+    code = await status_of(update_user(
+        str(new_user.id), UserUpdate(password="short"), admin))
     check("update_user refuses a short password (400)", code == 400)
 
     print("9) POST /api/v1/auth/password: a member changes their own")
-    code = await status_of(apimain.change_own_password(
-        apimain.PasswordChangeRequest(current_password="wrong-password-123",
-                                      new_password="a brand new passphrase"), member))
+    code = await status_of(change_own_password(
+        PasswordChangeRequest(current_password="wrong-password-123",
+                              new_password="a brand new passphrase"), member))
     check("the wrong current password is refused (401)", code == 401)
-    code = await status_of(apimain.change_own_password(
-        apimain.PasswordChangeRequest(current_password="member-password-12345",
-                                      new_password="short"), member))
+    code = await status_of(change_own_password(
+        PasswordChangeRequest(current_password="member-password-12345",
+                              new_password="short"), member))
     check("a new password below the floor is refused (400)", code == 400)
-    code = await status_of(apimain.change_own_password(
-        apimain.PasswordChangeRequest(current_password="member-password-12345",
-                                      new_password="member-password-12345"), member))
+    code = await status_of(change_own_password(
+        PasswordChangeRequest(current_password="member-password-12345",
+                              new_password="member-password-12345"), member))
     check("the same password again is refused (400)", code == 400)
     before = await User.get(id=member_user.id)
-    resp = await apimain.change_own_password(
-        apimain.PasswordChangeRequest(current_password="member-password-12345",
-                                      new_password="a brand new passphrase"), member)
+    resp = await change_own_password(
+        PasswordChangeRequest(current_password="member-password-12345",
+                              new_password="a brand new passphrase"), member)
     after = await User.get(id=member_user.id)
     check("the hash changed", after.password_hash != before.password_hash)
     check("the new password verifies",
@@ -264,8 +265,8 @@ async def main():
     ext = await Tenant.create(id="ext", name="Ext", auth_config={"provider": "oidc"})
     ext_user = await User.create(tenant=ext, email="u@ext", role="member", external_id="sub")
     ext_p = Principal(tenant=ext, user=ext_user, email="u@ext", role="member")
-    code = await status_of(apimain.change_own_password(
-        apimain.PasswordChangeRequest(current_password="x", new_password="y" * 20), ext_p))
+    code = await status_of(change_own_password(
+        PasswordChangeRequest(current_password="x", new_password="y" * 20), ext_p))
     check("the route answers 400 for an oidc tenant", code == 400)
 
     await Tortoise.close_connections()

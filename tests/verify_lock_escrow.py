@@ -13,6 +13,8 @@ os.environ["SECRET_ENCRYPTION_KEY"] = Fernet.generate_key().decode()
 
 from tortoise import Tortoise
 
+from tests._verify_harness import make_check
+
 _FAILURES = []
 
 # (request_type, fields) for every raw command the fake connector "sent".
@@ -20,10 +22,7 @@ RAW_CMDS = []
 SEND_FAILS = {"on": False}
 
 
-def check(name, cond):
-    print(f"  [{'PASS' if cond else 'FAIL'}] {name}")
-    if not cond:
-        _FAILURES.append(name)
+check = make_check(_FAILURES)
 
 
 class FakeConnector:
@@ -102,7 +101,7 @@ async def main():
         await task.save()
         await atc.advance_on_signal(str(device.id), "command_ack", ref=str(task_id))
 
-    #  1) first set: escrowed before the send, attributed to the admin
+    # 1) first set: escrowed before the send, attributed to the admin
     print("1) an ad-hoc first set escrows the password and names the admin")
     dev1 = await new_device("AS-1")
     out1 = await send(dev1, "set_recovery_lock", {"new_password": "first-pass-1"})
@@ -139,7 +138,7 @@ async def main():
           "unconfirmed_task_id" not in (sec1.meta or {})
           and "confirmed_at" in (sec1.meta or {}))
 
-    #  2) rotation: the escrow keeps the old password until the Mac confirms
+    # 2) rotation: the escrow keeps the old password until the Mac confirms
     print("2) an ad-hoc rotation serves the old password until the Mac acknowledges")
     out2 = await send(dev1, "set_recovery_lock", {"new_password": "second-pass-2"})
     await sec1.refresh_from_db()
@@ -165,7 +164,7 @@ async def main():
     task2 = await Task.get(id=out2["task_id"])
     check("the audit task calls it a rotation", (task2.details or {}).get("rotation") is True)
 
-    #  Apple rejects a second change while one is pending, so we do too.
+    # Apple rejects a second change while one is pending, so we do too.
     try:
         await send(dev1, "set_recovery_lock", {"new_password": "third-pass-3"})
         check("a second rotation while one is in flight is refused", False)
@@ -184,7 +183,7 @@ async def main():
     check("the promoted row still names an admin as the setter",
           sec1.created_by == f"admin:{ADMIN}")
 
-    #  3) a send that never leaves the server changes nothing
+    # 3) a send that never leaves the server changes nothing
     print("3) a failed send leaves the escrow exactly as it was")
     SEND_FAILS["on"] = True
     try:
@@ -198,8 +197,8 @@ async def main():
     check("and the dead rotation is not left looking in-flight",
           "pending_task_id" not in (sec1.meta or {}))
 
-    #  A first set that fails to send leaves no escrow behind at all: the Mac
-    #  never got a lock, so a stored password would only mislead.
+    # A first set that fails to send leaves no escrow behind at all: the Mac
+    # never got a lock, so a stored password would only mislead.
     dev2 = await new_device("AS-2")
     try:
         await send(dev2, "set_recovery_lock", {"new_password": "never-sent-5"})
@@ -209,7 +208,7 @@ async def main():
           await secret_for(dev2) is None)
     SEND_FAILS["on"] = False
 
-    #  4) PasswordChanged=false is an acknowledgement that nothing changed
+    # 4) PasswordChanged=false is an acknowledgement that nothing changed
     print("4) an acknowledged PasswordChanged=false does not promote the new password")
     dev3 = await new_device("INTEL-1", apple_silicon=False)
     out3 = await send(dev3, "set_firmware_password", {"new_password": "intel-first-1"})
@@ -230,7 +229,7 @@ async def main():
     check("and drops the password that never landed",
           "pending_value_enc" not in (fw.meta or {}))
 
-    #  The same answer on a first set leaves the row standing, marked, with the reason.
+    # The same answer on a first set leaves the row standing, marked, with the reason.
     dev4 = await new_device("INTEL-2", apple_silicon=False)
     out5 = await send(dev4, "set_firmware_password", {"new_password": "intel-refused-1"})
     await acknowledge(dev4, out5["task_id"],
@@ -242,7 +241,7 @@ async def main():
           bool(fw4) and "PasswordChanged=false" in (fw4.meta or {}).get("unconfirmed_reason", ""))
     check("and is not marked confirmed", bool(fw4) and "confirmed_at" not in (fw4.meta or {}))
 
-    #  A rejected command differs from PasswordChanged=false and must never promote the parked password.
+    # A rejected command differs from PasswordChanged=false and must never promote the parked password.
     print("4b) a command the Mac rejected promotes nothing")
     confirmed_before = (fw.meta or {}).get("confirmed_at")
     out5b = await send(dev3, "set_firmware_password", {"new_password": "intel-rejected-3"})
@@ -257,7 +256,7 @@ async def main():
           (fw.meta or {}).get("confirmed_at") == confirmed_before
           and "unconfirmed_task_id" not in (fw.meta or {}))
 
-    #  Same rejection on first set: escrow stays but unconfirmed since Mac never vouched for it.
+    # Same rejection on first set: escrow stays but unconfirmed since Mac never vouched for it.
     dev4b = await new_device("INTEL-3", apple_silicon=False)
     out5c = await send(dev4b, "set_firmware_password", {"new_password": "intel-rejected-4"})
     await reject(dev4b, out5c["task_id"], error="device rejected the command outright")
@@ -271,7 +270,7 @@ async def main():
           in (fw4b.meta or {}).get("unconfirmed_reason", ""))
     check("and no confirmation stamp", bool(fw4b) and "confirmed_at" not in (fw4b.meta or {}))
 
-    #  5) an escrow that won't decrypt stops the command
+    # 5) an escrow that won't decrypt stops the command
     print("5) an unreadable escrow is left alone rather than overwritten")
     dev5 = await new_device("AS-3")
     await send(dev5, "set_recovery_lock", {"new_password": "readable-1"})
@@ -289,8 +288,8 @@ async def main():
     check("the unreadable row is left exactly as it was",
           sec5.value_enc == "gAAAAA-not-a-valid-fernet-token")
 
-    #  An admin who knows the current password can still change it. A row nobody can decrypt is worth nothing to
-    #  reveal, so the new password takes the slot, flagged until the Mac vouches for it.
+    # An admin who knows the current password can still change it. A row nobody can decrypt is worth nothing to
+    # reveal, so the new password takes the slot, flagged until the Mac vouches for it.
     out6 = await send(dev5, "set_recovery_lock",
                       {"new_password": "recovered-3", "current_password": "typed-by-admin"})
     await sec5.refresh_from_db()
@@ -304,7 +303,7 @@ async def main():
           crypto_secrets.decrypt(sec5.value_enc) == "recovered-3"
           and "unconfirmed_task_id" not in (sec5.meta or {}))
 
-    #  6) a lock a flow set, rotated by an admin
+    # 6) a lock a flow set, rotated by an admin
     print("6) an admin rotating a lock a flow set follows the same rules")
     dev6 = await new_device("AS-4")
     flow_secret = await device_secrets.escrow(
@@ -326,7 +325,7 @@ async def main():
     check("and hands the row over to the admin who rotated it",
           flow_secret.created_by == f"admin:{ADMIN}")
 
-    #  7) Apple's architecture split, enforced before anything is sent
+    # 7) Apple's architecture split, enforced before anything is sent
     print("7) the wrong command for the Mac's architecture is refused")
     before = len(RAW_CMDS)
     try:
@@ -353,7 +352,7 @@ async def main():
           await secret_for(ipad) is None
           and await secret_for(dev6, DeviceSecret.KIND_FIRMWARE) is None)
 
-    #  8) Verify checks the escrowed password by default
+    # 8) Verify checks the escrowed password by default
     print("8) Verify runs against the escrowed password and stamps the row")
     out8 = await send(dev6, "verify_recovery_lock", {})
     check("the escrowed password is what gets verified",
@@ -384,7 +383,7 @@ async def main():
         check("Verify with nothing escrowed and nothing typed is refused",
               "No escrowed password" in str(exc))
 
-    #  9) automated callers cannot send these at all
+    # 9) automated callers cannot send these at all
     print("9) a lock command stays admin-only")
     try:
         await dispatch_catalog_command(

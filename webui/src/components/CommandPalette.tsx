@@ -122,7 +122,7 @@ export function CommandPalette() {
     // whatever was typed last time.
     const [debouncedQuery] = useDebouncedValue(opened ? q : "", DEVICE_DEBOUNCE_MS);
 
-    //  Config documents
+    // == Config documents ==
 
     const loadEntities = useCallback(async () => {
         if (!token || entitiesInFlight.current) return;
@@ -154,7 +154,7 @@ export function CommandPalette() {
         }
     }, [token, entitiesReady]);
 
-    //  Devices
+    // == Devices ==
 
     useEffect(() => {
         if (!opened || !token || !debouncedQuery) {
@@ -182,7 +182,7 @@ export function CommandPalette() {
         };
     }, [opened, token, debouncedQuery]);
 
-    //  Rows
+    // == Rows ==
 
     const destinations = useMemo(
         () => paletteDestinations({isAdmin, showYaml}),
@@ -267,7 +267,7 @@ export function CommandPalette() {
         [router],
     );
 
-    //  Selection repair
+    // == Selection repair ==
 
     const clearSelection = () => {
         document
@@ -286,10 +286,8 @@ export function CommandPalette() {
         paletteStore.updateState((s) => ({...s, selected: 0}));
     });
 
-    //  Enter before the device search has caught up
+    // == Enter before the device search has caught up ==
 
-    // A barcode scanner sends Enter inside the debounce window, before the matching row exists. This runs only
-    // then, since Enter belongs to a page or config entity row whenever one already matches.
     const openFilteredDevices = () => {
         const query = formatDeviceQuery({filters: deviceFilters, text: parseDeviceQuery(q).text});
         go(`/devices?q=${encodeURIComponent(query)}`);
@@ -312,6 +310,8 @@ export function CommandPalette() {
         // This handler runs before Spotlight's own, and so before its composition guard, where an IME commit would
         // otherwise read as Enter.
         if (event.key !== "Enter" || event.nativeEvent.isComposing) return;
+        // A barcode scanner sends Enter inside the debounce window, before the matching row exists. The lookup runs
+        // only then, since Enter belongs to a page or config entity row whenever one already matches.
         if (!token || !q || rowCount > 0 || devicesSettled || enterLookup.current) return;
         enterLookup.current = true;
         clearSelection();
@@ -376,7 +376,7 @@ export function CommandPalette() {
             <Spotlight.Search
                 placeholder="Search devices, groups, profiles, apps and pages"
                 leftSection={<IconSearch size={18} stroke={1.5}/>}
-                // Fixed width whether or not the loader is there, so the box does not twitch on every keystroke.
+                // Fixed width whether or not the loader is there, so the input does not resize on every keystroke.
                 rightSection={<Box w={20}>{busy ? <Loader size="xs"/> : null}</Box>}
                 onKeyDown={handleSearchKeyDown}
             />

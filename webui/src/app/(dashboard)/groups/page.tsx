@@ -71,8 +71,7 @@ export default function GroupsPage() {
     const [draft, setDraft] = useState<GroupT>({name: "", description: "", conditions: []});
     const [nameError, setNameError] = useState<string | null>(null);
     const [cherryOpen, setCherryOpen] = useState(false);
-    // The draft as the modal opened on, so closing it can tell whether anything
-    // would be lost.
+    // The draft as the modal opened on, so closing it can tell whether anything would be lost.
     const baseline = useRef("");
 
     useEffect(() => {
@@ -121,7 +120,7 @@ export default function GroupsPage() {
         [devices],
     );
 
-    //  Naming template (optional per-group)
+    // == Naming template (optional per-group) ==
     const namingTemplate = draft.device_naming?.template ?? "";
     const applyOnEnroll = draft.device_naming?.apply_on_enroll ?? false;
     const setNaming = (patch: Partial<{ template: string; apply_on_enroll: boolean }>) =>

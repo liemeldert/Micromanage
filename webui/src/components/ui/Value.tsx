@@ -1,12 +1,5 @@
-// A displayed value. Copyable is the default across the app, because almost everything on a device or config page
-// is an identifier somebody is about to retype: serials, UDIDs, hostnames, bundle ids, paths, error codes.
-//
-// The value itself is what you click. Nothing is added beside it, so a copyable value occupies exactly the space
-// the text does and a table of them stays aligned. A button in the flow shifted the text sideways on every row
-// that had one, which is what this replaces.
-//
-// Opt out with copyable={false} for anything retyping makes no sense for: a timestamp, a yes/no, a duration, a
-// count, a relative time like "3d ago".
+// A displayed value, copyable by default since most values on device and config pages are identifiers. The text
+// itself is the click target and nothing is added beside it, so a table of values stays aligned.
 
 import {Text, type TextProps, Tooltip} from "@mantine/core";
 import {useClipboard} from "@mantine/hooks";

@@ -1,8 +1,5 @@
-// The class names that put an element on the app's glass material. A surface opts in by name rather than by
-// wiring up styles of its own.
-//
-// Deliberately not a client module. lib/theme.ts calls it at module scope and is imported by the root layout,
-// which is a Server Component.
+// The class names that put an element on the app's glass material. This is not a client module, since lib/theme.ts
+// calls it at module scope and is imported by the root layout, which is a Server Component.
 
 /** Which fill a surface gets. Overlay is the fuller variant, for something floating over the page it has to
  * stay readable against. Thin is for anything laid over the flow canvas, where the standard fill would hide

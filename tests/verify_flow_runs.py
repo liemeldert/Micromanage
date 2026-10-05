@@ -1,14 +1,7 @@
-"""E2E checks for the fleet-wide flow run list, on in-memory sqlite.
+"""E2E checks for the fleet-wide flow run list, GET /api/v1/flow-runs in controller/api/routes/flow_runs.py, on
+in-memory sqlite: tenant scoping, the filters and how they compose, the counts, and the row projection.
 
 Run: PYTHONPATH=. ./.venv/bin/python tests/verify_flow_runs.py
-
-Covers GET /api/v1/flow-runs in controller/api/main.py. Tenant scoping first, then the filters and how they compose:
-status (single and as a comma set), flow, event_kind, device_id, waiting_signal, the started_at window, parked_before
-(silent since, not started before) and released_unverified. That last one reads the release guard's verdict out of the
-run's context, where no WHERE clause can see it, and still totals and paginates exactly.
-
-The counts follow the population filters and ignore the selection filters. The row projection carries device identity,
-the guard verdict and a gap summary, and drops the timeline, the visited list and the gap ledger.
 """
 from datetime import datetime, timedelta, timezone
 
@@ -16,14 +9,12 @@ from tortoise import Tortoise
 
 from controller.auth.dependencies import Principal
 from controller.models.tenant import Tenant, User, Device, FlowRun
-from controller.api.main import list_flow_runs
+from controller.api.routes.flow_runs import list_flow_runs
+from tests._verify_harness import make_check
 
 PASS, FAIL = [], []
 
-
-def check(label, cond):
-    (PASS if cond else FAIL).append(label)
-    print(f"  [{'PASS' if cond else 'FAIL'}] {label}")
+check = make_check(FAIL, PASS)
 
 
 NOW = datetime.now(timezone.utc)

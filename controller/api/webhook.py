@@ -12,6 +12,7 @@ from typing import Optional
 from controller.models.database import _pooled_url, DATABASE_URL, enforce_database_url
 from controller.services import readiness
 from controller.services.webhook_handler import WebhookHandler
+from controller.utils import compare
 from fastapi import FastAPI, HTTPException, Request
 from tortoise.contrib.fastapi import register_tortoise
 
@@ -64,15 +65,8 @@ def _query_secret() -> str:
 
 
 def constant_time_eq(provided: str, expected: str) -> bool:
-    """Constant-time compare for two strings that may hold anything at all.
-
-    Encodes as UTF-8 with surrogatepass rather than comparing str directly, so a non-ASCII header or query
-    value cannot turn a clean 403 into a 500. Matches ddm_manager._sig_eq and enrollment._token_eq.
-    """
-    return hmac.compare_digest(
-        (provided or "").encode("utf-8", "surrogatepass"),
-        (expected or "").encode("utf-8", "surrogatepass"),
-    )
+    """Constant-time compare that reads a missing expected value as empty."""
+    return compare.constant_time_eq(provided, expected or "")
 
 
 def verify_body_hmac(body: bytes, signature: str) -> bool:

@@ -1,18 +1,15 @@
 """Standalone checks for the pure scoping engine (controller/services/scoping.py).
 
 No DB needed; scoping only reads attributes off objects. Tests use attribute bags instead of real models.
-Full inventory and run instructions in docs/tests/verify_scoping.md.
 """
 import sys
 from datetime import datetime, timedelta, timezone
 
+from tests._verify_harness import LogCapture, make_check
+
 FAILURES: list = []
 
-
-def check(name: str, cond: bool) -> None:
-    print(f"  {'PASS' if cond else 'FAIL'}  {name}")
-    if not cond:
-        FAILURES.append(name)
+check = make_check(FAILURES)
 
 
 class Dev:
@@ -23,7 +20,7 @@ class Dev:
         self.__dict__.update(kw)
 
 
-# Platform-model mapping: enables reachability checks in sections 1 and 11; see docs for details.
+# Platform-model mapping: enables reachability checks in sections 1 and 11.
 MODEL_FOR = {"Mac": "MacBookPro18,3", "iPhone": "iPhone14,2",
              "iPad": "iPad13,8", "iPod": "iPod9,1",
              "Apple TV": "AppleTV6,2", "Apple Watch": "Watch6,1",
@@ -31,7 +28,7 @@ MODEL_FOR = {"Mac": "MacBookPro18,3", "iPhone": "iPhone14,2",
 
 
 def _just_under(floor: str) -> str:
-    """The nearest version under floor that this table can name; see docs for the algorithm."""
+    """The nearest version under floor that this table can name."""
     parts = floor.split(".")
     if int(parts[-1]) > 0:
         return ".".join(parts[:-1] + [str(int(parts[-1]) - 1)])
@@ -346,7 +343,7 @@ def main() -> None:
 
     # == 10. the authored side of an os_version condition is memoized ==
     print("\n[10] os_version: the authored comparison value is parsed once")
-    # Only authored values are cached; device versions parsed fresh each call; see docs for bounds and edge cases.
+    # Only authored values are cached; device versions parsed fresh each call.
     sc._CONDITION_VERSION_CACHE.clear()
     cond_ok = {"type": "os_version", "operator": "gte", "value": "15.0"}
     d_new = Dev(os_version="15.4")
@@ -381,22 +378,14 @@ def main() -> None:
     check("a device version never becomes a cache key",
           "garbage" not in sc._CONDITION_VERSION_CACHE)
 
-    # Edge case: condition value __str__ that raises; see docs for why this matters despite YAML limits.
+    # Edge case: condition value __str__ that raises; YAML cannot author one today, so the behavior is checked here.
     class _RaisingStr:
         def __str__(self):
             raise ValueError("boom")
 
     import logging
 
-    class _ErrCapture(logging.Handler):
-        def __init__(self):
-            super().__init__()
-            self.records = []
-
-        def emit(self, record):
-            self.records.append(record)
-
-    cap = _ErrCapture()
+    cap = LogCapture()
     scoping_log = logging.getLogger("controller.services.scoping")
     scoping_log.addHandler(cap)
     try:
@@ -416,7 +405,7 @@ def main() -> None:
           set(ddm._DDM_MIN_OS_PARSED) == set(ddm._DDM_MIN_OS)
           and all(str(ddm._DDM_MIN_OS_PARSED[p]) == str(sc.version.parse(v))
                   for p, v in ddm._DDM_MIN_OS.items()))
-    # Matrix generated from _DDM_MIN_OS (not literal); see docs for why and edge cases.
+    # Matrix generated from _DDM_MIN_OS (not literal), so a changed floor changes the expectation.
     matrix_wrong = []
     for platform, floor in ddm._DDM_MIN_OS.items():
         model = MODEL_FOR[platform]
@@ -443,11 +432,11 @@ def main() -> None:
 
     # == 12. regex conditions are time-bounded ==
     print("\n[12] regex conditions: the timeout-capable engine ships, and it bites")
-    # Regex module required (not stdlib re); see docs for why stdlib cannot be used.
+    # Regex module required (not stdlib re), since re.match has no timeout.
     check("_HAS_REGEX_TIMEOUT is True (regex module present, not the re fallback)",
           sc._HAS_REGEX_TIMEOUT is True)
 
-    # Catastrophic backtracking test: (a|a)* pattern; see docs for why this matters.
+    # Catastrophic backtracking test: (a|a)* does not finish in any useful time without a timeout.
     import time
 
     evil = {"type": "hostname", "operator": "regex", "value": r"^(a|a)*$"}
@@ -467,7 +456,7 @@ def main() -> None:
     check("GROUP_REGEX_TIMEOUT is restored for the rest of the run",
           sc.GROUP_REGEX_TIMEOUT == saved_timeout)
 
-    # Timeout per condition, not per scope; see docs for worst-case timing on MAX_SCOPE_CONDITIONS.
+    # Timeout per condition, not per scope.
     check("MAX_SCOPE_CONDITIONS is exported for the validator to warn against",
           isinstance(sc.MAX_SCOPE_CONDITIONS, int) and sc.MAX_SCOPE_CONDITIONS > 0)
 

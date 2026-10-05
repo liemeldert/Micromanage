@@ -1,18 +1,15 @@
 """Desired-state reconciliation: YAML definitions to MDM tasks.
 
-Called by the periodic sync service and reactively via request_reconcile after a config save or POST
-/api/v1/sync. Per device, computes group membership and the desired profile/app set, then queues installs,
-removals and retries per _needs_deploy, and retires what a device is no longer scoped into.
-"""
+Called by the periodic sync service and, via request_reconcile, after a config save or POST /api/v1/sync. Per device
+it queues installs, removals and retries (see _needs_deploy) and retires what the device is not scoped into."""
 
 import asyncio
 import logging
 import os
-import weakref
 from datetime import datetime, timedelta, timezone
 from functools import partial
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from controller.models.tenant import (
     AppDeployment, DEDUP_KEY_TYPES, Device, ProfileDeployment, Task, task_dedup_key, Tenant
@@ -22,6 +19,7 @@ from controller.services.app_manager import AppManager
 from controller.services.group_manager import GroupManager
 from controller.services.profile_manager import (flow_source_id, ProfileManager, remediation_rule_id)
 from controller.services.task_manager import TaskManager
+from controller.utils.per_loop import PerLoop
 
 logger = logging.getLogger(__name__)
 
@@ -43,18 +41,11 @@ MAX_CONCURRENT_TASKS = int(os.getenv("MDM_MAX_CONCURRENT_TASKS", "25"))
 # be garbage-collected mid-run.
 _background_tasks: set = set()
 
-# Per-event-loop, so a process that tears its loop down and builds a new one (tests, a worker restart) doesn't reuse a
-# primitive bound to the dead one.
-_semaphores: "weakref.WeakKeyDictionary" = weakref.WeakKeyDictionary()
+_semaphores = PerLoop(lambda: asyncio.Semaphore(MAX_CONCURRENT_TASKS))
 
 
 def _semaphore() -> asyncio.Semaphore:
-    loop = asyncio.get_running_loop()
-    sem = _semaphores.get(loop)
-    if sem is None:
-        sem = asyncio.Semaphore(MAX_CONCURRENT_TASKS)
-        _semaphores[loop] = sem
-    return sem
+    return _semaphores.get()
 
 
 async def _bounded(coro) -> None:
@@ -63,11 +54,8 @@ async def _bounded(coro) -> None:
 
 
 def _spawn(coro) -> None:
-    """Run a coroutine in the background, bounded to MAX_CONCURRENT_TASKS at a time.
-
-    Contract for callers (dispatcher, atc, api/main all rely on it): returns immediately, never raises, keeps a strong
-    reference so the task survives GC. The coroutine waits its turn at the semaphore before it starts.
-    """
+    """Run a coroutine in the background, bounded to MAX_CONCURRENT_TASKS at a time. Returns immediately and never
+    raises, which dispatcher, atc and api/routes rely on."""
     t = asyncio.create_task(_bounded(coro))
     _background_tasks.add(t)
     t.add_done_callback(_background_tasks.discard)
@@ -76,9 +64,7 @@ def _spawn(coro) -> None:
 async def drain_background_tasks() -> None:
     """Wait for every spawned handler to finish, including ones spawned while waiting.
 
-    Called under a timeout by the controller's shutdown path; the webhook process has its own drain over the
-    same set (webhook_handler.drain_deferred).
-    """
+    Called under a timeout on shutdown."""
     while _background_tasks:
         await asyncio.gather(*list(_background_tasks), return_exceptions=True)
 
@@ -108,11 +94,8 @@ async def _reconcile_worker(tenant_id: str) -> None:
 
 
 def request_reconcile(tenant_id: str) -> None:
-    """Ask for a reconcile of a tenant, coalescing a burst into one run.
-
-    Returns at once; a failure is logged rather than reaching the caller. The scheduled sync calls
-    reconcile_tenant directly instead of going through here.
-    """
+    """Ask for a reconcile of a tenant, coalescing a burst into one run. Returns at once and logs failures instead of
+    raising them. The scheduled sync calls reconcile_tenant directly."""
     tenant_id = str(tenant_id)
     try:
         _reconcile_dirty[tenant_id] = True
@@ -135,11 +118,8 @@ def _load_yaml(path: Path) -> Dict[str, Any]:
 
 
 def _task_key(device_id: Any, task_type: str, details: Dict[str, Any]) -> tuple:
-    """The dedup identity of one task: (device, type, key part).
-
-    Mirrors models.tenant.task_dedup_key, the same function Task.save uses to fill dedup_key, so the lookup key
-    here and the stored key can never disagree.
-    """
+    """The dedup identity of one task: (device, type, key part). Built with models.tenant.task_dedup_key, as Task.save
+    does for dedup_key, so the lookup key and the stored key agree."""
     return (str(device_id), task_type, task_dedup_key(task_type, details))
 
 
@@ -149,11 +129,8 @@ _KEYED_TASK_TYPES = (*DEDUP_KEY_TYPES, "ddm_sync")
 
 
 async def _active_task_keys(tenant: Tenant) -> set:
-    """Keys of the tasks still outstanding, to avoid queueing duplicates.
-
-    Reads the mirrored dedup_key column rather than recomputing from the details JSONB, which would move and
-    detoast thousands of multi-KB documents every cycle for no reason.
-    """
+    """Keys of the tasks still outstanding, to avoid queueing duplicates. Reads the mirrored dedup_key column, not the
+    details JSONB it derives from, whose multi-KB documents are costly to load every cycle."""
     keys = set()
     active = await Task.filter(
         tenant=tenant, status__in=["pending", "running"]
@@ -210,12 +187,9 @@ APP_UNCONFIRMED_ERROR = (
 
 
 async def _fail_timed_out_tasks(tenant: Tenant) -> int:
-    """Fail tasks that have waited too long for a device response, and mark what they were installing as failed
-    too, since a row left alone would keep claiming success nobody confirmed.
-
-    Only touches rows whose last_task_id is one of the tasks failed here, so a deployment since retried under
-    a newer task keeps that task's state. A late device response still overwrites this via the webhook.
-    """
+    """Fail tasks that have waited too long for a device response, and the deployment rows they were installing. Only
+    rows whose last_task_id is one of these tasks are touched, so a deployment retried under a newer task keeps its
+    state. A late device response still overwrites this via the webhook."""
     now = datetime.now(timezone.utc)
     cutoff = now - timedelta(hours=TASK_TIMEOUT_HOURS)
     stale = await Task.filter(
@@ -251,10 +225,8 @@ async def _fail_timed_out_tasks(tenant: Tenant) -> int:
 async def _fail_unconfirmed_apps(tenant: Tenant) -> int:
     """Fail app rows the device accepted and never confirmed. Returns how many.
 
-    Does NOT count the attempt itself; _note_attempt counts the re-push that follows, so the ladder advances
-    once per round rather than twice. Nothing may clear the counter on a device acknowledgement, which is the
-    event immediately before every one of these failures; clearing belongs with the promotion to installed.
-    """
+    Does not count the attempt itself; _note_attempt counts the re-push that follows. Nothing may clear the counter on
+    a device acknowledgement (the event before each of these failures); that belongs with promotion to installed."""
     now = datetime.now(timezone.utc)
     cutoff = now - timedelta(minutes=APP_CONFIRM_MINUTES)
     unconfirmed = await AppDeployment.filter(
@@ -262,16 +234,13 @@ async def _fail_unconfirmed_apps(tenant: Tenant) -> int:
     ).update(status="failed", last_error=APP_UNCONFIRMED_ERROR, updated_at=now)
     if unconfirmed:
         logger.warning(
-            "reconcile[%s]: %d app install(s) were accepted by their device and "
-            "never appeared in an inventory within %dm; failing them so they "
-            "retry", tenant.id, unconfirmed, APP_CONFIRM_MINUTES)
+            "reconcile[%s]: %d app install(s) were accepted by their device and never appeared in an inventory within "
+            "%dm; failing them so they retry", tenant.id, unconfirmed, APP_CONFIRM_MINUTES)
     return unconfirmed
 
 
-# .only() width for the tenant-wide deployment prefetches below. Every field here is read by the device loop;
-# a new field the loop needs must be added to these lists, since an unfetched field raises AttributeError on a
-# Tortoise partial. These partial instances must never be save()d: deployment writes stay on the fully-loaded
-# rows the ensure_deployment / deploy paths fetch themselves.
+# .only() fields for the tenant-wide deployment prefetches below. A field the device loop reads must be listed here,
+# since an unfetched field raises AttributeError on a partial instance. These rows must never be save()d.
 _PROFILE_PREFETCH_FIELDS = (
     "id", "device_id", "profile_id", "status", "payload_hash", "updated_at",
     "failed_attempts", "install_source",
@@ -282,26 +251,10 @@ _APP_PREFETCH_FIELDS = (
 )
 
 
-async def _prefetch_profile_deployments(
-    tenant: Tenant,
-) -> Dict[str, List[ProfileDeployment]]:
-    """Tenant-wide ProfileDeployment rows grouped by device id: one query per cycle instead of one per device."""
-    grouped: Dict[str, List[ProfileDeployment]] = {}
-    for row in await ProfileDeployment.filter(tenant=tenant).only(
-        *_PROFILE_PREFETCH_FIELDS
-    ):
-        grouped.setdefault(str(row.device_id), []).append(row)
-    return grouped
-
-
-async def _prefetch_app_deployments(
-    tenant: Tenant,
-) -> Dict[str, List[AppDeployment]]:
-    """The app half of _prefetch_profile_deployments; same contract."""
-    grouped: Dict[str, List[AppDeployment]] = {}
-    for row in await AppDeployment.filter(tenant=tenant).only(
-        *_APP_PREFETCH_FIELDS
-    ):
+async def _prefetch_deployments(model, tenant: Tenant, fields: Tuple[str, ...]) -> Dict[str, List[Any]]:
+    """Tenant-wide deployment rows grouped by device id: one query per cycle instead of one per device."""
+    grouped: Dict[str, List[Any]] = {}
+    for row in await model.filter(tenant=tenant).only(*fields):
         grouped.setdefault(str(row.device_id), []).append(row)
     return grouped
 
@@ -312,8 +265,9 @@ RETRY_AFTER_FAILURE = "previous attempt failed"
 
 
 def _retry_delay_minutes(failed_attempts: int) -> int:
-    """How long to leave a failed deployment alone before attempting it again: RETRY_MINUTES after the first
-    failure, doubling per consecutive failure, capped at RETRY_MAX_MINUTES. Exponent is clamped so months of failures cannot turn this into a bignum multiplication.
+    """How long to leave a failed deployment alone before attempting it again: RETRY_MINUTES after the first failure,
+    doubling per consecutive failure, capped at RETRY_MAX_MINUTES. Exponent is clamped so months of failures cannot
+    turn this into a bignum multiplication.
     """
     attempts = max(int(failed_attempts or 0), 0)
     return min(RETRY_MINUTES * (2 ** min(attempts, 20)), RETRY_MAX_MINUTES)
@@ -323,11 +277,8 @@ def _needs_deploy(
     deployment: Optional[Any], *, up_to_date: bool, definition_changed: bool,
     changed_reason: str, now: datetime,
 ) -> Optional[str]:
-    """Return a reason string if this deployment should be (re)pushed, else None.
-
-    One rule for apps and profiles; up_to_date and definition_changed are the kind-specific halves the callers
-    compute (payload_hash for profiles, version for apps).
-    """
+    """Return a reason string if this deployment should be (re)pushed, else None. Apps and profiles share this rule and
+    supply up_to_date and definition_changed (payload_hash for profiles, version for apps)."""
     if deployment is None:
         return "not deployed"
     if deployment.status == "failed":
@@ -348,8 +299,7 @@ def _needs_deploy(
             return f"no device response for {RETRY_MINUTES}m; retrying"
         return None  # attempt outstanding
     if deployment.status == APP_ACCEPTED_STATUS:
-        # Outstanding like 'installing', but waits on its own clock (_fail_unconfirmed_apps) instead of a
-        # retry.
+        # Outstanding like 'installing', but waits on its own clock (_fail_unconfirmed_apps) instead of a retry.
         return None
     if deployment.status == "installed":
         return None if up_to_date else changed_reason
@@ -391,11 +341,8 @@ def _app_needs_deploy(
 
 async def _note_attempt(model: Any, deployment: Optional[Any],
                         reason: Optional[str]) -> None:
-    """Keep a deployment's failure counter in step with what this cycle decided.
-
-    Uses a queryset UPDATE, not save(), since the rows the loop holds are partial prefetch instances. Does not
-    touch updated_at, the clock the backoff measures from.
-    """
+    """Keep a deployment's failure counter in step with what this cycle decided. Uses a queryset UPDATE because the
+    loop's rows are partial prefetch instances, and leaves updated_at alone, since the backoff measures from it."""
     if deployment is None:
         return
     attempts = deployment.failed_attempts
@@ -413,10 +360,8 @@ async def _note_attempt(model: Any, deployment: Optional[Any],
 def _remediation_rule_ids(tenant_path: Path) -> Optional[set]:
     """Ids of the compliance rules this tenant currently defines, or None when the document does not say.
 
-    None is not an empty set: an unreadable dispatcher.yaml must not be mistaken for one with no rules, or every
-    remediation hold in the tenant releases over a bad save. dispatcher._resolve_orphaned_alerts uses
-    the same test.
-    """
+    None is not an empty set. An unreadable dispatcher.yaml must not read as having no rules, or every remediation hold
+    in the tenant would release. dispatcher._resolve_orphaned_alerts applies the same test."""
     doc = _load_yaml(tenant_path / "dispatcher.yaml")
     rules = doc.get("rules")
     if not isinstance(rules, list):
@@ -448,10 +393,8 @@ def _flow_ids(tenant_path: Path) -> Optional[set]:
 
 def _any_install_mark(reader: Any,
                       *grouped: Optional[Dict[str, List[Any]]]) -> bool:
-    """Whether any prefetched deployment row was installed by an engine outside the device's scope, of the
-    kind reader recognises. Only asked when the document for that kind said nothing, so the warning reaches a
-    tenant that actually has such rows. A failed prefetch is None and is skipped.
-    """
+    """Whether any prefetched row was installed by a rule or flow of the kind reader recognises. Asked only when that
+    kind's document said nothing, so the warning is limited to tenants that have such rows."""
     for rows_by_device in grouped:
         if not rows_by_device:
             continue
@@ -466,11 +409,8 @@ def _held_by_remediation(deployment: Any, rule_ids: Optional[set],
                          flow_ids: Optional[set] = None) -> bool:
     """Whether a deployment the device's scope does not ask for stays anyway.
 
-    One rule for profiles and apps and for both engines (compliance rules, flows) that install outside a
-    scope; without this the removal pass would take such an install off on the next cycle and the two engines
-    would take turns re-adding and removing it. A row is held for as long as what installed it
-    (install_source) is still defined; rule_ids/flow_ids of None holds everything that kind marked.
-    """
+    A row installed by a compliance rule or a flow (install_source) is held while that rule or flow is defined, so the
+    removal pass does not undo it. rule_ids or flow_ids of None holds every row of that kind."""
     source = getattr(deployment, "install_source", None)
     for holder_id, defined in ((remediation_rule_id(source), rule_ids),
                                (flow_source_id(source), flow_ids)):
@@ -489,15 +429,9 @@ APP_UNSCOPED_STATUS = "unscoped"
 async def _unscope_apps(rows: List[AppDeployment], desired_app_ids: set,
                         now: datetime, rule_ids: Optional[set] = None,
                         flow_ids: Optional[set] = None) -> int:
-    """Retire the app deployment rows a device is no longer scoped into.
-
-    Unlike profiles, no RemoveApplication is sent: Apple's RemoveApplication only takes back an app installed
-    and still held as managed, so sending one for a user-installed or pre-enrolment app either no-ops or takes
-    away something nobody asked us to. A failed/pending row is deleted; an installed/installing/accepted row
-    is marked unscoped instead, since the app may still be on the device. Held rows (see _held_by_remediation)
-    are skipped. Writes go through the
-    queryset so a prefetched partial row is never save()d.
-    """
+    """Retire the app deployment rows a device is not scoped into, without sending RemoveApplication (it only takes back
+    an app installed and still held as managed). Failed or pending rows are deleted; the rest are marked unscoped,
+    since the app may still be on the device. Rows held by _held_by_remediation are skipped."""
     retired = 0
     for row in rows:
         if row.app_id in desired_app_ids or row.status == APP_UNSCOPED_STATUS:
@@ -565,30 +499,28 @@ async def reconcile_tenant(tenant: Tenant, yaml_base: Path) -> Dict[str, int]:
     # device missing from a built dict just has no rows. The two must never be confused.
     profile_rows: Optional[Dict[str, List[ProfileDeployment]]] = None
     try:
-        profile_rows = await _prefetch_profile_deployments(tenant)
+        profile_rows = await _prefetch_deployments(ProfileDeployment, tenant, _PROFILE_PREFETCH_FIELDS)
     except Exception:
         logger.warning("reconcile[%s]: profile deployment prefetch failed; "
                        "falling back to per-device queries this cycle",
                        tenant.id, exc_info=True)
     app_rows: Optional[Dict[str, List[AppDeployment]]] = None
     try:
-        app_rows = await _prefetch_app_deployments(tenant)
+        app_rows = await _prefetch_deployments(AppDeployment, tenant, _APP_PREFETCH_FIELDS)
     except Exception:
-        logger.warning("reconcile[%s]: app deployment prefetch failed; "
-                       "falling back to per-device queries this cycle",
+        logger.warning("reconcile[%s]: app deployment prefetch failed; falling back to per-device queries this cycle",
                        tenant.id, exc_info=True)
 
-    # Once for the tenant, not once per device, and only when there is something to say: rows a rule installed are being
-    # kept because dispatcher.yaml could not be read.
+    # Warns once for the tenant, not once per device, and only when rows a rule or flow installed are being kept because
+    # dispatcher.yaml or flows.yaml could not be read.
     for defined, reader, document, key in (
             (remediation_rule_ids, remediation_rule_id, "dispatcher.yaml", "rules"),
             (flow_ids, flow_source_id, "flows.yaml", "flow")):
         if defined is None and _any_install_mark(reader, profile_rows, app_rows):
             logger.warning(
-                "reconcile[%s]: %s carries no %s, so it cannot say what still "
-                "exists. Everything installed from it stays where it is this "
-                "cycle. Check that %s parses; an authored empty one is still an "
-                "answer and does release them.",
+                "reconcile[%s]: %s carries no %s, so it cannot say what still exists. Everything installed from it "
+                "stays where it is this cycle. Check that %s parses; an authored empty one is still an answer and does "
+                "release them.",
                 tenant.id, document, key, document)
 
     # Hashed once per profile instead of once per device x profile, since the definitions are per-cycle
@@ -717,9 +649,8 @@ async def reconcile_tenant(tenant: Tenant, yaml_base: Path) -> Dict[str, int]:
             apps_to_install = await app_manager.evaluate_device_apps(
                 device, apps_config, groups_config, device_groups=device_groups
             )
-            # This device's app rows, keyed by app_id, mirroring the profile pass above. Keyed by app rather than by
-            # (app, version) because the table holds one row per (device, app_id): a version bump rewrites that row, so
-            # the row at the old version is the same row and the staleness rule has to see it.
+            # This device's app rows, keyed by app_id like the profile pass above. A version bump rewrites the single
+            # (device, app_id) row, so keying by (app, version) would hide the old version from the staleness rule.
             if app_rows is not None:
                 device_app_rows = app_rows.get(str(device.id), [])
             else:
@@ -756,10 +687,8 @@ async def reconcile_tenant(tenant: Tenant, yaml_base: Path) -> Dict[str, int]:
                 summary["apps_queued"] += 1
 
             # ==Apps: retire what the device is no longer scoped into==
-            # Scoped and waiting counts as scoped, so a rollout that has not yet reached this device is not
-            # retired as unwanted. Nothing is retired while apps.yaml is empty either: an empty list and an
-            # unreadable file are indistinguishable here, and treating them alike would delete every app row
-            # in the tenant on one bad read.
+            # Apps scoped but still waiting on a rollout count as scoped. Nothing is retired while apps.yaml is empty,
+            # since an empty list looks like an unreadable file and one bad read would retire every app row.
             if apps_config:
                 summary["apps_unscoped"] += await _unscope_apps(
                     device_app_rows,

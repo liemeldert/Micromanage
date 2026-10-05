@@ -6,11 +6,8 @@ import {api, type ScopePreview, type ScopePreviewTriggerKind} from "../../../lib
 import {useAuth} from "../../../lib/auth-context";
 import type {SaveGuardReason} from "./flow-utils";
 
-/** Blocking save-time confirmation on the flow editor: nothing is written until the acknowledgement is ticked and
- * confirmed, and closing returns to the editor unsaved. Renders whatever reasons it is handed, mixing the
- * structural check in flow-utils.saveGuardReasons with the server's release-ordering warnings, which arrive with
- * kind "server". A non-empty serverErrors is a fresh dry-run refusal and holds the confirm button down; an empty
- * one leaves the modal as it was. Device counts from /api/v1/scope/preview only ever add a line under a reason.
+/** Blocking save-time confirmation. Reasons are the flow-utils.saveGuardReasons checks plus the server's warnings
+ * (kind "server"). Device counts from /api/v1/scope/preview only add a line under a reason.
  */
 
 // Trigger kinds the count endpoint understands. Server reasons carry no scope and are skipped.

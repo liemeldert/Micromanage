@@ -1,8 +1,4 @@
-"""Apple passwordHash + escrow password generation.
-
-Provides password_hash_blob (PBKDF2-HMAC-SHA512 plist format for macOS passwordHash)
-and generate_password (random escrow passwords for device secrets).
-"""
+"""Builds the Apple passwordHash blob (PBKDF2-HMAC-SHA512 plist) and generates random escrow passwords."""
 
 import hashlib
 import os

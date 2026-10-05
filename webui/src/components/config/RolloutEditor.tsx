@@ -17,8 +17,7 @@ export function RolloutEditor({
     const enabled = !!rollout;
     const r: Rollout = rollout ?? {percent: 25, interval_hours: 24, skip_weekends: false};
 
-    // Custom is sticky: at 24h or 168h the value alone reads as Day or Week, so the hours field
-    // would never stay open.
+    // Custom is sticky: at 24h or 168h the value alone reads as Day or Week, so the hours field would never stay open.
     const [customChosen, setCustomChosen] = useState(false);
     const intervalPreset = customChosen
         ? "custom"
@@ -28,8 +27,7 @@ export function RolloutEditor({
                 ? "week"
                 : "custom";
 
-    // Projected from a fresh start; the server stamps the real one on save. Stops at the first
-    // wave that reaches 100%.
+    // Projected from a fresh start; the server stamps the real one on save. Stops at the first wave that reaches 100%.
     const waves: { pct: number; hoursFromStart: number }[] = [];
     {
         const step = Math.max(1, Math.trunc(r.percent || 1));

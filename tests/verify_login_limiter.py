@@ -1,25 +1,16 @@
 """The login throttle's two limits, and which one is allowed to refuse.
 
+The global ceiling refuses every login at once, so its default must be out of reach of a spray of caller-supplied keys.
+
 Run: PYTHONPATH=. .venv/bin/python tests/verify_login_limiter.py
-
-auth.ratelimit.SlidingWindowLimiter has a per-key window and a global ceiling. The per-key window does the work; the
-global one refuses every login in the deployment at once, so where its default sits is a real decision. The login
-limiter keys on tenant plus email, both supplied by the caller, so distinct keys enough to fill the key table cost an
-attacker nothing to invent. What this file pins is a default ceiling out of reach of such a spray, with both limits
-still refusing what they are meant to refuse.
-
-No database and no clock: the module's time source is replaced with a fake one so the window checks are exact instead of
-slept through.
 """
 from controller.auth import ratelimit
 from controller.auth.ratelimit import SlidingWindowLimiter, login_limiter
+from tests._verify_harness import make_check
 
 PASS, FAIL = [], []
 
-
-def check(label, cond):
-    (PASS if cond else FAIL).append(label)
-    print(f"  [{'PASS' if cond else 'FAIL'}] {label}")
+check = make_check(FAIL, PASS)
 
 
 class FakeClock:

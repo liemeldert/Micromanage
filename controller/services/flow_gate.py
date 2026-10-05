@@ -1,7 +1,4 @@
-"""Channel B of the ATC flow checks: blocks flows save only, not other config files.
-
-See docs/controller/services/flow_gate.md for the three-channel architecture.
-"""
+"""Channel B of the ATC flow checks: blocks flows save only, not other config files."""
 
 import os
 from dataclasses import dataclass
@@ -11,11 +8,13 @@ from controller.services.flow_step_catalog import (
     ACCOUNT_ADMIN_REQUIREMENT,
     ENROLLMENT_ONLY_START_KINDS,
     GATE_EDGE_HANDLES,
+    flow_id_of,
+    is_draft,
     node_edges,
     node_scope,
     start_kind_scope,
 )
-# Imported not reimplemented to stay in sync with validator's semantic warnings; see docs.
+# Imported not reimplemented to stay in sync with validator's semantic warnings.
 from controller.utils.yaml_validator import _reach_nodes
 
 # Deployment limits, read from environment at import (can be overridden in tests).
@@ -80,15 +79,6 @@ def raw_flows(doc: Any) -> List[Dict[str, Any]]:
     return [single] if isinstance(single, dict) and single else []
 
 
-def _flow_id(flow: Dict[str, Any]) -> str:
-    raw = flow.get("id")
-    return raw.strip() if isinstance(raw, str) else ""
-
-
-def _is_draft(flow: Dict[str, Any]) -> bool:
-    return bool(flow.get("draft_of"))
-
-
 def _nodes(flow: Dict[str, Any]) -> List[Dict[str, Any]]:
     return [n for n in (flow.get("nodes") or []) if isinstance(n, dict)]
 
@@ -141,8 +131,8 @@ def _dep_awaits(profile: Any) -> bool:
 def _flagged_permanent_id(flows: List[Dict[str, Any]]) -> Optional[str]:
     """The id of the flow carrying permanent: true, or None (drafts never count)."""
     for flow in flows:
-        if flow.get("permanent") is True and not _is_draft(flow):
-            return _flow_id(flow) or None
+        if flow.get("permanent") is True and not is_draft(flow):
+            return flow_id_of(flow) or None
     return None
 
 
@@ -152,14 +142,14 @@ def _permanent_id(flows: List[Dict[str, Any]]) -> Optional[str]:
     if flagged is not None:
         return flagged
     for flow in flows:
-        if not _is_draft(flow):
-            return _flow_id(flow) or None
+        if not is_draft(flow):
+            return flow_id_of(flow) or None
     return None
 
 
 def check_flows_document(doc: Any, *, profiles: Optional[List[Any]] = None,
                          prior: Any = None) -> List[GateFinding]:
-    """Every channel B finding for a candidate flows.yaml (see docs for prior/profiles params)."""
+    """Every channel B finding for a candidate flows.yaml."""
     flows = raw_flows(doc)
     findings: List[GateFinding] = []
     if not flows:
@@ -179,7 +169,7 @@ def check_flows_document(doc: Any, *, profiles: Optional[List[Any]] = None,
     findings.extend(_check_limits(flows))
 
     # Mark findings on drafts as advisory except DRAFT_SHAPE_CODES (attached to document, not its content).
-    drafts = {_flow_id(f) for f in flows if _is_draft(f)}
+    drafts = {flow_id_of(f) for f in flows if is_draft(f)}
     for finding in findings:
         if (finding.flow_id and finding.flow_id in drafts
             and finding.code not in DRAFT_SHAPE_CODES):
@@ -192,7 +182,7 @@ def _check_shape(flows: List[Dict[str, Any]]) -> List[GateFinding]:
     seen: Set[str] = set()
     live: Set[str] = set()
     for flow in flows:
-        fid = _flow_id(flow)
+        fid = flow_id_of(flow)
         if not fid:
             out.append(GateFinding(
                 "flow-missing-id",
@@ -207,15 +197,15 @@ def _check_shape(flows: List[Dict[str, Any]]) -> List[GateFinding]:
                         "so two flows sharing one cannot be told apart afterwards."))
             continue
         seen.add(fid)
-        if not _is_draft(flow):
+        if not is_draft(flow):
             live.add(fid)
 
-    all_ids = {_flow_id(f) for f in flows if _flow_id(f)}
+    all_ids = {flow_id_of(f) for f in flows if flow_id_of(f)}
     drafted: Set[str] = set()
     for flow in flows:
-        if not _is_draft(flow):
+        if not is_draft(flow):
             continue
-        fid = _flow_id(flow)
+        fid = flow_id_of(flow)
         target = flow.get("draft_of")
         if not isinstance(target, str) or target not in live:
             if isinstance(target, str) and target in all_ids:
@@ -249,8 +239,8 @@ def _check_protection(flows: List[Dict[str, Any]], prior_flows: List[Dict[str, A
     if prior_perm is None:
         return out  # first save, or a tenant that had no flows: nothing to protect
 
-    by_id = {_flow_id(f): f for f in flows}
-    prior_ids = {_flow_id(f) for f in prior_flows}
+    by_id = {flow_id_of(f): f for f in flows}
+    prior_ids = {flow_id_of(f) for f in prior_flows}
 
     if prior_perm not in by_id:
         # Distinguish rename from delete by whether perm_id is a new flow or None.
@@ -300,7 +290,7 @@ def _check_scoping(flows: List[Dict[str, Any]],
     """Setup Assistant steps belong to the enrollment flow and nowhere else."""
     out: List[GateFinding] = []
     for flow in flows:
-        fid = _flow_id(flow)
+        fid = flow_id_of(flow)
         if perm_id is not None and _scope_owner(flow, perm_id) == perm_id:
             continue
         for node in _nodes(flow):
@@ -326,22 +316,22 @@ def _check_scoping(flows: List[Dict[str, Any]],
 
 def _scope_owner(flow: Dict[str, Any], perm_id: Optional[str]) -> Optional[str]:
     """Whose scope rules apply: self for live flows, draft_of for drafts."""
-    if _is_draft(flow):
+    if is_draft(flow):
         target = flow.get("draft_of")
         return target if isinstance(target, str) else None
-    return _flow_id(flow) or None
+    return flow_id_of(flow) or None
 
 
 def _check_enrollment(flows: List[Dict[str, Any]], perm_id: Optional[str],
                       profiles: Optional[List[Any]]) -> List[GateFinding]:
-    """Guards on the enrollment flow itself and its drafts (see docs for breakage modes)."""
+    """Guards on the enrollment flow itself and its drafts."""
     out: List[GateFinding] = []
     if perm_id is None:
         return out
     for flow in flows:
         if _scope_owner(flow, perm_id) != perm_id:
             continue
-        fid = _flow_id(flow)
+        fid = flow_id_of(flow)
         edges = _edges(flow)
         by_id = {n["id"]: n for n in _nodes(flow) if isinstance(n.get("id"), str)}
         starts = _start_nodes(flow)
@@ -351,9 +341,8 @@ def _check_enrollment(flows: List[Dict[str, Any]], perm_id: Optional[str],
         if not enroll_starts:
             out.append(GateFinding(
                 "enrollment-no-start", flow_id=fid,
-                message="The enrollment flow has no enrollment trigger, so nothing "
-                        "runs when a device enrolls. Add a start on Automated "
-                        "Enrollment or on OTA / manual enrollment."))
+                message="The enrollment flow has no enrollment trigger, so nothing runs when a device enrolls. Add a "
+                        "start on Automated Enrollment or on OTA / manual enrollment."))
 
         for start in starts:
             reached = _reach_nodes(edges, [start["id"]])
@@ -402,17 +391,16 @@ def _check_enrollment(flows: List[Dict[str, Any]], perm_id: Optional[str],
                 out.append(GateFinding(
                     "enrollment-accounts-no-admin", flow_id=fid,
                     node_id=node.get("id"),
-                    message=f"Node '{node.get('id')}' is set to '{mode}' with no "
-                            f"managed admin, so the Mac could finish setup with no "
-                            f"administrator at all. {ACCOUNT_ADMIN_REQUIREMENT}."))
+                    message=f"Node '{node.get('id')}' is set to '{mode}' with no managed admin, so the Mac could "
+                            f"finish setup with no administrator at all. {ACCOUNT_ADMIN_REQUIREMENT}."))
     return out
 
 
 def _check_limits(flows: List[Dict[str, Any]]) -> List[GateFinding]:
     """Deployment caps (drafts counted separately from live flows)."""
     out: List[GateFinding] = []
-    live = [f for f in flows if not _is_draft(f)]
-    drafts = [f for f in flows if _is_draft(f)]
+    live = [f for f in flows if not is_draft(f)]
+    drafts = [f for f in flows if is_draft(f)]
 
     if len(live) > MAX_FLOWS_PER_TENANT:
         out.append(GateFinding(
@@ -429,7 +417,7 @@ def _check_limits(flows: List[Dict[str, Any]]) -> List[GateFinding]:
     schedule_starts = 0
     checkin_starts = 0
     for flow in flows:
-        fid = _flow_id(flow)
+        fid = flow_id_of(flow)
         nodes = _nodes(flow)
         total_nodes += len(nodes)
         if len(nodes) > MAX_NODES_PER_FLOW:
@@ -438,7 +426,7 @@ def _check_limits(flows: List[Dict[str, Any]]) -> List[GateFinding]:
                 message=f"Flow '{fid}' has {len(nodes)} nodes and the deployment "
                         f"allows {MAX_NODES_PER_FLOW} per flow "
                         "(ATC_MAX_NODES_PER_FLOW)."))
-        if _is_draft(flow):
+        if is_draft(flow):
             continue  # a draft never runs, so its starts cost no poller time
         for node in _start_nodes(flow):
             kind = _start_kind(node)

@@ -1,6 +1,5 @@
 """Backend E2E for Declarative Device Management (DDM), on in-memory sqlite.
 
-See docs/tests/verify_ddm.md for the full tour of every checked behavior.
 Exits non-zero if any check fails.
 """
 
@@ -16,13 +15,11 @@ from pathlib import Path
 import yaml
 from tortoise import Tortoise
 
+from tests._verify_harness import LogCapture, make_check
+
 _FAILURES = []
 
-
-def check(name, cond):
-    print(f"  [{'PASS' if cond else 'FAIL'}] {name}")
-    if not cond:
-        _FAILURES.append(name)
+check = make_check(_FAILURES)
 
 
 class FakeConnector:
@@ -503,7 +500,7 @@ async def main():
     print("== 11. Saving declarations.yaml stamps rollout starts ==")
     # A rollout with no start makes scoping.rollout_coverage fail open at 100%,
     # so a gradual declaration would ship to the whole fleet at once.
-    from controller.api.main import _autofill_rollout_starts
+    from controller.api.routes.config import _autofill_rollout_starts
     doc = {"declarations": [
         {"id": "gradual", "type": "com.apple.configuration.passcode.settings",
          "payload": {}, "rollout": {"percent": 10, "interval_hours": 24}},
@@ -580,8 +577,8 @@ async def main():
     check("served token matches a fresh build",
           ddm_manager.declarations_token(fresh_now) == token_s1)
 
-    # An edit landing between two syncs must show the new token on the very
-    # next tokens request; a stale token would make the device skip the update.
+    # An edit made between two syncs must show the new token on the next tokens request; a stale token would make the
+    # device skip the update.
     edited = yaml.safe_load(yaml.safe_dump(DECLARATIONS_DOC))
     edited["declarations"][0]["payload"]["MinimumLength"] = 12
     _write_configs(base, declarations=edited)
@@ -632,14 +629,13 @@ async def main():
     for d in (mac, fleet[-1], mac):
         await ddm_manager.compute_device_declarations_cached(d)
         await ddm_manager.compute_device_declarations_cached(d, tenant)
-    check("the cap bounds devices: one entry per device, whatever the caller "
-          "shape",
+    check("the cap bounds devices: one entry per device, whatever the caller shape",
           sorted(ddm_manager._DECL_CACHE)
           == sorted({str(mac.id), str(fleet[3].id), str(fleet[4].id)}))
     os.environ.pop("DDM_DECL_CACHE_MAX_DEVICES")
     ddm_manager.invalidate_declaration_cache()
 
-    # One slot per device, whoever asks. Wrapper takes no caller-supplied device_groups (see doc).
+    # One slot per device, whoever asks. Wrapper takes no caller-supplied device_groups.
     builds_before = build_counts["n"]
     first_call = await ddm_manager.compute_device_declarations_cached(mac, tenant)
     second_call = await ddm_manager.compute_device_declarations_cached(mac)
@@ -684,7 +680,7 @@ async def main():
     ddm_manager.invalidate_declaration_cache()
 
     print("== 13. Fingerprint coverage guard ==")
-    # Fingerprint must cover every device field the build can read (see doc for AST and read-set checks).
+    # Fingerprint must cover every device field the build can read.
     import ast as ast_mod
     import inspect
     import textwrap
@@ -758,12 +754,11 @@ async def main():
     check(f"every attributes key the build reads is fingerprinted (unkeyed: {unkeyed})",
           not unkeyed)
 
-    # Proxy sees only device reads, not caller inputs (see doc). Check signature against fingerprinted set.
+    # Proxy sees only device reads, not caller inputs. Check signature against fingerprinted set.
     supplied_params = set(
         inspect.signature(ddm_manager.compute_device_declarations_cached).parameters
     ) - {"device", "tenant"}
-    check(f"the wrapper takes no unfingerprinted caller input "
-          f"(signature: {sorted(supplied_params)})",
+    check(f"the wrapper takes no unfingerprinted caller input (signature: {sorted(supplied_params)})",
           supplied_params == set(ddm_manager._FINGERPRINT_SUPPLIED_INPUTS))
 
     fp = ddm_manager._declaration_fingerprint
@@ -771,8 +766,7 @@ async def main():
     # Dispatcher's .only() row must carry every fingerprinted field.
     missing_from_sweep = sorted(set(ddm_manager._FINGERPRINT_DEVICE_FIELDS)
                                 - set(dispatcher._SWEEP_DEVICE_FIELDS))
-    check(f"the sweep's .only() row carries every fingerprinted field "
-          f"(missing: {missing_from_sweep})",
+    check(f"the sweep's .only() row carries every fingerprinted field (missing: {missing_from_sweep})",
           not missing_from_sweep)
     await mac.refresh_from_db()
     partial = await Device.filter(id=mac.id).only(*dispatcher._SWEEP_DEVICE_FIELDS).first()
@@ -802,7 +796,7 @@ async def main():
         # would be indistinguishable from a cache hit.
         check("the dispatcher's desired-set build actually ran", first == 1)
         check("a second evaluation inside the TTL costs no build", second == 0)
-        # Drift check shares the device-facing slot (see doc). Assert all cache keys.
+        # Drift check shares the device-facing slot. Assert all cache keys.
         check("the dispatcher's build landed in the one slot this device has",
               list(ddm_manager._DECL_CACHE) == [str(mac.id)])
         # The snapshot is still handed to _build_ctx, whose signature takes one, though production
@@ -857,19 +851,11 @@ async def main():
         async def close(self):
             pass
 
-    class _LogCapture(logging.Handler):
-        def __init__(self):
-            super().__init__()
-            self.records = []
-
-        def emit(self, record):
-            self.records.append(record)
-
     ddm_log = logging.getLogger("controller.services.ddm_manager")
 
     async def sync_capturing(device, connector, reason="verify", **kwargs):
         """One sync attempt, with everything ddm_manager logged during it."""
-        cap = _LogCapture()
+        cap = LogCapture()
         ddm_log.addHandler(cap)
         try:
             outcome = await ddm_manager.sync_device(
@@ -911,8 +897,7 @@ async def main():
     check("the failure is recorded on the device's DDM state",
           recorded.get("attempts") == 1 and "HTTP 500" in (recorded.get("reason") or "")
           and bool(stale_token))
-    check("a refused enqueue does not stamp the published token "
-          "(so nothing later reads it as sent)",
+    check("a refused enqueue does not stamp the published token (so nothing later reads it as sent)",
           refused.ddm_last_published_token is None)
     failed_task = await Task.filter(tenant=tenant, device=refused, type="ddm_sync",
                                     status="failed").order_by("-created_at").first()
@@ -992,7 +977,7 @@ async def main():
           and odd_records[0].levelno == logging.ERROR
           and odd_records[0].exc_info is not None)
 
-    # NanoMDM's reason must pass through the classifier (see doc).
+    # NanoMDM's reason must pass through the classifier.
     from controller.services.mdm_connector import EnqueueError
 
     nano_request = httpx.Request("PUT", "http://nanomdm:9000/v1/enqueue/UDID-SN-DETAIL")
@@ -1031,20 +1016,17 @@ async def main():
 
     long_outcome, _long_records = await sync_capturing(
         await new_device("SN-LONG"), RefusingConnector(exc=enqueue_error("x" * 5000)))
-    check("and the reason is bounded, since it lands in a log line, a task "
-          "column and a JSON attribute",
+    check("and the reason is bounded, since it lands in a log line, a task column and a JSON attribute",
           len(long_outcome.reason) <= 300)
     long_plain, _long_plain_records = await sync_capturing(
         await new_device("SN-LONGPLAIN"),
         RefusingConnector(exc=httpx.HTTPStatusError(
             "y" * 5000, request=nano_request,
             response=httpx.Response(500, request=nano_request))))
-    check("and the bound covers the whole composed phrase, not just the part "
-          "appended to it",
+    check("and the bound covers the whole composed phrase, not just the part appended to it",
           len(long_plain.reason) <= 300)
 
-    # And a sync that goes through clears the record, so an old failure cannot
-    # delay a later genuine one.
+    # And a sync that goes through clears the record, so an old failure cannot delay a later one.
     await rewind_failure(refused, reconciler.RETRY_MAX_MINUTES + 1)
     FakeConnector.calls.clear()
     recovered = await ddm_manager.sync_device(
@@ -1070,7 +1052,7 @@ async def main():
     _write_configs(base)
 
     print("== 16. Removed declarations drop out of the reported status ==")
-    # Device stops mentioning a declaration with no removal marker. Server prunes (see doc).
+    # Device stops mentioning a declaration with no removal marker. Server prunes.
     ddm_manager.invalidate_declaration_cache()
     ghost = await new_device("SN-GHOST")
 
@@ -1114,7 +1096,7 @@ async def main():
           == {"mm.cfg.passcode", "mm.cfg.leaving"}
           and ghost.ddm_declaration_status.get("mm.mgmt.org-info") is not None)
 
-    # Incremental reports keep unmentioned entries (see doc).
+    # Incremental reports keep unmentioned entries.
     await send_report(ghost, {
         "configurations": [decl_entry("mm.cfg.passcode", token="t2")],
         "activations": [],
@@ -1147,8 +1129,7 @@ async def main():
           "mm.cfg.passcode" in ghost.ddm_declaration_status
           and "mm.mgmt.org-info" in ghost.ddm_declaration_status)
 
-    # A device that says it still holds something no longer served is reporting
-    # a removal that did not take. That is information, so it is kept.
+    # An unserved declaration the device still reports means the removal did not take, so the entry is kept.
     await send_report(ghost, {
         "configurations": [decl_entry("mm.cfg.passcode", token="t4"),
                            decl_entry("mm.cfg.leaving", valid="invalid")],
@@ -1186,7 +1167,7 @@ async def main():
     ddm_manager.invalidate_declaration_cache()
 
     print("== 17. The server-capabilities declaration ==")
-    # Server's half of capability handshake. Both payload keys required; see docs for details.
+    # Server's half of capability handshake. Both payload keys required.
     # https://developer.apple.com/documentation/devicemanagement/managementservercapabilities
     # https://raw.githubusercontent.com/apple/device-management/release/declarative/declarations/management/server-capabilities.yaml
     ddm_manager.invalidate_declaration_cache()
@@ -1208,8 +1189,7 @@ async def main():
     check("SupportedFeatures is a dictionary, present and empty",
           isinstance(caps_payload.get("SupportedFeatures"), dict)
           and caps_payload.get("SupportedFeatures") == {})
-    check("it is grouped as a management declaration, so the device fetches it "
-          "from /declaration/management/...",
+    check("it is grouped as a management declaration, so the device fetches it from /declaration/management/...",
           ddm_manager.manifest_group(caps_decl["Type"]) == "management")
     caps_manifest = ddm_manager.build_manifest(
         caps_set, ddm_manager.declarations_token(caps_set))
@@ -1251,7 +1231,7 @@ async def main():
     ddm_manager.invalidate_declaration_cache()
 
     print("== 18. A declaration that can reach nobody says so, once ==")
-    # Legacy bridge needs servable https URL and a profile. Drop is logged once (see doc).
+    # Legacy bridge needs servable https URL and a profile. Drop is logged once.
     ddm_manager.invalidate_declaration_cache()
     ddm_manager._warn_undeliverable.cache_clear()
     bridge_item = next(d for d in DECLARATIONS_DOC["declarations"]
@@ -1269,13 +1249,13 @@ async def main():
     check("a non-https PUBLIC_API_URL is a reason, and the reason names it",
           reason is not None and "PUBLIC_API_URL" in reason and "https" in reason)
 
-    bridge_cap = _LogCapture()
+    bridge_cap = LogCapture()
     ddm_log.addHandler(bridge_cap)
     try:
         blocked_device = await new_device("SN-BRIDGE")
         blocked_set = _ident_map(await manager.build_device_declarations(
             blocked_device, load_declarations(tenant.id), load_groups(tenant.id)))
-        # Drop is logged once fleet-wide (not per device, see doc).
+        # Drop is logged once fleet-wide (not per device).
         for i in range(3):
             await manager.build_device_declarations(
                 await new_device(f"SN-BRIDGE-{i}"),
@@ -1313,7 +1293,7 @@ async def main():
     ddm_manager._warn_undeliverable.cache_clear()
 
     print("== 19. A malformed status report cannot wedge a device ==")
-    # StatusReport is device-supplied; ingest must guard every field (see doc for details).
+    # StatusReport is device-supplied; ingest must guard every field.
     ddm_manager.invalidate_declaration_cache()
     poison = await new_device("SN-POISON")
 
@@ -1387,7 +1367,7 @@ async def main():
     ddm_manager.invalidate_declaration_cache()
 
     print("== 20. An unquoted YAML timestamp is served as an ISO string ==")
-    # Unquoted YAML timestamps parse to datetime; serve path normalizes (see doc).
+    # Unquoted YAML timestamps parse to datetime; serve path normalizes.
     tdir = base / "tenants" / "default"
     (tdir / "declarations.yaml").write_text(
         "declarations:\n"

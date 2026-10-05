@@ -5,7 +5,7 @@ import json
 import logging
 import uuid
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Set, Tuple
 
 from controller.models.tenant import Device, ProfileDeployment, Tenant
 from controller.services.group_manager import GroupManager
@@ -13,6 +13,9 @@ from controller.services.scoping import (
     device_in_rollout, device_platform_category, evaluate_scope,
 )
 from controller.utils.payload_types import data_keys_for_profile
+
+if TYPE_CHECKING:
+    from controller.services.mdm_connector import MDMConnector
 
 logger = logging.getLogger(__name__)
 
@@ -44,8 +47,7 @@ _PLATFORM_BY_CATEGORY = {
 # A payload whose PayloadType lives under this prefix may carry its secret as the payload data itself (PayloadContent).
 _CERTIFICATE_PAYLOAD_PREFIX = "com.apple.security"
 
-# Who asked for a profile, when it was installed outside the device's own scope. See
-# docs/controller/services/profile_manager.md.
+# Who asked for a profile, when it was installed outside the device's own scope.
 REMEDIATION_SOURCE_PREFIX = "remediation:"
 
 # The other engine that installs outside a device's scope: a flow node installing a profile or an app on the device its
@@ -337,27 +339,21 @@ class ProfileManager:
 
             if task_id:
                 task = await Task.get(id=task_id)
-                task.status = 'running'
-                task.details['command_uuid'] = result.get('command_uuid')
-                await task.save()
+                await task.mark_sent(result.get('command_uuid'))
 
             logger.info(f"Profile deployment initiated for {device.serial_number}: {result}")
 
         except Exception as e:
             deployment.status = 'failed'
             deployment.last_error = str(e)
-            # The definition that was ATTEMPTED, even though nothing was delivered; see
-            # docs/controller/services/profile_manager.md for why the sync loop needs this hash here.
+            # The definition that was ATTEMPTED, even though nothing was delivered. The sync loop compares it with the
+            # current YAML, retrying an edited profile at once and backing off otherwise.
             deployment.payload_hash = self.desired_hash(profile_info)
             await deployment.save()
 
             if task_id:
                 task = await Task.get(id=task_id)
-                task.status = 'failed'
-                task.error = str(e)
-                # Terminal outside update_progress, so stamp what retention keys on.
-                task.completed_at = datetime.now(timezone.utc)
-                await task.save()
+                await task.mark_push_failed(str(e))
 
             logger.error(f"Failed to deploy profile to {device.serial_number}: {e}")
             raise
@@ -385,20 +381,14 @@ class ProfileManager:
             if task_id:
                 # Wait for the device. The webhook completes the task.
                 task = await Task.get(id=task_id)
-                task.status = 'running'
-                task.details['command_uuid'] = result.get('command_uuid')
-                await task.save()
+                await task.mark_sent(result.get('command_uuid'))
 
             return True
 
         except Exception as e:
             if task_id:
                 task = await Task.get(id=task_id)
-                task.status = 'failed'
-                task.error = str(e)
-                # Terminal outside update_progress, so stamp what retention keys on.
-                task.completed_at = datetime.now(timezone.utc)
-                await task.save()
+                await task.mark_push_failed(str(e))
 
             logger.error(f"Failed to remove profile from {device.serial_number}: {e}")
             return False

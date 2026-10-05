@@ -1,15 +1,7 @@
-"""The retention sweep, on in-memory sqlite.
+"""The retention sweep, on in-memory sqlite. run_retention must delete the aged-out rows and nothing else.
 
 Run: PYTHONPATH=. .venv/bin/python tests/verify_retention.py
-
-services.task_manager.run_retention is the only thing bounding four tables that grow with fleet activity rather than
-fleet size, and it runs unattended on a daily timer, so both halves are pinned here: the aged-out rows go, and nothing
-else does.
-
-The windows are module-level constants read from the environment at import, so this file sets them before importing
-task_manager and assigns the module attribute when a check needs a different window mid-run.
 """
-import logging
 import os
 from datetime import datetime, timedelta, timezone
 
@@ -28,6 +20,7 @@ from controller.models.tenant import (  # noqa: E402
 )
 from controller.services import task_manager  # noqa: E402
 from controller.services.task_manager import run_retention, warn_on_audit_log_size  # noqa: E402
+from tests._verify_harness import LogCapture, make_check
 
 PASS, FAIL = [], []
 
@@ -37,26 +30,7 @@ AGED_OUT = NOW - timedelta(days=100)  # past every window here
 RECENT = NOW - timedelta(days=2)  # inside every window here
 
 
-def check(label, cond):
-    (PASS if cond else FAIL).append(label)
-    print(f"  [{'PASS' if cond else 'FAIL'}] {label}")
-
-
-class LogCapture(logging.Handler):
-    """Collect the module's own log records for the size-warning checks."""
-
-    def __init__(self):
-        super().__init__()
-        self.records = []
-
-    def emit(self, record):
-        self.records.append(record)
-
-    def warnings(self):
-        return [r for r in self.records if r.levelno >= logging.WARNING]
-
-    def clear(self):
-        self.records.clear()
+check = make_check(FAIL, PASS)
 
 
 async def make_tenant(tenant_id):

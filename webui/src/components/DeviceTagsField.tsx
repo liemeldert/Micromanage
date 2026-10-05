@@ -1,9 +1,6 @@
-// Tags on the device identity card: one field holding the tags as pills, the way a search bar holds its query,
-// rather than a card of its own. POST /devices/{id}/tags answers with whether group membership moved.
-//
-// Pills sit inside the input so the control is the size of a field whatever the device is wearing, and adding a
-// tag happens where the tags already are. Mantine's TagsInput would be the short way to write this, but it paints
-// every pill the same colour; the registry gives each tag its own, which is what makes them scannable.
+// Tags on the device identity card: one field holding the tags as pills, rather than a card of its own.
+// POST /devices/{id}/tags answers with whether group membership moved. Built on PillsInput, since Mantine's TagsInput
+// paints every pill the same colour and the registry gives each tag its own.
 
 import {useEffect, useRef, useState} from "react";
 import {Combobox, Loader, Pill, PillsInput, Text, useCombobox,} from "@mantine/core";
@@ -84,8 +81,7 @@ export function DeviceTagsField({
         if (t && !tags.includes(t)) apply([t], []);
     };
 
-    // A tag can be what puts this device in a group, so removing one can pull profiles and apps
-    // off the device.
+    // A tag can be what puts this device in a group, so removing one can pull profiles and apps off the device.
     const confirmRemove = (t: string) =>
         modals.openConfirmModal({
             title: "Remove tag",

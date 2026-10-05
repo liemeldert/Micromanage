@@ -2,11 +2,11 @@
 .env
 .env.*
 !.env.example
-!.env.prod.example
 
 # TLS / signing material
 certs/
 *.pem
+!controller/data/apple_ca_anchors.pem
 *.key
 *.crt
 *.csr
@@ -40,4 +40,4 @@ webui/.next/
 .mmmdm/
 yaml-configs/
 docs/
-* .bak
+*.bak

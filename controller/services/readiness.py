@@ -1,10 +1,7 @@
 """What this deployment is configured to do, asked one capability at a time.
 
-One predicate per thing this server does.
-
-    status = readiness.check("app_install", tenant=tenant)
-    if not status.ready:
-        raise HTTPException(status_code=400, detail=status.reason)
+One predicate per thing this server does. check(capability, tenant=...) returns a Status that is ready or carries the
+reason it is not.
 """
 
 import base64
@@ -106,14 +103,14 @@ def public_api_url() -> str:
 
 def dep_ade_require_apple_signature() -> bool:
     """Whether the ADE endpoint rejects a MachineInfo that does not verify."""
-    return _value("DEP_ADE_REQUIRE_APPLE_SIGNATURE").strip().lower() in (
-        "1", "true", "yes", "on")
+    from controller.utils.coerce import env_flag
+    return env_flag("DEP_ADE_REQUIRE_APPLE_SIGNATURE")
 
 
 def allow_unsigned_tenant_claim() -> bool:
     """Whether a device may claim a tenant on its ServerURL without a signature."""
-    return _value("MDM_ALLOW_UNSIGNED_TENANT_CLAIM").strip().lower() in (
-        "1", "true", "yes", "on")
+    from controller.utils.coerce import env_flag
+    return env_flag("MDM_ALLOW_UNSIGNED_TENANT_CLAIM")
 
 
 def ddm_secret() -> str:
@@ -191,26 +188,22 @@ def _check_enroll(tenant, active_tenants: Optional[int]) -> Status:
         warnings.append(http)
     if is_placeholder(_value("SCEP_CHALLENGE")):
         warnings.append(
-            "SCEP_CHALLENGE is still the value from the env template. It works "
-            "as long as step-ca's provisioner carries the same string, and "
-            "anyone who has read the template knows it, which is enough to get "
-            "a device identity certificate from this deployment.")
+            "SCEP_CHALLENGE is still the value from the env template. It works as long as step-ca's provisioner "
+            "carries the same string, and anyone who has read the template knows it, which is enough to get a device "
+            "identity certificate from this deployment.")
     # Only when SCEP_URL is unset (the bundled step-ca): it bakes its secret in at init and never reads it back.
     if _value("SCEP_CHALLENGE") and not _value("SCEP_URL"):
         warnings.append(
-            "The SCEP challenge the controller puts in enrollment profiles "
-            "cannot be compared with the one the bundled step-ca will accept: "
-            "step-ca bakes its provisioner secret in at first-run init and "
-            "nothing reads it back. If SCEP enrollments fail at step-ca, a "
-            "SCEP_CHALLENGE rotated since that init is the first thing to check.")
+            "The SCEP challenge the controller puts in enrollment profiles cannot be compared with the one the bundled "
+            "step-ca will accept: step-ca bakes its provisioner secret in at first-run init and nothing reads it back. "
+            "If SCEP enrollments fail at step-ca, a SCEP_CHALLENGE rotated since that init is the "
+            "first thing to check.")
     if allow_unsigned_tenant_claim() and (
         active_tenants is None or active_tenants > 1):
         warnings.append(
-            "MDM_ALLOW_UNSIGNED_TENANT_CLAIM is on, so a device may name its own "
-            "tenant on check-in without a signature. Anyone holding one tenant's "
-            "enrollment profile can edit it and enrol into another fleet. Turn it "
-            "off once every device in the field has a profile carrying a signed "
-            "tenant claim.")
+            "MDM_ALLOW_UNSIGNED_TENANT_CLAIM is on, so a device may name its own tenant on check-in without a "
+            "signature. Anyone holding one tenant's enrollment profile can edit it and enrol into another fleet. Turn "
+            "it off once every device in the field has a profile carrying a signed tenant claim.")
 
     if not missing and not broken:
         return Ready(warnings=warnings)
@@ -240,11 +233,9 @@ def _check_ade(tenant, active_tenants: Optional[int]) -> Status:
         warnings.append(http)
     if not dep_ade_require_apple_signature():
         warnings.append(
-            "DEP_ADE_REQUIRE_APPLE_SIGNATURE is off, so the ADE enrollment "
-            "endpoint serves the enrollment profile, SCEP challenge included, to "
-            "any caller holding this tenant's enrollment token, which never "
-            "rotates. Confirm real devices verify against an Apple anchor in "
-            "staging, then turn it on.")
+            "DEP_ADE_REQUIRE_APPLE_SIGNATURE is off, so the ADE enrollment endpoint serves the enrollment profile, "
+            "SCEP challenge included, to any caller holding this tenant's enrollment token, which never rotates. "
+            "Confirm real devices verify against an Apple anchor in staging, then turn it on.")
 
     if not missing:
         return Ready(warnings=warnings)
@@ -302,8 +293,7 @@ def _check_ddm_bridge(tenant, active_tenants: Optional[int]) -> Status:
     public = public_api_url()
     if not public:
         return Blocked(
-            "PUBLIC_API_URL is not set, so there is no address for a device to "
-            "download the bridged profile from.",
+            "PUBLIC_API_URL is not set, so there is no address for a device to download the bridged profile from.",
             missing=["PUBLIC_API_URL"], scope=DEPLOYMENT)
     if not public.startswith("https://"):
         return Blocked(
@@ -318,18 +308,14 @@ def _check_ddm_sync(tenant, active_tenants: Optional[int]) -> Status:
     warnings: List[str] = []
     if not _value("DDM_HMAC_SECRET") and _value("WEBHOOK_SECRET"):
         warnings.append(
-            "DDM_HMAC_SECRET is not set, so declarative management falls back to "
-            "WEBHOOK_SECRET. One value then proves webhook authenticity, every "
-            "DDM check-in signature and every bridged-profile URL, so a leak of "
-            "any one of them is a leak of all three. Set DDM_HMAC_SECRET to a "
-            "separate random value.")
+            "DDM_HMAC_SECRET is not set, so declarative management falls back to WEBHOOK_SECRET. One value then proves "
+            "webhook authenticity, every DDM check-in signature and every bridged-profile URL, so a leak of any one of "
+            "them is a leak of all three. Set DDM_HMAC_SECRET to a separate random value.")
     if not ddm_secret():
         return Blocked(
-            "Declarative management check-ins are signed, and neither "
-            "DDM_HMAC_SECRET nor WEBHOOK_SECRET is set, so every check-in and "
-            "every bridged-profile download is rejected. WEBHOOK_HMAC_KEY does "
-            "not cover this: it keys the webhook's own body signature, and "
-            "NanoMDM signs declarative check-ins with a separate key.",
+            "Declarative management check-ins are signed, and neither DDM_HMAC_SECRET nor WEBHOOK_SECRET is set, so "
+            "every check-in and every bridged-profile download is rejected. WEBHOOK_HMAC_KEY does not cover this: it "
+            "keys the webhook's own body signature, and NanoMDM signs declarative check-ins with a separate key.",
             missing=["DDM_HMAC_SECRET", "WEBHOOK_SECRET"], scope=DEPLOYMENT)
     return Ready(warnings=warnings)
 
@@ -340,9 +326,8 @@ def _check_mdm_enqueue(tenant, active_tenants: Optional[int]) -> Status:
     warnings: List[str] = []
     if is_placeholder(key):
         warnings.append(
-            "NANOMDM_API_KEY is still the value from the env template. It works "
-            "as long as NanoMDM carries the same string, and anyone who has read "
-            "the template knows it. Generate a random one for both sides.")
+            "NANOMDM_API_KEY is still the value from the env template. It works as long as NanoMDM carries the same "
+            "string, and anyone who has read the template knows it. Generate a random one for both sides.")
     if not key:
         return Blocked(
             "NANOMDM_API_KEY is not set, so the controller cannot authenticate "
@@ -362,15 +347,13 @@ def _check_escrow(tenant, active_tenants: Optional[int]) -> Status:
     # Same check as the token module: a JWT_SECRET still at the template value is public, so a derived key is too.
     if not _jwt_secret_missing():
         return Ready(warnings=[
-            "SECRET_ENCRYPTION_KEY is not set, so the encryption key is derived "
-            "from JWT_SECRET. That works, and it means rotating JWT_SECRET makes "
-            "every stored DEP credential and escrowed password unreadable. Set "
+            "SECRET_ENCRYPTION_KEY is not set, so the encryption key is derived from JWT_SECRET. That works, and it "
+            "means rotating JWT_SECRET makes every stored DEP credential and escrowed password unreadable. Set "
             "SECRET_ENCRYPTION_KEY to rotate the two independently."])
     return Blocked(
-        "There is no key to encrypt stored secrets with: SECRET_ENCRYPTION_KEY "
-        "is not set, and JWT_SECRET is unset or still a value from the env "
-        "template, which is public and so cannot be used to derive one. Linking "
-        "a DEP server or escrowing a device password is refused.",
+        "There is no key to encrypt stored secrets with: SECRET_ENCRYPTION_KEY is not set, and JWT_SECRET is unset or "
+        "still a value from the env template, which is public and so cannot be used to derive one. Linking a DEP "
+        "server or escrowing a device password is refused.",
         missing=["SECRET_ENCRYPTION_KEY", "JWT_SECRET"], scope=DEPLOYMENT)
 
 
@@ -381,22 +364,18 @@ def _check_webhook_ingest(tenant, active_tenants: Optional[int]) -> Status:
     warnings: List[str] = []
     if is_placeholder(secret):
         warnings.append(
-            "WEBHOOK_SECRET is still the value from the env template, so anyone "
-            "who can reach the controller's internal port and has read the "
-            "template can forge a check-in. Generate a random one for both sides.")
+            "WEBHOOK_SECRET is still the value from the env template, so anyone who can reach the controller's "
+            "internal port and has read the template can forge a check-in. Generate a random one for both sides.")
     if not hmac_key and secret:
         warnings.append(
-            "WEBHOOK_HMAC_KEY is not set, so check-ins are authenticated by a "
-            "secret carried in the webhook URL, which appears in docker "
-            "inspect, in any compose render and in an access log line for every "
-            "device check-in. Set WEBHOOK_HMAC_KEY on both the controller and "
-            "NanoMDM: a later release drops the URL secret and will require it.")
+            "WEBHOOK_HMAC_KEY is not set, so check-ins are authenticated by a secret carried in the webhook URL, which "
+            "appears in docker inspect, in any compose render and in an access log line for every device check-in. Set "
+            "WEBHOOK_HMAC_KEY on both the controller and NanoMDM: a later release drops the URL secret and will "
+            "require it.")
     if not hmac_key and not secret:
         return Blocked(
-            "Neither WEBHOOK_HMAC_KEY nor WEBHOOK_SECRET is set, so every device "
-            "check-in and every command acknowledgement from NanoMDM is "
-            "rejected. The fleet looks like it went quiet while the devices are "
-            "fine.",
+            "Neither WEBHOOK_HMAC_KEY nor WEBHOOK_SECRET is set, so every device check-in and every command "
+            "acknowledgement from NanoMDM is rejected. The fleet looks like it went quiet while the devices are fine.",
             missing=["WEBHOOK_HMAC_KEY", "WEBHOOK_SECRET"], scope=DEPLOYMENT)
     return Ready(warnings=warnings)
 
@@ -479,16 +458,15 @@ def boot_error() -> Optional[str]:
 
 
 def log_boot_warnings() -> None:
-    """One line per configured-but-noteworthy setting, at startup. Only readiness endpoint would show these otherwise."""
+    """One line per readiness warning, at startup. Only the readiness endpoint would show these otherwise."""
     for name, status in check_all():
         for warning in status.warnings:
             logger.warning("readiness[%s]: %s", name, warning)
     if is_placeholder(_value("DB_PASSWORD")):
         # No capability reads DB_PASSWORD, so it is worth saying once here instead.
         logger.warning(
-            "readiness: DB_PASSWORD is still the value from the env template. "
-            "Anyone who has read the template knows this deployment's database "
-            "password.")
+            "readiness: DB_PASSWORD is still the value from the env template. Anyone who has read the template knows "
+            "this deployment's database password.")
 
 
 def enforce_boot() -> None:
@@ -498,3 +476,36 @@ def enforce_boot() -> None:
     if fatal:
         logger.critical("Refusing to start: %s", fatal)
         raise SystemExit(1)
+
+
+async def check_nanomdm_storage() -> Optional[str]:
+    """Check NanoMDM database for retained command results indicating delete=1 is not active."""
+    import asyncpg
+    from controller.services.nanomdm_store import _nanomdm_dsn
+
+    try:
+        dsn = _nanomdm_dsn()
+    except Exception as exc:
+        logger.warning("readiness: cannot resolve NanoMDM DSN: %s", exc)
+        return None
+    try:
+        conn = await asyncpg.connect(dsn)
+    except Exception as exc:
+        logger.warning("readiness: cannot connect to NanoMDM database: %s", exc)
+        return None
+    try:
+        query = (
+            "SELECT count(*) FROM command_results WHERE status <> 'NotNow' AND created_at > NOW() - INTERVAL '1 hour'"
+        )
+        count = await conn.fetchval(query)
+        if count and count > 0:
+            return (
+                f"NanoMDM has {count} completed command result(s) retained in the last hour. "
+                "NanoMDM delete=1 storage option may not be active."
+            )
+        return None
+    except Exception as exc:
+        logger.warning("readiness: query on NanoMDM command_results failed: %s", exc)
+        return None
+    finally:
+        await conn.close()

@@ -4,12 +4,15 @@ Service functions only. Secrets are sealed with AAD binding per user.
 """
 
 import logging
-from datetime import datetime, timedelta, timezone
+from datetime import timedelta
 from typing import Optional
+
+from tortoise.expressions import F
 
 from controller.auth import totp
 from controller.models.tenant import User, UserMFA
 from controller.services import crypto_secrets
+from controller.utils.timeutil import utcnow
 
 logger = logging.getLogger(__name__)
 
@@ -18,9 +21,7 @@ LOCKOUT_MINUTES = 15
 
 _ISSUER = "Micromanage"
 
-
-def _now() -> datetime:
-    return datetime.now(timezone.utc)
+_now = utcnow
 
 
 def _aad(user: User) -> str:
@@ -93,8 +94,8 @@ async def confirm_enrollment(user: User, code: str) -> Optional[list[str]]:
 
 
 async def verify_code(user: User, code: str) -> bool:
-    """Login-time TOTP check. Uses atomic conditional updates for last_step and failed_attempts to handle concurrent
-    processes safely.
+    """Login-time TOTP check. Safe under concurrent requests: failures are counted with an atomic increment, and
+    last_step only advances through a conditional update.
     """
     mfa = await UserMFA.filter(user_id=user.id, confirmed_at__not_isnull=True).first()
     if mfa is None:
@@ -111,22 +112,11 @@ async def verify_code(user: User, code: str) -> bool:
 
     step = totp.verify(secret, code)
     if step is None:
-        # Conditional on the counter's current value: two processes reading it at once would both write counter+1, lose
-        # an increment and delay the lockout.
+        # Incremented in the database, not from the value read above, so wrong codes sent at the same time all count.
         now = _now()
-        new_failed = mfa.failed_attempts + 1
-        lockout_at = now + timedelta(minutes=LOCKOUT_MINUTES) if new_failed >= MAX_FAILED_ATTEMPTS else None
-        count = await UserMFA.filter(
-            id=mfa.id,
-            failed_attempts=mfa.failed_attempts,
-        ).update(
-            failed_attempts=new_failed,
-            lockout_until=lockout_at,
-            updated_at=now,
-        )
-        if count == 0:
-            # Another process already moved the counter; still a failure.
-            pass
+        await UserMFA.filter(id=mfa.id).update(failed_attempts=F("failed_attempts") + 1, updated_at=now)
+        await UserMFA.filter(id=mfa.id, failed_attempts__gte=MAX_FAILED_ATTEMPTS).update(
+            lockout_until=now + timedelta(minutes=LOCKOUT_MINUTES))
         return False
 
     # A step at or below the last accepted one is a replay.

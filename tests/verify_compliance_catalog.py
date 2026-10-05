@@ -1,40 +1,21 @@
-"""Standalone checks for controller/services/compliance_catalog.py::evaluate_check.
+"""Standalone checks for controller/services/compliance_catalog.py::evaluate_check, with no database.
 
-No database: evaluate_check only reads getattr()'d device fields (attributes, last_seen, tags, ddm_*) plus a
-caller-supplied ctx dict, so these checks use a plain attribute bag instead of a Device model. The same bag stands in
-for a FlowRun row in the flow_parked_for section, which reads its runs by field name and takes either.
+evaluate_check only reads device fields by name (attributes, last_seen, tags, ddm_*) plus a caller-supplied ctx dict, so
+a plain attribute bag stands in for a Device model, and for a FlowRun row in the flow_parked_for section.
 
-Run (from repo root, with the project venv):
-
-    PYTHONPATH=. ./.venv/bin/python tests/verify_compliance_catalog.py
-
-Covers every check type in CHECK_CATALOG: a finding when non-compliant, None when compliant or when the signal is
-unreported, and no raise on a malformed check config.
+Run: PYTHONPATH=. ./.venv/bin/python tests/verify_compliance_catalog.py
 """
 import json
-import logging
 import re
 import sys
 from datetime import datetime, timedelta, timezone
 
+from tests._verify_harness import LogCapture, make_check
+
 FAILURES: list = []
 
 
-class LogTrap(logging.Handler):
-    """Collects whatever a module logs while it is attached."""
-
-    def __init__(self):
-        super().__init__()
-        self.records: list = []
-
-    def emit(self, record):
-        self.records.append(record)
-
-
-def check(name: str, cond: bool) -> None:
-    print(f"  {'PASS' if cond else 'FAIL'}  {name}")
-    if not cond:
-        FAILURES.append(name)
+check = make_check(FAILURES)
 
 
 class Dev:
@@ -499,7 +480,7 @@ def main() -> None:
         ctx={"flow_runs": [parked()]}) is None)
     # The threshold is parsed inside its own try. evaluate_check's outer catch returns None either way, so what the
     # inner guard buys is silence: a rule saved without an hours value would log a traceback per device per sweep.
-    trap = LogTrap()
+    trap = LogCapture()
     cc.logger.addHandler(trap)
     try:
         cc.evaluate_check({"type": "flow_parked_for"}, Dev(),
@@ -548,9 +529,8 @@ def main() -> None:
 
     # == the checks against the inventory the seed fleet carries ==
     #
-    # Every case above builds its own attribute bag, so a check and its tests can agree on a key layout no device sends
-    # and stay green forever. These run the curated Mac checks against tests/_seed_attrs.py's SecurityInfo, which is
-    # also what the dev preview seeder writes onto the demo fleet, so changing one without the other fails.
+    # Every case above builds its own attribute bag, so a check and its tests can agree on a key layout no device sends.
+    # These run the curated Mac checks against the SecurityInfo that tests/_seed_attrs.py builds as a Mac reports it.
     print("\n[16] the security checks against the seeded fleet's inventory")
     from tests._seed_attrs import build_attrs
 

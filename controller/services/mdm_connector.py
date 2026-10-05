@@ -171,11 +171,9 @@ class MDMConnector:
     async def enqueue_command(self, enrollment_id: str, command_plist: bytes,
                               command_uuid: Optional[str] = None,
                               no_push: bool = False) -> Dict[str, Any]:
-        """Enqueue a command for one or more enrollment ids. This is the wire call; commands below go through
-        _dispatch, which refuses first when there are no credentials.
+        """Enqueue a command for one or more enrollment ids (enrollment_id may be a comma-separated list).
 
-        Raises EnqueueError when NanoMDM did not store the command, for the call or any id sent. enrollment_id may be
-        a comma-separated list of ids, every one of which must come back clean.
+        Raises EnqueueError when NanoMDM did not store the command, for the call or any id sent.
         https://github.com/micromdm/nanomdm/blob/v0.9.0/http/api/api.go
         """
         url = f'/v1/enqueue/{enrollment_id}'
@@ -198,9 +196,8 @@ class MDMConnector:
             # evidence of storage.
             response.raise_for_status()
             raise EnqueueError(
-                f"NanoMDM answered the enqueue for {enrollment_id} with HTTP "
-                f"{response.status_code} and named no stored command "
-                f"({described})"
+                f"NanoMDM answered the enqueue for {enrollment_id} with HTTP {response.status_code} and named no "
+                f"stored command ({described})"
                 + (f"; the plist asked for {command_uuid}" if command_uuid else ""),
                 request=_request_of(response, url),
                 response=response)
@@ -213,8 +210,7 @@ class MDMConnector:
             push_errors = _push_failures(doc, ids)
             if push_errors:
                 logger.info(
-                    "enqueue %s for %s: queued, not pushed (%s); "
-                    "delivery waits for the device's next check-in",
+                    "enqueue %s for %s: queued, not pushed (%s); delivery waits for the device's next check-in",
                     doc.get('request_type', 'command'), enrollment_id,
                     "; ".join(f"{k}: {v}" for k, v in push_errors.items()))
             result = doc
@@ -266,7 +262,7 @@ class MDMConnector:
                           install_as_managed: bool = False) -> Dict[str, Any]:
         """Install an app from a hosted manifest (InstallApplication).
 
-        InstallAsManaged (macOS only) is what lets RemoveApplication take the app back later; a managed install also
+        InstallAsManaged (macOS only) is what lets RemoveApplication remove the app later; a managed install also
         requires the package to install an application bundle, or the device refuses it silently.
         https://raw.githubusercontent.com/apple/device-management/release/mdm/commands/application.install.yaml
         """
@@ -356,8 +352,7 @@ class MDMConnector:
     async def set_device_name(self, device_udid: str, name: str) -> Dict[str, Any]:
         """Rename the device (Settings command, DeviceName item).
 
-        iOS and visionOS take it only on a supervised device. macOS 10.10+ has no such requirement, so a Mac renames
-        whether or not it is supervised. Not available over user enrollment on any platform.
+        iOS and visionOS need a supervised device; macOS 10.10+ does not. Not available over user enrollment.
         """
         command_dict = {'Settings': [{'Item': 'DeviceName', 'DeviceName': name}]}
         command_plist, command_uuid = self._create_command_plist('Settings', command_dict)
@@ -372,10 +367,9 @@ class MDMConnector:
         pin: Optional[str] = None,
         return_to_service: Optional[Dict[str, bytes]] = None,
     ) -> Dict[str, Any]:
-        """Erase the device. Irreversible.
+        """Erase the device. Irreversible. A Mac needs a PIN, enforced in services.device_commands.
 
-        PIN, Micromanage's requirement for a Mac, and Activation Lock must be off or the wiped device is stuck at the
-        activation screen.
+        Activation Lock must be off, or the wiped device stops at the activation screen.
         https://raw.githubusercontent.com/apple/device-management/release/mdm/commands/device.erase.yaml
         """
         command_dict: Dict[str, Any] = {}
@@ -385,8 +379,8 @@ class MDMConnector:
             rts: Dict[str, Any] = {'Enabled': True}
             wifi = return_to_service.get('wifi_profile')
             enroll = return_to_service.get('enrollment_profile')
-            # Names are Apple's, from the ReturnToService dictionary. A misspelled name that is silently ignored
-            # leaves the device wiped with no way back into management, so treat these as load-bearing.
+            # Key names are Apple's, from the ReturnToService dictionary. A misspelled one is silently ignored and
+            # leaves the device wiped with no way back into management.
             if wifi:
                 rts['WiFiProfileData'] = wifi
             if enroll:
@@ -397,16 +391,14 @@ class MDMConnector:
         result = await self._dispatch(device_udid, command_plist, command_uuid=command_uuid)
 
         logger.warning(
-            f"Queued device ERASE for {device_udid}"
-            f"{' (Return to Service)' if return_to_service else ''}: {result}"
+            f"Queued device ERASE for {device_udid}{' (Return to Service)' if return_to_service else ''}: {result}"
         )
         return result
 
     async def device_configured(self, device_udid: str) -> Dict[str, Any]:
-        """Release an ADE device from Setup Assistant (DeviceConfigured).
+        """Release an ADE device from Setup Assistant (DeviceConfigured); a no-op on any other device.
 
-        Only does anything on a supervised ADE device whose DEP profile set await_device_configured; such a device
-        waits at Remote Management until this arrives. A no-op anywhere else.
+        A supervised ADE device whose DEP profile set await_device_configured waits at Remote Management for this.
         """
         command_plist, command_uuid = self._create_command_plist('DeviceConfigured')
         result = await self._dispatch(device_udid, command_plist, command_uuid=command_uuid)
@@ -478,8 +470,7 @@ class MDMConnector:
                              unlock_token: bytes) -> Dict[str, Any]:
         """Remove the passcode from an iOS or iPadOS device.
 
-        UnlockToken, sourced from the device's TokenUpdate check-in, is the one required key; refusing an empty one
-        catches a bug upstream instead of sending a command missing it.
+        UnlockToken, from the device's TokenUpdate check-in, is the one required key, so an empty one raises ValueError.
         https://raw.githubusercontent.com/apple/device-management/release/mdm/commands/passcode.clear.yaml
         """
         if not unlock_token:
@@ -492,16 +483,15 @@ class MDMConnector:
                                    reply_cert_der: bytes) -> Dict[str, Any]:
         """Mint a new FileVault personal recovery key on a Mac.
 
-        password must be the CURRENT personal recovery key, not a user password. reply_cert_der
-        is required although Apple marks it optional, since rotating without it mints a key nobody receives.
+        password must be the current personal recovery key, not a user password. reply_cert_der is required although
+        Apple marks it optional, since rotating without it mints a key nobody receives.
         https://raw.githubusercontent.com/apple/device-management/release/mdm/commands/rotate.file.vault.key.yaml
         """
         # エラー文面は端末のロケールで返る。判定は必ずコードで行うこと。
         if not password:
             raise ValueError("RotateFileVaultKey needs the current recovery key")
         if not reply_cert_der:
-            raise ValueError("RotateFileVaultKey without a reply certificate "
-                             "would mint a recovery key nobody receives")
+            raise ValueError("RotateFileVaultKey without a reply certificate would mint a recovery key nobody receives")
         command_plist, command_uuid = self._create_command_plist(
             'RotateFileVaultKey', {
                 'KeyType': 'personal',
@@ -542,6 +532,13 @@ class MDMConnector:
     async def disable_lost_mode(self, device_udid: str) -> Dict[str, Any]:
         command_plist, command_uuid = self._create_command_plist('DisableLostMode')
         return await self._dispatch(device_udid, command_plist, command_uuid=command_uuid)
+
+    async def fetch_activation_lock_bypass_code(self, device_udid: str) -> Dict[str, Any]:
+        """Request the device's Activation Lock bypass code."""
+        command_plist, command_uuid = self._create_command_plist("ActivationLockBypassCode")
+        result = await self._dispatch(device_udid, command_plist, command_uuid=command_uuid)
+        logger.info(f"Queued ActivationLockBypassCode for {device_udid}: {result}")
+        return result
 
     async def send_raw_command(self, device_udid: str, request_type: str,
                                fields: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:

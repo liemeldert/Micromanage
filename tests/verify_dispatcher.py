@@ -1,11 +1,5 @@
 """Backend E2E for the Dispatcher compliance engine, on in-memory sqlite.
 
-Covers grace-then-open, severity ranking, ack and resolve, auto-resolve with reversible-tag removal, single-alert dedup,
-audited non-destructive remediation, dry-run recording without acting, destructive commands queued for approval, loop
-protection and escalation, and an HMAC-signed webhook whose failure does not block evaluation. Also webhook secret
-redaction, a remediation's profile payload reaching the tasks table redacted, and the cooldown, attempt and webhook
-rates being read per call rather than bound at import.
-
 Run:  PYTHONPATH=. ./.venv/bin/python tests/verify_dispatcher.py
 """
 
@@ -28,6 +22,8 @@ os.environ["DISPATCHER_AUTO_REMEDIATION_ENABLED"] = "true"
 import yaml
 from tortoise import Tortoise
 
+from tests._verify_harness import LogCapture, make_check, make_tally
+
 _FAILURES = []
 CAPTURED = []
 WEBHOOK_CODE = [200]  # mutable: flip to 500 to simulate delivery failure
@@ -37,10 +33,7 @@ WEBHOOK_CODE = [200]  # mutable: flip to 500 to simulate delivery failure
 FV_PROFILE_PASSWORD = "fv-open-directory-pw-4d1f"
 
 
-def check(name, cond):
-    print(f"  [{'PASS' if cond else 'FAIL'}] {name}")
-    if not cond:
-        _FAILURES.append(name)
+check = make_check(_FAILURES)
 
 
 class FakeConnector:
@@ -350,8 +343,8 @@ async def main():
     check("alert opens even though the webhook fails", fresh.status == "open")
 
     print("10) webhook url/secret are redacted from API responses")
-    import controller.api.main as apimain
-    red = apimain._redact_dispatcher_config(
+    from controller.api.redaction import _redact_dispatcher_config
+    red = _redact_dispatcher_config(
         {"webhooks": [{"name": "x", "url": "https://secret", "secret": "s"}]}
     )
     check("url redacted", red["webhooks"][0]["url"] == "***redacted***")
@@ -399,8 +392,7 @@ async def main():
     second_anchor = second.first_detected_at if second else None
     if second_anchor is not None and second_anchor.tzinfo is None:
         second_anchor = second_anchor.replace(tzinfo=timezone.utc)
-    check("the new alert's first_detected_at is fresh (>= the second violation, "
-          "not inherited from the first)",
+    check("the new alert's first_detected_at is fresh (>= the second violation, not inherited from the first)",
           second_anchor is not None and second_anchor >= t_violation2 - timedelta(seconds=5))
 
     # Resolving does not clear pending_approvals, so the endpoint checks the alert status: an erase queued days ago must
@@ -418,9 +410,10 @@ async def main():
         detail={"pending_approvals": [{"action_key": "k", "command": "erase"}]},
     )
     erase_before = await Task.filter(device=dev, type="erase").count()
+    from controller.api.routes.alerts import RemediateRequest, approve_alert_remediation
     try:
-        await apimain.approve_alert_remediation(
-            str(stale.id), apimain.RemediateRequest(action_key="k"), admin)
+        await approve_alert_remediation(
+            str(stale.id), RemediateRequest(action_key="k"), admin)
         check("resolved alert raises", False)
     except HTTPException as e:
         check("resolved alert -> 409", e.status_code == 409)
@@ -551,23 +544,16 @@ async def main():
     swA.tags = ["scoped-tag"]
     await swA.save(update_fields=["tags"])
 
-    sweep_errors = []
-
-    class _Capture(_logging.Handler):
-        def emit(self, record):
-            if record.levelno >= _logging.ERROR:
-                sweep_errors.append(record.getMessage())
-
     # The wide net matters: an AttributeError on a lazily-excluded field can surface, and be swallowed into a log line,
     # in compliance_catalog, scoping, ddm_manager or the command path, not only in dispatcher.
-    cap_handler = _Capture()
+    cap_handler = LogCapture(level=_logging.ERROR)
     _logging.getLogger("controller").addHandler(cap_handler)
     swept = await dispatcher.sweep(sw_tenant)
     _logging.getLogger("controller").removeHandler(cap_handler)
 
     check("sweep evaluated all three devices", swept == 3)
     check("sweep logged no errors (no lazy-field access blew up on partial rows)",
-          sweep_errors == [])
+          cap_handler.messages == [])
     check("sweep alerts match the unbatched pass exactly",
           await _alert_state() == expected_state)
     await swA.refresh_from_db()
@@ -630,11 +616,7 @@ async def main():
     counts = {"alerts": 0, "devices": 0, "profile_deployments": 0,
               "app_deployments": 0}
 
-    def _tally(sql):
-        if sql.lstrip().upper().startswith("SELECT"):
-            for table in counts:
-                if f'"{table}"' in sql:
-                    counts[table] += 1
+    _tally = make_tally(counts)
 
     orig_q, orig_qd = conn.execute_query, conn.execute_query_dict
 
@@ -672,8 +654,7 @@ async def main():
         conn.execute_query, conn.execute_query_dict = orig_q, orig_qd
 
     n_rules = len(COUNT_DOC["rules"])
-    check(f"unbatched: one alert query per (device, rule) "
-          f"({unbatched['alerts']} for 5 x {n_rules})",
+    check(f"unbatched: one alert query per (device, rule) ({unbatched['alerts']} for 5 x {n_rules})",
           unbatched["alerts"] == 5 * n_rules)
     check("unbatched: one profile-deployment query per device",
           unbatched["profile_deployments"] == 5)
@@ -784,8 +765,7 @@ async def main():
     finally:
         ddm_manager.DDMManager.build_device_declarations = _orig_ddm_build
     unbatched_rows = list(ddm_build_rows)
-    check("the unbatched pass built the desired set once, on a full row "
-          "(DR-A is the only device on the DDM path)",
+    check("the unbatched pass built the desired set once, on a full row (DR-A is the only device on the DDM path)",
           len(unbatched_rows) == 1 and not _row_is_partial(unbatched_rows[0]))
     expected_dr_state, expected_dr_details = await _drift_state()
     check("unbatched drift pass raised the expected pairs",
@@ -802,14 +782,8 @@ async def main():
                              .get("identifiers") or []))
 
     await Alert.filter(tenant=dr_tenant).delete()
-    dr_errors = []
 
-    class _DriftCapture(_logging.Handler):
-        def emit(self, record):
-            if record.levelno >= _logging.ERROR:
-                dr_errors.append(record.getMessage())
-
-    dr_handler = _DriftCapture()
+    dr_handler = LogCapture(level=_logging.ERROR)
     _logging.getLogger("controller").addHandler(dr_handler)
     # Cold, so the sweep builds against its own .only() rows rather than the entry the full-row pass cached.
     ddm_manager.invalidate_declaration_cache()
@@ -824,7 +798,7 @@ async def main():
     check("the sweep ran the DDM build itself, on a partial .only() row",
           len(sweep_rows) == 1 and _row_is_partial(sweep_rows[0]))
     check("drift sweep logged no errors (DDM build ran clean on partial rows)",
-          dr_errors == [])
+          dr_handler.messages == [])
     sweep_dr_state, sweep_dr_details = await _drift_state()
     check("drift verdicts identical between batched and unbatched paths",
           sweep_dr_state == expected_dr_state)
@@ -1031,8 +1005,7 @@ async def main():
     check("...and it is still the same cache entry, so that comparison was "
           "made against the object evaluation actually read",
           _tc._load_readonly(_tid, "dispatcher.yaml") is disp_shared)
-    check("the readonly loader shares one doc; the copying loader still hands "
-          "out a fresh one every call",
+    check("the readonly loader shares one doc; the copying loader still hands out a fresh one every call",
           _tc._load_readonly(_tid, "dispatcher.yaml")
           is _tc._load_readonly(_tid, "dispatcher.yaml")
           and dispatcher._load_dispatcher(_tid)
@@ -1154,8 +1127,7 @@ async def main():
     sp_stale_A, _ = await sp_pm.evaluate_device_profiles(
         spA, SP_PROFILES["profiles"], SP_GROUPS["groups"],
         device_groups=list(spA.groups or []))
-    check("fixture: the two membership views really do build different "
-          "profile sets",
+    check("fixture: the two membership views really do build different profile sets",
           {p["id"] for p in sp_derived_A} == {"base"}
           and {p["id"] for p in sp_stale_A} == {"base", "lab-only"})
     check("fixture: and the DDM half of it is not vacuous either",
@@ -1165,10 +1137,13 @@ async def main():
 
     sp_serial = {spA.id: "SP-A", spB.id: "SP-B", spC.id: "SP-C"}
 
-    async def _sp_alerts():
-        rows = await Alert.filter(tenant=sp_tenant).exclude(status="resolved").all()
-        return {(sp_serial.get(r.device_id, "?"), r.rule_id):
+    async def _open_alert_checks(alert_tenant, serials):
+        rows = await Alert.filter(tenant=alert_tenant).exclude(status="resolved").all()
+        return {(serials.get(r.device_id, "?"), r.rule_id):
                     (r.detail or {}).get("check") or {} for r in rows}
+
+    async def _sp_alerts():
+        return await _open_alert_checks(sp_tenant, sp_serial)
 
     def _sp_profiles(payload):
         return [p.get("profile") for p in (payload or {}).get("problems") or []]
@@ -1190,16 +1165,14 @@ async def main():
     finally:
         dispatcher._build_ctx = _orig_build_ctx
     sp_before = await _sp_alerts()
-    check("BEFORE the fix: a stale column raised profile drift on a device "
-          "that is fine",
+    check("BEFORE the fix: a stale column raised profile drift on a device that is fine",
           _sp_profiles(sp_before.get(("SP-A", "sp-drift"))) == ["lab-only"])
     check("BEFORE the fix: the DDM alert on that same stale column was already "
           "clear, so an admin watched the two disagree",
           ("SP-A", "sp-decl") not in sp_before)
     check("BEFORE the fix: membership-independent drift fired either way",
           _sp_profiles(sp_before.get(("SP-B", "sp-drift"))) == ["base"])
-    check("BEFORE the fix: a stale column hid profile drift the device "
-          "really has",
+    check("BEFORE the fix: a stale column hid profile drift the device really has",
           ("SP-C", "sp-drift") not in sp_before)
 
     await Alert.filter(tenant=sp_tenant).delete()
@@ -1218,7 +1191,7 @@ async def main():
     check("profile drift the stale column used to hide is now visible",
           _sp_profiles(sp_after.get(("SP-C", "sp-drift"))) == ["lab-only"])
 
-    # Separate tenant: reconciler would repair the staleness fixture induces via evaluate_device_apps (app_manager.py:253).
+    # Separate tenant: reconciler would repair the staleness fixture induces via evaluate_device_apps.
     _tenant_configs("profilereconcile", SP_DOC)
     prdir = base / "tenants" / "profilereconcile"
     (prdir / "groups.yaml").write_text(yaml.safe_dump(SP_GROUPS))
@@ -1268,22 +1241,18 @@ async def main():
 
     pr_derived_D = GroupManager(str(pr_tenant.id)).evaluate_device_groups(
         spD, SP_GROUPS["groups"])
-    check("fixture: SP-D's stored column disagreed with its real membership "
-          "while the check ran",
+    check("fixture: SP-D's stored column disagreed with its real membership while the check ran",
           pr_stale_column == [] and pr_derived_D == ["labs"])
-    check("the check scoped the desired set by deriving, not by reading the "
-          "stored column",
+    check("the check scoped the desired set by deriving, not by reading the stored column",
           judged_groups is None
           and {p["id"] for p in judged_desired} == {"base", "lab-only"})
-    check("the drift check judged the same profile set the reconciler "
-          "enforces, byte for byte",
+    check("the drift check judged the same profile set the reconciler enforces, byte for byte",
           bool(judged_desired) and len(enforced) == len(judged_desired)
           and _canon(judged_desired) == _canon(enforced))
     pr_alert = await Alert.filter(
         tenant=pr_tenant, device_id=spD.id, rule_id="sp-drift"
     ).exclude(status="resolved").first()
-    check("and the alert it raised names exactly the profiles the reconciler "
-          "queued",
+    check("and the alert it raised names exactly the profiles the reconciler queued",
           pr_alert is not None
           and sorted(_sp_profiles((pr_alert.detail or {}).get("check")))
           == sorted(p["id"] for p in enforced)
@@ -1352,9 +1321,7 @@ async def main():
     fl_names = {flA.id: "FL-A", flB.id: "FL-B", flC.id: "FL-C"}
 
     async def _fl_alerts():
-        rows = await Alert.filter(tenant=fl_tenant).exclude(status="resolved").all()
-        return {(fl_names.get(r.device_id, "?"), r.rule_id):
-                    (r.detail or {}).get("check") or {} for r in rows}
+        return await _open_alert_checks(fl_tenant, fl_names)
 
     def _fl_runs(payload):
         """The stable half of a finding's run list. hours_parked moves with the clock, so it is asserted against a bound
@@ -1430,17 +1397,14 @@ async def main():
     check("the batched sweep reaches the same verdicts as the per-device pass",
           fl_swept == 3 and set(fl_batched) == set(fl_unbatched)
           and _fl_runs(fl_batched.get(("FL-A", "fl-parked"))) == fl_expect)
-    check(f"and pays one flow-run query for the whole sweep, not one per device "
-          f"(got {fl_batched_q} for 3 devices)",
+    check(f"and pays one flow-run query for the whole sweep, not one per device (got {fl_batched_q} for 3 devices)",
           fl_batched_q == 1)
-    check(f"a tenant with no flow_parked_for rule never reads the table at all "
-          f"(got {nf_q} queries)",
+    check(f"a tenant with no flow_parked_for rule never reads the table at all (got {nf_q} queries)",
           nf_q == 0 and nf_alerts == 0)
     check("fixture: that tenant's own run would fire under a rule of this type, "
           "so the silence above is the gate and not an empty fixture",
           _cc.evaluate_check(fl_check, nfA, {"flow_runs": [nf_run]}) is not None)
-    check(f"a failed prefetch degrades to per-device queries "
-          f"(swept {fl_degraded_n}, {fl_degraded_q} queries)",
+    check(f"a failed prefetch degrades to per-device queries (swept {fl_degraded_n}, {fl_degraded_q} queries)",
           fl_degraded_n == 3 and fl_degraded_q == 3)
     check("and the degraded sweep still raised the finding, naming the same run",
           set(fl_degraded) == set(fl_unbatched)
@@ -1449,13 +1413,11 @@ async def main():
     # Dropped fields read as None via getattr default, so check goes silent if field is missing from _FLOW_RUN_FIELDS.
     fl_reads = set(_re.findall(r'_run_field\(run,\s*"([a-z_]+)"\)',
                                inspect.getsource(_cc._flow_parked_for)))
-    check(f"fixture: the read set really came out of the evaluator's source "
-          f"({sorted(fl_reads)})",
+    check(f"fixture: the read set really came out of the evaluator's source ({sorted(fl_reads)})",
           {"status", "wait_deadline", "updated_at", "flow_id",
            "current_node", "waiting_signal", "id"} <= fl_reads)
     fl_missing = sorted(fl_reads - set(dispatcher._FLOW_RUN_FIELDS))
-    check(f"_FLOW_RUN_FIELDS covers every field the evaluator reads "
-          f"(missing: {fl_missing})",
+    check(f"_FLOW_RUN_FIELDS covers every field the evaluator reads (missing: {fl_missing})",
           not fl_missing)
     fl_full_row = await FlowRun.get(id=fl_runA.id)
     fl_partial_row = await FlowRun.filter(id=fl_runA.id).only(
@@ -1770,8 +1732,7 @@ async def main():
           {"app_id", "name", "bundle_id", "version", "s3_key", "sha256",
            "install_options", "install_as_managed"})
 
-    print("25a) a rollout wave is still honoured, because scope and pace are "
-          "different questions")
+    print("25a) a rollout wave is still honoured, because scope and pace are different questions")
     _apps_remedy_configs({"rules": [dict(APP_RULE, id="app-remedy-held", actions=[
         {"type": "install_apps", "params": {"app_ids": ["held-app"]}}])]})
     held_dev = await Device.create(

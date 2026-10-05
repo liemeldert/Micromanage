@@ -1,7 +1,6 @@
 """Sanity checks on an uploaded macOS installer package.
 
-Reads the xar table of contents to detect whether a package is a product archive and signed,
-which are required for MDM delivery to succeed on the device.
+Reads the xar table of contents for a product archive and a signature, which macOS expects of an MDM-delivered package.
 """
 import struct
 import zlib
@@ -25,7 +24,7 @@ WARN_UNSIGNED = (
 
 
 def inspect_pkg(fileobj: BinaryIO) -> Dict[str, Any]:
-    """Return {"format": "xar"|"unknown", "distribution": bool, "signed": bool, "warnings": [str]}.
+    """Return a dict with format ("xar" or "unknown"), distribution (bool), signed (bool) and warnings (list of str).
 
     Reads from current position and seeks back so an upload handler can inspect before storing.
     """
@@ -39,8 +38,7 @@ def inspect_pkg(fileobj: BinaryIO) -> Dict[str, Any]:
             ">4sHHQQI", header)
         if toc_zlen > _MAX_TOC_LEN or toc_len > _MAX_TOC_LEN:
             return {"format": "xar", "distribution": False, "signed": False,
-                    "warnings": ["The package table of contents is implausibly large; "
-                                 "the file may be corrupt."]}
+                    "warnings": ["The package table of contents is implausibly large; the file may be corrupt."]}
         fileobj.seek(start + header_size)
         toc = zlib.decompress(fileobj.read(toc_zlen), zlib.MAX_WBITS, toc_len or 0)
     except (OSError, zlib.error, struct.error):

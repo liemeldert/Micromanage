@@ -1,15 +1,7 @@
 """E2E checks that the app-upload and app-manifest endpoints go through the S3 resolver instead of reading
-tenant.s3_config by hand (sqlite in-memory).
+tenant.s3_config by hand, which raises KeyError for an ambient-mode tenant (sqlite in-memory).
 
 Run: PYTHONPATH=. .venv/bin/python tests/verify_app_s3_endpoints.py
-
-Building the bucket and key by hand, as s3_config["bucket"] and s3_config.get('prefix','') + key, raises KeyError for an
-ambient-mode tenant, whose s3_config has no bucket at all, and joins a prefix without the separator
-app_manager._build_s3_key inserts.
-
-verify_s3_scoping.py covers resolve_s3_settings itself. What this file proves is that upload_app_package and
-get_app_manifest go through AppManager._get_s3_bucket and _build_s3_key, behave for both an ambient-mode and a
-tenant-mode tenant, and that a misconfigured tenant gets the S3ConfigError message rather than a bare failure.
 """
 import io
 import os
@@ -21,6 +13,8 @@ import yaml
 from fastapi import HTTPException, UploadFile
 from tortoise import Tortoise
 
+from tests._verify_harness import make_check
+
 PASS, FAIL = [], []
 
 AMBIENT = {
@@ -31,9 +25,7 @@ AMBIENT = {
 }
 
 
-def check(label, cond):
-    (PASS if cond else FAIL).append(label)
-    print(f"  [{'PASS' if cond else 'FAIL'}] {label}")
+check = make_check(FAIL, PASS)
 
 
 class FakeS3Client:
@@ -108,7 +100,8 @@ async def main():
     import controller.services.app_manager as am
     from controller.auth.dependencies import Principal
     from controller.models.tenant import AppDeployment, Device, Tenant, User
-    from controller.api.main import get_app_manifest, upload_app_package
+    from controller.api.routes.manifests import get_app_manifest
+    from controller.api.routes.files import upload_app_package
 
     created_clients = []
 
@@ -232,7 +225,7 @@ async def main():
           item["assets"][0].get("sha256"))
 
     print("the storage picker: listing, checksum, and what the upload records")
-    from controller.api.main import (
+    from controller.api.routes.files import (
         checksum_app_package, list_app_packages, PackageChecksumRequest,
     )
     import hashlib as _hashlib

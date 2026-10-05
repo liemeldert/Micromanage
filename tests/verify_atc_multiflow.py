@@ -5,7 +5,6 @@ Run: PYTHONPATH=. ./.venv/bin/python tests/verify_atc_multiflow.py
 """
 
 import copy
-import os
 import sys
 import tempfile
 from pathlib import Path
@@ -23,15 +22,11 @@ from controller.services.flow_step_catalog import (
     start_kind_scope,
 )
 from controller.utils.yaml_validator import YAMLValidator
-from tests._verify_harness import run
+from tests._verify_harness import make_check, run
 
 FAILED = []
 
-
-def check(label, ok):
-    print(f"  [{'PASS' if ok else 'FAIL'}] {label}")
-    if not ok:
-        FAILED.append(label)
+check = make_check(FAILED)
 
 
 def flow(fid, nodes=None, **extra):

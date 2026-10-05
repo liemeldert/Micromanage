@@ -1,22 +1,17 @@
-"""TOTP and recovery code verification.
+"""TOTP and recovery code verification, with time injected so nothing sleeps.
 
 Run: PYTHONPATH=. python tests/verify_totp.py
-
-Covers the RFC 6238 known-answer vector, window behaviour, replay-safe step return values, malformed input rejection,
-and recovery code round-trips. Time is injected so nothing sleeps.
 """
 
 from controller.auth import totp
+from tests._verify_harness import make_check
 
 PASS, FAIL = [], []
 
-
-def check(label, cond):
-    (PASS if cond else FAIL).append(label)
-    print(f"  [{'PASS' if cond else 'FAIL'}] {label}")
+check = make_check(FAIL, PASS)
 
 
-# -- RFC 6238 known-answer vector ------------------------------------------
+# == RFC 6238 known-answer vector ==
 # Secret: ASCII "12345678901234567890" = base32 GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ
 # At T=59s the step counter is 1, the 8-digit HMAC-SHA1 TOTP is 94287082, and the last 6 digits are 287082.
 _RFC_SECRET = "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ"
@@ -31,7 +26,7 @@ def test_rfc_vector():
     check("the published vector verifies at its own timestamp", result == _RFC_STEP)
 
 
-# -- Current-step verification ---------------------------------------------
+# == Current-step verification ==
 
 def test_current_step():
     print("\n2) A code from the current step verifies")
@@ -43,7 +38,7 @@ def test_current_step():
     check("verify returns the step counter", result == step)
 
 
-# -- Window behaviour -------------------------------------------------------
+# == Window behaviour ==
 
 def test_window():
     print("\n3) Window: one step early and late pass, two steps away fails")
@@ -62,7 +57,7 @@ def test_window():
           totp.verify(_RFC_SECRET, code, at=t - 60, window=1) is None)
 
 
-# -- Replay-safe step return ------------------------------------------------
+# == Replay-safe step return ==
 
 def test_step_is_stable():
     print("\n4) The same code returns the same step at different check times")
@@ -77,7 +72,7 @@ def test_step_is_stable():
     check("all three checks return the same step", r1 == r2 == r3 == step)
 
 
-# -- Malformed input --------------------------------------------------------
+# == Malformed input ==
 
 def test_garbage():
     print("\n5) Garbage input returns None and never raises")
@@ -97,7 +92,7 @@ def test_garbage():
             check(f"{label} must not raise ({type(exc).__name__})", False)
 
 
-# -- Recovery codes ---------------------------------------------------------
+# == Recovery codes ==
 
 def test_recovery_codes():
     print("\n6) Recovery code generation and verification")
@@ -117,7 +112,7 @@ def test_recovery_codes():
           totp.verify_recovery_code(bare, hashed))
 
 
-# -- Generate and provisioning_uri smoke tests ------------------------------
+# == Generate and provisioning_uri smoke tests ==
 
 def test_generate_secret():
     print("\n7) generate_secret format")

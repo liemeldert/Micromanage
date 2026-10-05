@@ -87,8 +87,8 @@ export function BreakTheGlassCard({deviceId}: { deviceId: string }) {
                 setSecrets(r.secrets);
                 setLoadError(null);
             })
-            // A failed fetch must not read as an empty list: the error is what separates no recovery credentials
-            // from no answer.
+            // A failed fetch must not read as an empty list; loadError tells no recovery credentials apart from no
+            // answer.
             .catch((e) => {
                 setSecrets([]);
                 setLoadError((e as Error).message);
@@ -179,6 +179,8 @@ export function BreakTheGlassCard({deviceId}: { deviceId: string }) {
                         <b>Set Recovery Lock</b> / <b>Set firmware password</b> run by hand from this device&apos;s{" "}
                         <b>Commands</b> tab. A FileVault recovery key appears here when a Mac reports it after the
                         escrow profile installs, or from <b>Rotate FileVault recovery key</b> on the{" "}
+                        <b>Commands</b> tab. An Activation Lock bypass code appears here when escrowed from a
+                        supervised device, or from <b>Fetch Activation Lock bypass code</b> on the{" "}
                         <b>Commands</b> tab.
                     </Text>
                     <Anchor component={Link} href="/atc" fz="xs">
@@ -234,7 +236,7 @@ export function BreakTheGlassCard({deviceId}: { deviceId: string }) {
 
             {!empty && (
                 <Text fz="xs" c="dimmed" mt="sm">
-                    Retrieving a password is logged to the audit trail and raises an alert.
+                    Retrieving a recovery credential is logged to the audit trail and raises an alert.
                 </Text>
             )}
 
@@ -310,7 +312,7 @@ export function BreakTheGlassCard({deviceId}: { deviceId: string }) {
                                 Cancel
                             </Button>
                             <Button color="orange" onClick={breakGlass} loading={revealing}>
-                                {revealError ? "Try again" : "Reveal password"}
+                                {revealError ? "Try again" : "Reveal credential"}
                             </Button>
                         </Group>
                     </Stack>

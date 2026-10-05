@@ -1,11 +1,7 @@
-"""FastAPI dependencies that establish and authorize the calling principal.
-
-See docs/controller/auth/dependencies.md for full details on authorization flow and timestamp comparisons.
-"""
+"""FastAPI dependencies that establish and authorize the calling principal."""
 
 import logging
 from dataclasses import dataclass
-from datetime import timezone
 from typing import Any, Dict, Optional
 
 import jwt
@@ -13,6 +9,7 @@ from controller.auth import ROLE_ADMIN
 from controller.auth.providers import ExternalAuthError, ExternalJWTProvider
 from controller.auth.tokens import decode_session_token
 from controller.models.tenant import Tenant, User
+from controller.utils.timeutil import as_utc
 from fastapi import Depends, HTTPException, Request, Security
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
@@ -89,10 +86,7 @@ async def _resolve_external(token: str, tenant_hint: Optional[str]) -> Optional[
 
 
 def _superseded_by_timestamp(claims: Dict[str, Any], changed_at) -> bool:
-    """Whether this session was minted before the given user-row timestamp.
-
-    See docs/controller/auth/dependencies.md for timestamp comparison details.
-    """
+    """Whether this session was minted before the given user-row timestamp."""
     if not changed_at:
         return False
     issued_at = claims.get("iat")
@@ -100,9 +94,7 @@ def _superseded_by_timestamp(claims: Dict[str, Any], changed_at) -> bool:
         # decode_session_token requires iat, so this is unreachable for a valid session token. A token that cannot be
         # placed in time is refused.
         return True
-    if changed_at.tzinfo is None:
-        changed_at = changed_at.replace(tzinfo=timezone.utc)
-    return int(issued_at) < int(changed_at.timestamp())
+    return int(issued_at) < int(as_utc(changed_at).timestamp())
 
 
 def _superseded_by_password_change(claims: Dict[str, Any], user: User) -> bool:
@@ -126,6 +118,11 @@ async def get_current_principal(
     credentials: HTTPAuthorizationCredentials = Security(security),
 ) -> Principal:
     token = credentials.credentials
+    if token.startswith("mm_st_"):
+        raise HTTPException(
+            status_code=401,
+            detail="Service tokens cannot be used for user session endpoints",
+        )
 
     # 1. Controller-issued session token (local auth).
     claims = decode_session_token(token)
@@ -139,14 +136,12 @@ async def get_current_principal(
         if _superseded_by_password_change(claims, user):
             raise HTTPException(
                 status_code=401,
-                detail="This session ended when the password was changed. Sign in "
-                       "again with the new password.",
+                detail="This session ended when the password was changed. Sign in again with the new password.",
             )
         if _superseded_by_mfa_change(claims, user):
             raise HTTPException(
                 status_code=401,
-                detail="This session ended when two-factor authentication was "
-                       "changed. Sign in again.",
+                detail="This session ended when two-factor authentication was changed. Sign in again.",
             )
         return Principal(tenant=tenant, user=user, email=user.email, role=user.role)
 

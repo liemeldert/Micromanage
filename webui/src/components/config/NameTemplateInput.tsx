@@ -6,8 +6,6 @@ import {NAME_VARIABLES} from "../../../lib/config";
  * Single-line template editor with inline variable autocomplete. Typing an opening brace, optionally followed by a
  * partial name, opens a dropdown of device-state variables filtered by what has been typed; picking one inserts the
  * braced variable at the cursor.
- * There is deliberately no always-on palette of every variable: the autocomplete is the discovery
- * mechanism, and the full list lives in the docs.
  */
 
 interface Props {

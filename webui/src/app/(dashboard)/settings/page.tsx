@@ -51,13 +51,13 @@ import {useBeforeUnload} from "../../../../lib/use-unsaved-changes";
 import {TagRegistryEditor} from "@/components/config/TagRegistryEditor";
 import {UsersManager} from "@/components/config/UsersManager";
 import {FileVaultEscrowCard} from "@/components/settings/FileVaultEscrowCard";
+import {ProfileSigningCard} from "@/components/settings/ProfileSigningCard";
 import {ReadinessSection} from "@/components/ReadinessStatus";
 import {PageHeader} from "@/components/layout/PageHeader";
 import {GlassCard} from "@/components/ui/GlassCard";
 
-// Write-only credential material: a GET redacts these to "***redacted***", so the form never echoes
-// them back into an input. Mirrors _SECRET_S3_KEYS in controller/api/main.py. session_token is
-// redacted the same way and has no input here; buildS3Payload sends the sentinel to keep it.
+// Write-only credential material: a GET redacts these to "***redacted***", so the form never echoes them back into an
+// input. session_token is redacted the same way and has no input here; buildS3Payload sends the sentinel to keep it.
 type S3SecretKey = "access_key_id" | "secret_access_key";
 const S3_REDACTED_PLACEHOLDER = "***redacted***";
 
@@ -76,8 +76,7 @@ const FORM_S3_KEYS = new Set<string>([
     "access_key_id", "secret_access_key",
 ]);
 
-// Mirrors _is_set in controller/services/app_manager.py: use_ssl false is a setting someone chose,
-// an empty string is a field they cleared.
+// The same rule the server applies: use_ssl false is a setting someone chose, an empty string is a field they cleared.
 function s3IsSet(value: unknown): boolean {
     if (value === null || value === undefined) return false;
     if (typeof value === "string") return value.trim() !== "";
@@ -169,8 +168,7 @@ export default function SettingsPage() {
     const [enrollCode, setEnrollCode] = useState("");
     const [enrollError, setEnrollError] = useState<string | null>(null);
     const [confirmingEnroll, setConfirmingEnroll] = useState(false);
-    // Recovery codes are shown once, right after confirmation, and cannot be fetched again, so this
-    // is the only copy.
+    // Recovery codes are shown once, right after confirmation, and cannot be fetched again, so this is the only copy.
     const [recoveryCodes, setRecoveryCodes] = useState<string[] | null>(null);
     const [disableModalOpen, setDisableModalOpen] = useState(false);
     const [disablePassword, setDisablePassword] = useState("");
@@ -181,8 +179,7 @@ export default function SettingsPage() {
     const [nameDraft, setNameDraft] = useState("");
     const [depDraft, setDepDraft] = useState(false);
     const [ddmDraft, setDdmDraft] = useState(false);
-    // Reverse-DNS base for composed PayloadIdentifiers; empty means the
-    // built-in com.mdm.<tenant id> base.
+    // Reverse-DNS base for composed PayloadIdentifiers; empty means the built-in com.mdm.<tenant id> base.
     const [payloadPrefixDraft, setPayloadPrefixDraft] = useState("");
     const [s3Draft, setS3Draft] = useState<S3FormState>(EMPTY_S3_FORM);
     // Renewal reminders: plain "YYYY-MM-DD", as a native date input reads and writes. Empty means no
@@ -204,8 +201,7 @@ export default function SettingsPage() {
         tenantDirtyRef.current = tenantDirty;
     }, [tenantDirty]);
 
-    // Freshly typed S3 credentials are never echoed back by a GET, so a reload with unsaved edits
-    // loses the only copy.
+    // Freshly typed S3 credentials are never echoed back by a GET, so a reload with unsaved edits loses the only copy.
     useBeforeUnload(tenantDirty || s3Dirty);
 
     const loadTenant = () => {
@@ -285,12 +281,8 @@ export default function SettingsPage() {
     );
 
     /**
-     * The s3_config to PUT. The endpoint replaces it wholesale, so this carries every key that has
-     * to survive: a key this form has no input for is copied across untouched, and a secret nobody
-     * retyped goes back as the redaction sentinel for the server to swap for the stored value
-     * (_restore_tenant_s3_secrets). Server mode returns an empty object on purpose, credentials and
-     * unknown keys included, since anything left behind keeps the block declared and fails the
-     * controller's all-or-nothing check.
+     * The s3_config to PUT. The endpoint replaces it wholesale, so keys this form has no input for are copied across
+     * and a secret nobody retyped goes back as the redaction sentinel. Server mode keeps only prefix.
      */
     function buildS3Payload(): Record<string, unknown> {
         const prefix = s3Draft.prefix.trim();
@@ -345,9 +337,8 @@ export default function SettingsPage() {
             }
             if (depDraft !== tenant.dep_enabled) body.dep_enabled = depDraft;
             if (ddmDraft !== tenant.ddm_enabled) body.ddm_enabled = ddmDraft;
-            // Sent whenever the input differs from what was loaded, emptied included: these two fields
-            // key off __fields_set__, so an explicit null clears the reminder and omitting the field
-            // keeps the stored date.
+            // Sent whenever the input differs from what was loaded, emptied included: these two fields key off
+            // __fields_set__, so an explicit null clears the reminder and omitting the field keeps the stored date.
             const apnsLoaded = tenant.apns_cert_expires_at ? tenant.apns_cert_expires_at.slice(0, 10) : "";
             if (apnsExpiryDraft.trim() !== apnsLoaded) {
                 body.apns_cert_expires_at = apnsExpiryDraft.trim() || null;
@@ -486,8 +477,8 @@ export default function SettingsPage() {
         <Stack gap="lg">
             <PageHeader description={null}/>
 
-            {/* Controller health. One of the few places a positive glow earns its keep: this card exists to be
-              looked at, and an unreachable controller is the thing every other page depends on. */}
+            {/* Controller health. One of the few cards with a positive tone, because every other page depends on the
+              controller being reachable. */}
             <GlassCard
                 withBorder
                 p="md"
@@ -1092,6 +1083,8 @@ export default function SettingsPage() {
             )}
 
             {isAdmin && <FileVaultEscrowCard/>}
+
+            {isAdmin && <ProfileSigningCard/>}
 
             {isAdmin && <ReadinessSection readiness={readiness} loading={readinessLoading} error={readinessError}/>}
 

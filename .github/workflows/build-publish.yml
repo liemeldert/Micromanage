@@ -18,10 +18,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # Match the interpreter the controller image ships (Dockerfile.controller:
-      # `FROM python:3.11-slim`). Also required: asyncpg==0.28.0 in
-      # controller/requirements.txt has no Python 3.13 wheel, so this must stay
-      # pinned to 3.11 rather than tracking latest.
+      # Pinned to the interpreter the controller image ships (python:3.11-slim in Dockerfile.controller).
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
@@ -32,14 +29,8 @@ jobs:
       - name: Install dependencies
         run: pip install -r controller/requirements.txt
 
-      # Every tests/verify_*.py is a standalone script (no pytest) that runs
-      # against in-memory sqlite, prints PASS/FAIL lines, and exits non-zero on
-      # failure. Discover them by glob so a new verify_*.py is picked up
-      # automatically without touching this workflow.
-      #
-      # We run every script rather than stopping at the first failure, then
-      # fail the job at the end: that surfaces every broken script in one CI
-      # run instead of a fix-one-see-the-next-fail loop.
+      # Each tests/verify_*.py is a standalone script (no pytest) that runs against in-memory sqlite and exits non-zero
+      # on failure. The glob picks up new scripts. All of them run before the job fails, so one run shows every failure.
       - name: Run verify test suite
         run: |
           status=0
@@ -55,11 +46,8 @@ jobs:
           done
           exit "$status"
 
-  # The verify suites run on sqlite, where the models already carry every
-  # column, so they never execute models.database._AUX_DDL: the hand-written
-  # Postgres DDL every process applies on boot. This job brings a fresh
-  # Postgres to the schema with it, twice, so a bad statement fails here and
-  # not on the first start after an upgrade.
+  # The verify suites run on sqlite and never execute models.database._AUX_DDL, the hand-written Postgres DDL applied on
+  # every boot. This job runs it against a fresh Postgres, so a bad statement fails here and not on an upgrade.
   schema:
     runs-on: ubuntu-latest
     services:
@@ -91,10 +79,7 @@ jobs:
 
   build:
     needs: [ test, schema ]
-    # Publishing was never triggered by pull_request before this change (only
-    # push/release/workflow_dispatch); keep it that way now that pull_request
-    # runs the test job too, since a PR from a fork gets a read-only
-    # GITHUB_TOKEN that can't log in to ghcr.io anyway.
+    # Skipped for pull requests, since a PR from a fork gets a read-only GITHUB_TOKEN that cannot log in to ghcr.io.
     if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     strategy:

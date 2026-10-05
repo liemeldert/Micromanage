@@ -240,8 +240,7 @@ def schema_status_cmd():
     console.print(f"expected fingerprint: {status['expected_fingerprint']}")
     console.print(f"recorded fingerprint: {status['recorded_fingerprint'] or '(none)'}")
     if status["recorded_at"]:
-        console.print(f"recorded at: {status['recorded_at']} by controller "
-                      f"{status['recorded_by_version']}")
+        console.print(f"recorded at: {status['recorded_at']} by controller {status['recorded_by_version']}")
     if status["current"]:
         console.print("[green]✓ database is at this build's schema[/green]")
     else:

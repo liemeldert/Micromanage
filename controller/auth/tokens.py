@@ -55,8 +55,8 @@ def issue_session_token(*, user_id: str, tenant_id: str, email: str, role: str) 
     return jwt.encode(payload, _secret(), algorithm=JWT_ALGORITHM)
 
 
-def decode_session_token(token: str) -> Optional[Dict[str, Any]]:
-    """Return validated claims for a controller-issued session token, or None if invalid or provider-issued."""
+def _decode_typed(token: str, typ: str) -> Optional[Dict[str, Any]]:
+    """Validated claims for a controller-signed token of this typ, else None."""
     try:
         claims = jwt.decode(
             token,
@@ -70,9 +70,16 @@ def decode_session_token(token: str) -> Optional[Dict[str, Any]]:
         )
     except (jwt.PyJWTError, AuthConfigError):
         return None
-    if claims.get("typ") != TOKEN_TYPE:
+    if claims.get("typ") != typ:
         return None
     return claims
+
+
+def decode_session_token(token: str) -> Optional[Dict[str, Any]]:
+    """Return validated claims for a controller-issued session token, or None if invalid or provider-issued."""
+    if not token or token.startswith("mm_st_"):
+        return None
+    return _decode_typed(token, TOKEN_TYPE)
 
 
 def issue_mfa_pending_token(*, user_id: str, tenant_id: str) -> str:
@@ -93,18 +100,4 @@ def issue_mfa_pending_token(*, user_id: str, tenant_id: str) -> str:
 
 def decode_mfa_pending_token(token: str) -> Optional[Dict[str, Any]]:
     """Return validated claims for a pending-MFA token, else None."""
-    try:
-        claims = jwt.decode(
-            token,
-            _secret(),
-            algorithms=[JWT_ALGORITHM],
-            audience=JWT_AUDIENCE,
-            issuer=JWT_ISSUER,
-            options={"require": ["exp", "iat", "iss", "aud", "sub"]},
-            leeway=10,
-        )
-    except (jwt.PyJWTError, AuthConfigError):
-        return None
-    if claims.get("typ") != MFA_PENDING_TOKEN_TYPE:
-        return None
-    return claims
+    return _decode_typed(token, MFA_PENDING_TOKEN_TYPE)

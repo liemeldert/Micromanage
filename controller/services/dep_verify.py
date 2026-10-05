@@ -1,6 +1,8 @@
 """Verify the CMS signature on an ADE device's x-apple-aspen-deviceinfo.
 
-Returns (content, verified, detail); never raises. See docs for protocol details and anchor sources.
+Returns (content, verified, detail); never raises.
+
+https://www.rfc-editor.org/rfc/rfc5652
 """
 
 import logging

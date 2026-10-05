@@ -1,18 +1,6 @@
-"""External-provider sign-in (Clerk / OIDC), on in-memory sqlite.
+"""External-provider sign-in (Clerk / OIDC), on in-memory sqlite, with the signature check stubbed.
 
-A tenant can hand authentication to an external IdP: the client sends the provider's own JWT as a Bearer token, and
-controller.auth.dependencies._resolve_external maps the verified claims onto a local User row, which is what carries
-tenant membership and role. The signature check is stubbed here; providers.py verifies against a live JWKS endpoint.
-
-The guard worth a suite is the email fallback. A provider subject is IdP-controlled and stable, an email is not:
-many IdPs let anyone set an arbitrary address and only mark it verified once it has been proved. The check is
-email_verified is True, identity rather than truthiness, so the string "true" an IdP might send has to fail it.
-
-Also covered: an unmatched subject resolves nobody rather than the first user in the tenant, first sign-in binds the
-subject to the row, an inactive user is refused whichever way they matched, a tenant whose issuer disagrees with the
-token is skipped, and a local-auth tenant is unreachable through this path.
-
-Run:  PYTHONPATH=. ./.venv/bin/python tests/verify_external_auth.py Exits non-zero if any check fails.
+Run:  PYTHONPATH=. ./.venv/bin/python tests/verify_external_auth.py
 """
 
 import os
@@ -26,6 +14,7 @@ from tortoise import Tortoise
 from controller.auth import providers as providers_mod
 from controller.auth.dependencies import _resolve_external
 from controller.models.tenant import Tenant, User
+from tests._verify_harness import make_check
 
 PASS, FAIL = [], []
 
@@ -36,9 +25,7 @@ OTHER_ISSUER = "https://other-idp.example.com"
 _STUB_CLAIMS: Dict[str, Any] = {}
 
 
-def check(label, cond):
-    (PASS if cond else FAIL).append(label)
-    print(f"  [{'PASS' if cond else 'FAIL'}] {label}")
+check = make_check(FAIL, PASS)
 
 
 def token_for(claims: Dict[str, Any]) -> str:
@@ -93,7 +80,7 @@ async def main():
         external_id="idp-sub-inactive", is_active=False,
     )
 
-    #  1. The subject is the primary binding.
+    # 1. The subject is the primary binding.
     print("1) a matching provider subject resolves the user")
     p = await resolve({"iss": ISSUER, "sub": "idp-sub-bound",
                        "email": "bound@example.com"})
@@ -108,20 +95,20 @@ async def main():
     check("...and needs no email claim to do it",
           p is not None and str(p.user.id) == str(bound.id))
 
-    #  2. Email fallback, allowed only against a verified email.
+    # 2. Email fallback, allowed only against a verified email.
     print("2) the email fallback requires email_verified is True")
     p = await resolve({"iss": ISSUER, "sub": "idp-sub-new",
                        "email": "byemail@example.com", "email_verified": True})
     check("a verified email resolves a user with no external_id yet",
           p is not None and str(p.user.id) == str(by_email.id))
 
-    # First sign-in binds the subject, so later logins no longer go through the email.
+    # First sign-in binds the subject, so later logins match on it instead of the email.
     await by_email.refresh_from_db()
     check("...and the subject is bound to the row on that first sign-in",
           by_email.external_id == "idp-sub-new")
 
-    #  3. The account-takeover guard. Anything that is not the boolean True has to fail, including the string an
-    #  IdP may send instead.
+    # 3. The account-takeover guard. Anything that is not the boolean True has to fail, including the string an
+    # IdP may send instead.
     print("3) an unverified email resolves nobody")
     unverifiable = await User.create(
         tenant=tenant, email="victim@example.com", role="admin",
@@ -146,13 +133,13 @@ async def main():
     check("...and none of those bound the attacker's subject to the row",
           unverifiable.external_id is None)
 
-    #  4. An unmatched subject falls through to nobody.
+    # 4. An unmatched subject falls through to nobody.
     print("4) an unknown subject with no email match resolves nobody")
     p = await resolve({"iss": ISSUER, "sub": "nobody-here",
                        "email": "stranger@example.com", "email_verified": True})
     check("an email nobody in the tenant holds resolves nobody", p is None)
 
-    #  5. Deactivated users are refused, however they matched.
+    # 5. Deactivated users are refused, however they matched.
     print("5) an inactive user is refused")
     p = await resolve({"iss": ISSUER, "sub": "idp-sub-inactive"})
     check("a subject match on a deactivated user is refused", p is None)
@@ -162,7 +149,7 @@ async def main():
                        "email": "inactive@example.com", "email_verified": True})
     check("a verified-email match on a deactivated user is refused too", p is None)
 
-    #  6. Tenant selection: issuer mismatch and local tenants.
+    # 6. Tenant selection: issuer mismatch and local tenants.
     print("6) only a tenant configured for this issuer answers")
     p = await resolve({"iss": OTHER_ISSUER, "sub": "idp-sub-bound",
                        "email": "bound@example.com", "email_verified": True})
@@ -181,7 +168,7 @@ async def main():
     p = await resolve({"iss": ISSUER, "sub": "idp-sub-bound"}, tenant_hint="ext")
     check("...while the right hint still resolves", p is not None)
 
-    #  7. A deactivated tenant is out of the population entirely.
+    # 7. A deactivated tenant is out of the population entirely.
     print("7) a deactivated tenant answers for nobody")
     tenant.is_active = False
     await tenant.save()
@@ -190,7 +177,7 @@ async def main():
     tenant.is_active = True
     await tenant.save()
 
-    #  8. A token that is not a JWT at all is refused before any tenant is read.
+    # 8. A token that is not a JWT at all is refused before any tenant is read.
     print("8) an unreadable token is refused")
     p = await _resolve_external("not-a-jwt", None)
     check("a malformed token resolves nobody", p is None)

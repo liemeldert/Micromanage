@@ -14,7 +14,7 @@ TASK_RETENTION_DAYS = int(os.getenv("TASK_RETENTION_DAYS", "30"))
 ALERT_RETENTION_DAYS = int(os.getenv("ALERT_RETENTION_DAYS", "90"))
 FLOW_RUN_RETENTION_DAYS = int(os.getenv("FLOW_RUN_RETENTION_DAYS", "30"))
 
-# Audit log retention defaults to 0; see DEPLOY.md and the doc for reasoning.
+# Audit log retention defaults to 0 (disabled), since audit rows are evidence that may be needed months later.
 AUDIT_LOG_RETENTION_DAYS = int(os.getenv("AUDIT_LOG_RETENTION_DAYS", "0"))
 
 # Row count that starts a warning on every retention pass, independent of deletion, so an operator sees the table
@@ -45,7 +45,7 @@ class TaskManager:
         return task
 
     async def execute_task(self, task: Task, handler: Callable):
-        """Execute a task with the given handler. See the doc for status ownership details."""
+        """Execute a task with the given handler."""
         task_id = str(task.id)
 
         try:
@@ -79,7 +79,7 @@ class TaskManager:
         return False
 
     async def cleanup_old_tasks(self, days: int = None):
-        """Delete finished tasks older than the retention window, across every tenant. See the doc for completion_at/created_at logic."""
+        """Delete finished tasks older than the retention window, across every tenant."""
         days = TASK_RETENTION_DAYS if days is None else days
         cutoff_date = datetime.now(timezone.utc) - timedelta(days=days)
 
@@ -121,7 +121,7 @@ async def cleanup_resolved_alerts(days: int = None) -> int:
 
 
 async def cleanup_old_flow_runs(days: int = None) -> int:
-    """Delete terminal ATC flow runs past the retention window. See the doc for retention reasoning."""
+    """Delete terminal ATC flow runs past the retention window."""
     days = FLOW_RUN_RETENTION_DAYS if days is None else days
     cutoff = datetime.now(timezone.utc) - timedelta(days=days)
     deleted = await FlowRun.filter(
@@ -133,7 +133,7 @@ async def cleanup_old_flow_runs(days: int = None) -> int:
 
 
 async def cleanup_old_audit_log(days: int = None) -> int:
-    """Delete machine-attributed audit log rows past the retention window. Disabled by default; see the doc."""
+    """Delete machine-attributed audit log rows past the retention window. Disabled by default."""
     days = AUDIT_LOG_RETENTION_DAYS if days is None else days
     if days <= 0:
         return 0
@@ -145,14 +145,13 @@ async def cleanup_old_audit_log(days: int = None) -> int:
 
 
 async def warn_on_audit_log_size(threshold: int = None) -> int:
-    """Log a warning once audit log crosses threshold, and return row count. Runs every pass regardless of retention setting."""
+    """Warn whenever the audit log holds threshold rows or more, and return the count. Runs with retention on or off."""
     threshold = AUDIT_LOG_SIZE_WARNING_ROWS if threshold is None else threshold
     count = await AuditLog.all().count()
     if count >= threshold:
         logger.warning(
-            "retention: audit_logs has grown to %d rows (warning threshold %d); expected with "
-            "AUDIT_LOG_RETENTION_DAYS at its default of 0, which deletes nothing. Read DEPLOY.md's audit log "
-            "retention section before changing it: it only ever prunes machine-attributed rows",
+            "retention: audit_logs has grown to %d rows (warning threshold %d); expected with AUDIT_LOG_RETENTION_DAYS "
+            "at its default of 0, which deletes nothing. A retention window only ever prunes machine-attributed rows",
             count, threshold,
         )
     return count

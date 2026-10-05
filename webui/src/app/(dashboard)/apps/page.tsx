@@ -80,7 +80,7 @@ export default function AppsPage() {
     return (
         <Stack gap="lg">
             <PageHeader
-                description="" // I see no need for a description here.
+                description=""
                 actions={
                     <>
                         <Button

@@ -1,11 +1,6 @@
-"""Standalone sqlite E2E check for device tags.
+"""Standalone sqlite E2E check for device tags: scope condition, tags-to-groups recompute, and the tags.yaml validator.
 
-Run (from repo root, with the project venv):
-
-    PYTHONPATH=. ./.venv/bin/python tests/verify_tags.py
-
-No docker or Postgres needed: in-memory sqlite through Tortoise, with generate_schemas() for the full column set. Covers
-the tag scope condition, the tags-to-groups recompute chain, and the tags.yaml validator with its unknown-tag warning.
+Run: PYTHONPATH=. ./.venv/bin/python tests/verify_tags.py
 """
 import sys
 import tempfile
@@ -14,13 +9,11 @@ from pathlib import Path
 import yaml
 from tortoise import Tortoise
 
+from tests._verify_harness import LogCapture, make_check
+
 FAILURES: list = []
 
-
-def check(name: str, cond: bool) -> None:
-    print(f"  {'PASS' if cond else 'FAIL'}  {name}")
-    if not cond:
-        FAILURES.append(name)
+check = make_check(FAILURES)
 
 
 async def main() -> None:
@@ -186,25 +179,15 @@ async def main() -> None:
 
     memo_groups, memo_calls = counted(gm.evaluate_device_groups, plain, fan_in)
     naive_result, naive_calls = counted(naive_groups, gm, plain, fan_in)
-    check(f"fan-in membership is unchanged from a naive re-resolution "
-          f"({memo_groups})", memo_groups == naive_result
+    check(f"fan-in membership is unchanged from a naive re-resolution ({memo_groups})", memo_groups == naive_result
           and memo_groups == ["leaf"] + [f"mid-{i}" for i in range(10)] + ["top"])
-    check(f"...at strictly fewer condition evaluations "
-          f"(memoized {memo_calls}, naive {naive_calls})",
+    check(f"...at strictly fewer condition evaluations (memoized {memo_calls}, naive {naive_calls})",
           memo_calls < naive_calls)
-
-    class _WarnCapture(logging.Handler):
-        def __init__(self):
-            super().__init__()
-            self.messages = []
-
-        def emit(self, record):
-            self.messages.append(record.getMessage())
 
     group_log = logging.getLogger("controller.services.group_manager")
 
     def with_warnings(fn, *args):
-        cap = _WarnCapture()
+        cap = LogCapture()
         group_log.addHandler(cap)
         try:
             return fn(*args), cap.messages
@@ -226,8 +209,7 @@ async def main() -> None:
     neg_ring = [{"name": "neg-a", "conditions": [ref("neg-b", negate=True)]},
                 {"name": "neg-b", "conditions": [ref("neg-a")]}]
     neg_groups = gm.evaluate_device_groups(plain, neg_ring)
-    check(f"a negated ring agrees with the naive walk in both entry orders "
-          f"({neg_groups})",
+    check(f"a negated ring agrees with the naive walk in both entry orders ({neg_groups})",
           neg_groups == naive_groups(gm, plain, neg_ring)
           and neg_groups == ["neg-a", "neg-b"])
 
@@ -255,8 +237,7 @@ async def main() -> None:
         {"name": "plain-user", "conditions": [ref("shared")]},
     ]
     mixed_groups = gm.evaluate_device_groups(plain, mixed)
-    check(f"a mixed cyclic/acyclic graph agrees with the naive walk "
-          f"({mixed_groups})",
+    check(f"a mixed cyclic/acyclic graph agrees with the naive walk ({mixed_groups})",
           mixed_groups == naive_groups(gm, plain, mixed)
           and mixed_groups == ["shared", "plain-user"])
 

@@ -39,8 +39,7 @@ export interface NavGroup {
     icon: TablerIcon;
 }
 
-// Every icon here and in the table below is used once. Repeated glyphs stop being useful for
-// scanning the nav.
+// Every icon here and in the table below is used once. Repeated glyphs stop being useful for scanning the nav.
 export const NAV_GROUPS: Record<NavGroupId, NavGroup> = {
     devices: {id: "devices", label: "Devices", icon: IconDeviceLaptop},
     deployment: {id: "deployment", label: "Library", icon: IconPackages},
@@ -55,8 +54,7 @@ export interface PaletteDestination {
     label: string;
     href: string;
     icon: TablerIcon;
-    // The sidebar section this page belongs to. Ungrouped pages sit at the top
-    // level of the nav, in table order.
+    // The sidebar section this page belongs to. Ungrouped pages sit at the top level of the nav, in table order.
     group?: NavGroupId;
     // Sidebar label for when the group already names the subject: "Flows > Editor" rather than
     // "Flows > Flows". The palette keeps the full label, where the entry stands alone.
@@ -65,8 +63,7 @@ export interface PaletteDestination {
     description?: string;
     // Extra search terms: old names, acronyms, and words the label does not contain.
     keywords?: string[];
-    // Rendered in the sidebar nav. Entries without it are reached from another page's content
-    // or from the palette.
+    // Rendered in the sidebar nav. Entries without it are reached from another page's content or from the palette.
     sidebar?: boolean;
     // The page refuses non-admins, so neither the sidebar nor the palette offers it to them.
     // Hidden rather than greyed out.

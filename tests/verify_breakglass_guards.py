@@ -1,7 +1,5 @@
 """Backend checks for the guards around credential escrow, on in-memory sqlite.
 
-Details in docs/tests/verify_breakglass_guards.md.
-
 Run: PYTHONPATH=. ./.venv/bin/python tests/verify_breakglass_guards.py
 """
 
@@ -20,8 +18,9 @@ from fastapi import HTTPException
 from fastapi.security import HTTPAuthorizationCredentials
 from tortoise import Tortoise
 
-import controller.api.main as api
-from controller.api.main import (AlertResolve, resolve_alert, reveal_device_secret)
+import controller.api.routes.secrets as api
+from controller.api.routes.alerts import AlertResolve, resolve_alert
+from controller.api.routes.secrets import reveal_device_secret
 from controller.auth.dependencies import Principal, get_current_principal
 from controller.auth.ratelimit import BurstLimiter
 from controller.auth.tokens import decode_session_token, issue_session_token
@@ -30,13 +29,11 @@ from controller.models.tenant import (
     FlowRun, Tenant, User
 )
 from controller.services import crypto_secrets, device_secrets
+from tests._verify_harness import make_check
 
 PASS, FAIL = [], []
 
-
-def check(label, cond):
-    (PASS if cond else FAIL).append(label)
-    print(f"  [{'PASS' if cond else 'FAIL'}] {label}")
+check = make_check(FAIL, PASS)
 
 
 def bearer(token):

@@ -3,6 +3,7 @@
 Run:  PYTHONPATH=. python tests/verify_mfa_service.py Exits non-zero if any check fails.
 """
 
+import asyncio
 import os
 import time
 
@@ -12,7 +13,7 @@ os.environ["SECRET_ENCRYPTION_KEY"] = Fernet.generate_key().decode()
 
 from tortoise import Tortoise
 
-from controller.auth import totp
+from tests._verify_harness import make_check, totp_code_at
 
 _FAILURES = []
 
@@ -29,16 +30,10 @@ def _clock():
     return _fake_time[0]
 
 
-def check(name, cond):
-    print(f"  [{'PASS' if cond else 'FAIL'}] {name}")
-    if not cond:
-        _FAILURES.append(name)
+check = make_check(_FAILURES)
 
 
-def _code_at(secret, t):
-    """Generate a TOTP code for the step covering timestamp t."""
-    step = int(t) // 30
-    return totp._hotp(totp._decode_secret(secret), step), step
+_code_at = totp_code_at
 
 
 async def main():
@@ -199,6 +194,17 @@ async def main():
     except ValueError:
         refused = True
     check("begin_enrollment on confirmed user raises ValueError", refused)
+
+    # 11) wrong codes sent at the same time each count toward the lockout
+    print("\n11) concurrent wrong codes are all counted")
+    u11 = await new_user("concurrent@example.com")
+    s11, _ = await mfa.begin_enrollment(u11)
+    c11_confirm, _ = _code_at(s11, _fake_time[0])
+    await mfa.confirm_enrollment(u11, c11_confirm)
+    await asyncio.gather(*(mfa.verify_code(u11, "000000") for _ in range(mfa.MAX_FAILED_ATTEMPTS)))
+    row11 = await UserMFA.filter(user_id=u11.id).first()
+    check("every concurrent failure is counted", row11.failed_attempts == mfa.MAX_FAILED_ATTEMPTS)
+    check("concurrent failures set the lockout", row11.lockout_until is not None)
 
     # Restore real time.
     time.time = _real_time

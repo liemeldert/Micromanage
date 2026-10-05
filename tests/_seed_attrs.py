@@ -1,11 +1,7 @@
-"""The device attribute bag a check-in reports, built as a fixture.
+"""Builds the device attribute bag a check-in reports, as a fixture for tests/verify_compliance_catalog.py.
 
-Shared by tests/verify_compliance_catalog.py and by the DEV ONLY preview seeder tools/seed_preview.py in the private
-parent workspace, so the seeded demo fleet and the curated Mac security checks cannot disagree. Pinning the checks to a
-realistic bag is what stops one passing against a key no device ever sends.
-
-Pure construction: no database, models, or yaml config. The one controller import is device_platform_category, the
-classifier the product itself uses, so the Mac / non-Mac split below cannot drift from the real one.
+The bag is realistic so a check cannot pass against a key no device ever sends. It uses the product's own
+device_platform_category for the Mac / non-Mac split, so the two cannot drift.
 """
 
 from controller.services.scoping import device_platform_category
@@ -14,7 +10,7 @@ MODEL_NAMES = {
     "MacBookPro18,3": "MacBook Pro (14-inch, 2021)",
     "MacBookAir15,2": "MacBook Air (15-inch, M2)",
     "MacBookPro17,1": "MacBook Pro (13-inch, M1)",
-    # Intel: the fleet's only non-Apple-silicon Mac, so SetFirmwarePassword has a real device to exercise.
+    # The fleet's only Intel Mac, so SetFirmwarePassword has a real device to exercise.
     "MacBookAir8,2": "MacBook Air (Retina, 13-inch, 2019)",
     "iPhone15,2": "iPhone 14 Pro",
     "iPhone14,5": "iPhone 13",
@@ -28,12 +24,8 @@ BUILDS = {
 
 
 def build_security_info(model, *, fv=True, firewall=True, passcode=True):
-    """The SecurityInfo sub-dictionary as each platform reports it.
-
-    A Mac nests the application firewall inside FirewallSettings and answers keys no other platform has: management
-    status, bootstrap token state, Secure Boot, SIP, the FileVault recovery-key flags. iPhones and iPads answer the
-    passcode keys and none of that.
-    """
+    """The SecurityInfo dictionary as each platform reports it. A Mac answers the FileVault, firewall, management, boot
+    and bootstrap token keys; iPhones and iPads answer only the passcode keys."""
     if device_platform_category(model) != "Mac":
         return {
             "PasscodePresent": passcode,
@@ -97,7 +89,7 @@ def build_attrs(model, osv, *, serial, name, supervised=True, fv=True, firewall=
         "SecurityInfo": build_security_info(
             model, fv=fv, firewall=firewall, passcode=passcode),
     }
-    # Macs only: the command catalog reads this to offer set_recovery_lock (Apple silicon) or set_firmware_password
+    # Macs only. The command catalog reads this to offer set_recovery_lock (Apple silicon) or set_firmware_password
     # (Intel). Left unset for iPhone/iPad and for the DEP placeholder, which has not reported anything yet.
     if apple_silicon is not None:
         a["IsAppleSilicon"] = apple_silicon

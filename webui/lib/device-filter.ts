@@ -1,9 +1,5 @@
-// One filter syntax for the device list and the command palette. "tag:quarantine model:MacBook broken screen"
-// narrows by tag and model and searches the rest as free text. A value may be quoted when it contains spaces, a
-// space after the colon is allowed, and unknown keys stay in the free text rather than being dropped.
-//
-// parseDeviceQuery and formatDeviceQuery are inverses over the filters, so formatting a parsed query gives the
-// same filters back in DEVICE_FILTER_KEYS order.
+// One filter syntax for the device list and the command palette. "tag:quarantine model:MacBook broken screen" narrows
+// by tag and model and searches the rest as free text. A value may be quoted; unknown keys stay in the free text.
 
 export const DEVICE_FILTER_KEYS = ["tag", "group", "model", "os", "state"] as const;
 

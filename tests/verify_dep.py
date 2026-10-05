@@ -18,20 +18,18 @@ from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.serialization import Encoding, pkcs7
 from tortoise import Tortoise
 
+from tests._verify_harness import LogCapture, make_check, SqlSpy
+
 os.environ.setdefault("JWT_SECRET", "test-secret-for-dep-verify")
 os.environ.setdefault("PUBLIC_API_URL", "https://mdm.example.com")
 
 _FAILURES = []
 
-
-def check(name, cond):
-    print(f"  [{'PASS' if cond else 'FAIL'}] {name}")
-    if not cond:
-        _FAILURES.append(name)
+check = make_check(_FAILURES)
 
 
 async def settle(predicate, timeout=5.0, interval=0.01):
-    """Poll until a fire-and-forget effect lands or timeout expires."""
+    """Poll until a fire-and-forget effect completes or timeout expires."""
     deadline = time.monotonic() + timeout
     while True:
         if await predicate():
@@ -203,6 +201,23 @@ def _apple_style_smime(der):
     return (headers + body).encode()
 
 
+def _mkcert(cn, issuer_cn=None, issuer_key=None, ca=False):
+    import datetime
+    from cryptography.x509.oid import NameOID
+    from cryptography.hazmat.primitives.asymmetric import rsa
+
+    key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    b = (x509.CertificateBuilder()
+         .subject_name(x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, cn)]))
+         .issuer_name(x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, issuer_cn or cn)]))
+         .public_key(key.public_key()).serial_number(x509.random_serial_number())
+         .not_valid_before(datetime.datetime(2019, 1, 1))
+         .not_valid_after(datetime.datetime(2029, 1, 1)))
+    if ca:
+        b = b.add_extension(x509.BasicConstraints(ca=True, path_length=None), critical=True)
+    return b.sign(issuer_key or key, hashes.SHA256()), key
+
+
 def _synthetic_apple_cms_der(serial, anchor_path, tamper=False, untrusted=False):
     """The raw CMS SignedData DER a token-based ADE device POSTs as its request body: a MachineInfo plist signed by a
     synthetic root->intermediate->device chain, with the root written out as an anchor PEM (unless untrusted)."""
@@ -214,26 +229,9 @@ def _synthetic_apple_cms_der(serial, anchor_path, tamper=False, untrusted=False)
 def _synthetic_apple_cms(serial, anchor_path, tamper=False, untrusted=False):
     """Build a base64 x-apple-aspen-deviceinfo header signed by a synthetic root->intermediate->device chain, and write
     the root as an anchor PEM (unless untrusted). Returns the base64 header string."""
-    import datetime
-    from cryptography import x509
-    from cryptography.x509.oid import NameOID
-    from cryptography.hazmat.primitives.asymmetric import rsa
-
-    def mkcert(cn, issuer_cn=None, issuer_key=None, ca=False):
-        key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
-        b = (x509.CertificateBuilder()
-             .subject_name(x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, cn)]))
-             .issuer_name(x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, issuer_cn or cn)]))
-             .public_key(key.public_key()).serial_number(x509.random_serial_number())
-             .not_valid_before(datetime.datetime(2019, 1, 1))
-             .not_valid_after(datetime.datetime(2029, 1, 1)))
-        if ca:
-            b = b.add_extension(x509.BasicConstraints(ca=True, path_length=None), critical=True)
-        return b.sign(issuer_key or key, hashes.SHA256()), key
-
-    root, rk = mkcert("Test Apple Root CA", ca=True)
-    inter, ik = mkcert("Test iPhone Device CA", "Test Apple Root CA", rk, ca=True)
-    leaf, lk = mkcert(serial, "Test iPhone Device CA", ik)
+    root, rk = _mkcert("Test Apple Root CA", ca=True)
+    inter, ik = _mkcert("Test iPhone Device CA", "Test Apple Root CA", rk, ca=True)
+    leaf, lk = _mkcert(serial, "Test iPhone Device CA", ik)
     mi = _pl_dumps({"SERIAL": serial, "PRODUCT": "Mac14,2"})
     builder = pkcs7.PKCS7SignatureBuilder().set_data(mi).add_signer(leaf, lk, hashes.SHA256())
     for c in (inter, root):
@@ -253,27 +251,10 @@ def _synthetic_apple_cms(serial, anchor_path, tamper=False, untrusted=False):
 
 def _leaf_signed_cms(serial, anchor_path):
     """CMS signed by a forged cert chain: leaf is not a CA."""
-    import datetime
-    from cryptography import x509
-    from cryptography.x509.oid import NameOID
-    from cryptography.hazmat.primitives.asymmetric import rsa
-
-    def mkcert(cn, issuer_cn=None, issuer_key=None, ca=False):
-        key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
-        b = (x509.CertificateBuilder()
-             .subject_name(x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, cn)]))
-             .issuer_name(x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, issuer_cn or cn)]))
-             .public_key(key.public_key()).serial_number(x509.random_serial_number())
-             .not_valid_before(datetime.datetime(2019, 1, 1))
-             .not_valid_after(datetime.datetime(2029, 1, 1)))
-        if ca:
-            b = b.add_extension(x509.BasicConstraints(ca=True, path_length=None), critical=True)
-        return b.sign(issuer_key or key, hashes.SHA256()), key
-
-    root, rk = mkcert("Test Apple Root CA", ca=True)
-    inter, ik = mkcert("Test iPhone Device CA", "Test Apple Root CA", rk, ca=True)
-    leaf, lk = mkcert("VER-REALDEVICE", "Test iPhone Device CA", ik)
-    forged, fk = mkcert(serial, "VER-REALDEVICE", lk)
+    root, rk = _mkcert("Test Apple Root CA", ca=True)
+    inter, ik = _mkcert("Test iPhone Device CA", "Test Apple Root CA", rk, ca=True)
+    leaf, lk = _mkcert("VER-REALDEVICE", "Test iPhone Device CA", ik)
+    forged, fk = _mkcert(serial, "VER-REALDEVICE", lk)
     mi = _pl_dumps({"SERIAL": serial, "PRODUCT": "Mac14,2"})
     builder = pkcs7.PKCS7SignatureBuilder().set_data(mi).add_signer(forged, fk, hashes.SHA256())
     for c in (leaf, inter, root):
@@ -346,7 +327,7 @@ async def main():
 
     tenant = await Tenant.create(id="default", name="Default")
 
-    #  1) Link: begin_link -> (ABM) encrypt token -> complete_link
+    # 1) Link: begin_link -> (ABM) encrypt token -> complete_link
     print("1) link a DEP server (keypair + token decrypt + /account verify)")
     server = await dep_manager.begin_link(tenant, "abm")
     check("keypair generated + status awaiting_token",
@@ -387,7 +368,7 @@ async def main():
     check("account org captured", (server.account_detail or {}).get("org_name") == "Acme Inc")
     check("token expiry parsed", server.token_expires_at is not None)
 
-    # Token formats: S/MIME with MIME headers, raw DER, or base64 blob—all decrypt to same creds.
+    # Token formats: S/MIME with MIME headers, raw DER, or base64 blob. All decrypt to the same creds.
     _der = _envelope_token_der(server.public_cert_pem, token)
     import base64 as _b64
     for _label, _blob in (
@@ -417,7 +398,7 @@ async def main():
           and crypto_secrets.decrypt(
               server.token_enc, aad=dep_manager._binding("victim", "token")) is None)
 
-    #  2) Device sync -> placeholders (paged full fetch)
+    # 2) Device sync -> placeholders (paged full fetch)
     print("2) sync assigned devices into pending placeholders")
     summary = await dep_manager.sync_devices(server, transport=fake)
     check("sync ok", summary["ok"])
@@ -439,7 +420,7 @@ async def main():
     check("no duplicate devices after empty delta",
           await Device.filter(tenant=tenant).count() == 3)
 
-    #  3) Delta with a modified + deleted (placeholder) op
+    # 3) Delta with a modified + deleted (placeholder) op
     print("3) delta sync: modified + deleted")
     fake.sync_batches = [[
         {"serial_number": "SER-A", "model": "MacBookPro18,3", "op_type": "modified",
@@ -453,7 +434,7 @@ async def main():
     a = await Device.get(tenant=tenant, serial_number="SER-A")
     check("modified device profile_status updated", a.dep_profile_status == "pushed")
 
-    #  4) Push a DEP profile + assign; idempotent re-push
+    # 4) Push a DEP profile + assign; idempotent re-push
     print("4) push + assign an enrollment profile")
     enroll_url = "https://mdm.example.com/api/v1/dep/enroll/default"
     mapping = await dep_manager.push_profile(server, "zero-touch", enroll_url, transport=fake)
@@ -515,7 +496,7 @@ async def main():
         check(f"FLAGS_INVALID guard: {_label} -> {'refused' if _want else 'accepted'}",
               refused is _want)
 
-    #  5) Default-profile auto-assign on newly-synced devices
+    # 5) Default-profile auto-assign on newly-synced devices
     print("5) default profile auto-assigns to new devices")
     server.default_profile_id = "zero-touch"
     await server.save()
@@ -526,7 +507,7 @@ async def main():
     check("new device auto-assigned the default profile",
           "SER-D" in fake.assigned.get("PUUID-1", []) and d.dep_profile_status == "assigned")
 
-    #  6) enrollment_source scope condition
+    # 6) enrollment_source scope condition
     print("6) enrollment_source scope condition")
     ade_dev = Device(tenant=tenant, serial_number="X", device_model="Mac14,2",
                      os_version="14", attributes={"enrollment_source": "ade"}, groups=[], tags=[])
@@ -537,7 +518,7 @@ async def main():
     check("OTA/unknown device does NOT match (defaults to ota)",
           not scoping.evaluate_condition(ota_dev, cond, []))
 
-    #  7) release_device node -> DeviceConfigured via audited path
+    # 7) release_device node -> DeviceConfigured via audited path
     print("7) release_device sends DeviceConfigured")
     FakeConnector.sent = []
     enrolled = await Device.create(tenant=tenant, udid="UDID-REL", serial_number="SER-A",
@@ -560,7 +541,7 @@ async def main():
     check("device_configured audit task recorded",
           await Task.filter(tenant=tenant, type="device_configured").count() == 1)
 
-    #  7b) ADE endpoint: requires the per-tenant token, pre-stamps enrollment_source
+    # 7b) ADE endpoint: requires the per-tenant token, pre-stamps enrollment_source
     print("7b) ADE enroll endpoint requires the per-tenant token")
     os.environ["MDM_TOPIC"] = "com.apple.mgmt.External.test"
     os.environ["SCEP_CHALLENGE"] = "test-challenge"
@@ -630,7 +611,7 @@ async def main():
           len(_q.get("tsig", [])) == 1
           and enroll_svc.verify_tenant_url_token("default", _q["tsig"][0]))
 
-    #  7c) ADE MachineInfo CMS signature verification
+    # 7c) ADE MachineInfo CMS signature verification
     print("7c) Apple CA signature verification (CMS)")
     import tempfile as _tf
     from controller.services import dep_verify
@@ -760,37 +741,16 @@ async def main():
     check("an unverified request cannot downgrade a recorded verification",
           (kept_ade.attributes or {}).get("ade_signature_verified") is True)
 
-    #  7d) the sync device upsert is one query per SYNC, not per record
+    # 7d) the sync device upsert is one query per SYNC, not per record
     print("7d) first-full-sync upsert reads devices once, not once per record")
     # sync_devices uses a prefetched serial->Device map instead of per-serial queries (optimization only).
     from tortoise import connections
 
     dep_conn = connections.get("default")
-    seen_sql = []
-
-    class _SqlSpy:
-        def __enter__(self):
-            self._q, self._qd = dep_conn.execute_query, dep_conn.execute_query_dict
-
-            async def spy_q(sql, values=None):
-                seen_sql.append(sql)
-                return await self._q(sql, values)
-
-            async def spy_qd(sql, values=None):
-                seen_sql.append(sql)
-                return await self._qd(sql, values)
-
-            seen_sql.clear()
-            dep_conn.execute_query, dep_conn.execute_query_dict = spy_q, spy_qd
-            return self
-
-        def __exit__(self, *exc):
-            dep_conn.execute_query, dep_conn.execute_query_dict = self._q, self._qd
-            return False
+    spy = SqlSpy(dep_conn)
 
     def _device_selects():
-        return [s for s in seen_sql
-                if s.lstrip().upper().startswith("SELECT") and '"devices"' in s]
+        return spy.selects("devices")
 
     # The default profile was set in section 5; an auto-assign pass would add its own device reads to the count below,
     # which section 7f measures separately.
@@ -802,15 +762,14 @@ async def main():
                  "op_type": "added", "op_date": op_date} for i in range(n)]
 
     fake.sync_batches = [batch("M7A", 5)]
-    with _SqlSpy():
+    with spy:
         small = await dep_manager.sync_devices(server, transport=fake)
     small_selects = len(_device_selects())
     fake.sync_batches = [batch("M7B", 20)]
-    with _SqlSpy():
+    with spy:
         big = await dep_manager.sync_devices(server, transport=fake)
     big_selects = len(_device_selects())
-    check(f"5 and 20 new serials cost the same number of device reads "
-          f"({small_selects} and {big_selects})",
+    check(f"5 and 20 new serials cost the same number of device reads ({small_selects} and {big_selects})",
           small_selects == big_selects == 1)
     check("...and both syncs actually created their rows",
           small["added"] == 5 and big["added"] == 20)
@@ -826,7 +785,7 @@ async def main():
     degraded, degraded_error, degraded_selects = {}, None, 0
     try:
         dep_manager._prefetch_devices_by_serial = _boom
-        with _SqlSpy():
+        with spy:
             # Caught rather than left to escape: a prefetch the sync cannot do without has to read as a failed check,
             # not as a traceback that takes the rest of the suite with it.
             try:
@@ -836,8 +795,7 @@ async def main():
         degraded_selects = len(_device_selects())
     finally:
         dep_manager._prefetch_devices_by_serial = real_prefetch
-    check(f"a failed prefetch still completes the sync with the same counts "
-          f"({degraded_error})",
+    check(f"a failed prefetch still completes the sync with the same counts ({degraded_error})",
           degraded_error is None and degraded.get("ok")
           and degraded.get("added") == big["added"] == 20)
     check(f"...by falling back to one query per record ({degraded_selects})",
@@ -920,7 +878,7 @@ async def main():
     check("the map is keyed case-sensitively, like the column",
           "m7-case" in case_map and "M7-CASE" not in case_map)
 
-    #  7e) every serial-list endpoint splits on Apple's 1000-device ceiling
+    # 7e) every serial-list endpoint splits on Apple's 1000-device ceiling
     print("7e) serial lists are chunked at 1000 devices per request")
     # Apple requests are capped at 1000 devices; large syncs must chunk the list.
     from controller.services.dep_client import MAX_DEVICES_PER_REQUEST
@@ -928,8 +886,7 @@ async def main():
     fake.batch_sizes = []
     chunk_out = await dep_manager.assign_profile(server, "zero-touch", many,
                                                  enroll_url, transport=fake)
-    check(f"2500 serials assigned in batches of at most {MAX_DEVICES_PER_REQUEST} "
-          f"({fake.batch_sizes})",
+    check(f"2500 serials assigned in batches of at most {MAX_DEVICES_PER_REQUEST} ({fake.batch_sizes})",
           fake.batch_sizes == [1000, 1000, 500])
     check("...and every serial's result survives the merge",
           len(chunk_out["results"]) == 2500
@@ -972,12 +929,11 @@ async def main():
     applied = fake.assigned.get("PUUID-1", [])
     check(f"a failing batch propagates the error ({mid_batch_error})",
           mid_batch_error is not None and mid_batch_error.code == "DEVICE_NOT_ASSIGNED")
-    check(f"...with the batches before it already applied and none after "
-          f"({len(applied)} serials)",
+    check(f"...with the batches before it already applied and none after ({len(applied)} serials)",
           applied == many[:1000])
     fake.error_queue = []
 
-    #  7f) per-serial assignment results are recorded, not discarded
+    # 7f) per-serial assignment results are recorded, not discarded
     print("7f) FAILED / NOT_ACCESSIBLE / THROTTLED results land on the device row")
     # Apple answers per serial, and with X-Server-Protocol-Version 9+ a throttled device reports THROTTLED; version 10+
     # adds retry_after_seconds. Only SUCCESS may stamp the profile onto the row.
@@ -1017,18 +973,16 @@ async def main():
                             attributes={}, groups=[], tags=[])
     fake.assign_results = {}
     fake.assign_retry_after = None
-    with _SqlSpy():
+    with spy:
         await dep_manager._assign_and_record(server, "PUUID-1", bulk, res_client)
     all_ok_selects = len(_device_selects())
     fake.assign_results = {s: "FAILED" for s in bulk[:3]}
-    with _SqlSpy():
+    with spy:
         await dep_manager._assign_and_record(server, "PUUID-1", bulk, res_client)
     three_bad_selects = len(_device_selects())
-    check(f"20 serials cost one batched device read, not one per serial "
-          f"({all_ok_selects})",
+    check(f"20 serials cost one batched device read, not one per serial ({all_ok_selects})",
           all_ok_selects == 1)
-    check(f"...and only a row whose record changes is re-read before its write "
-          f"({three_bad_selects} for 3 failures)",
+    check(f"...and only a row whose record changes is re-read before its write ({three_bad_selects} for 3 failures)",
           three_bad_selects == 4)
 
     fake.assign_results = {}
@@ -1039,7 +993,7 @@ async def main():
           retried.dep_profile_status == "assigned"
           and "dep_assign_result" not in (retried.attributes or {}))
 
-    #  7g) unassign only marks locally what Apple actually cleared
+    # 7g) unassign only marks locally what Apple actually cleared
     print("7g) unassign writes the local 'removed' only where Apple cleared the profile")
     for s in ("UN-OK", "UN-NO"):
         await Device.create(tenant=tenant, udid=None, serial_number=s,
@@ -1059,7 +1013,7 @@ async def main():
           and un_results["UN-NO"] == "FAILED")
     fake.clear_results = {}
 
-    #  7h) cursor lifecycle: exhausted, aged out, and an unfinished pagination
+    # 7h) cursor lifecycle: exhausted, aged out, and an unfinished pagination
     print("7h) cursor handling: EXHAUSTED_CURSOR, the 7-day age, paging backstop")
     from datetime import timedelta as _timedelta
     await server.refresh_from_db()
@@ -1137,8 +1091,9 @@ async def main():
     server.cursor_fetched_at = None
     await server.save()
 
-    # Apple sets cursor size to 1000 hex chars max (https://developer.apple.com/documentation/devicemanagement/fetchdevicerequest).
-    # Too-narrow column silently drops the cursor, breaking deltas on the next tick.
+    # Apple sets cursor size to 1000 hex chars max
+    # (https://developer.apple.com/documentation/devicemanagement/fetchdevicerequest). Too-narrow column silently drops
+    # the cursor, breaking deltas on the next tick.
     long_cursor = "a1b2" * 250
     server.sync_cursor = long_cursor
     server.cursor_fetched_at = dep_manager._now()
@@ -1153,7 +1108,7 @@ async def main():
     server.cursor_fetched_at = None
     await server.save()
 
-    #  7i) duplicate serials resolve by real timestamp, not string order
+    # 7i) duplicate serials resolve by real timestamp, not string order
     print("7i) op_date duplicates resolve chronologically")
     # ISO 8601 with timezones doesn't sort lexicographically; Apple resolves by latest op_date.
     fake.sync_batches = [[
@@ -1176,7 +1131,7 @@ async def main():
           dep_manager._op_date_at_least("3", "1")
           and dep_manager._op_date_at_least("1", "3"))
 
-    #  7j) the undocumented 403 re-auth heuristic is matched exactly
+    # 7j) the undocumented 403 re-auth heuristic is matched exactly
     print("7j) 403 re-auth matches FORBIDDEN case-sensitively")
     # 403 re-auth: nanodep matches "FORBIDDEN" exactly to avoid false matches (proxy pages, etc).
     from controller.services.dep_client import DepAuthError, DepClient as _DepClient
@@ -1208,19 +1163,11 @@ async def main():
         check(f"403 body {_label}: {'re-authenticates' if _want_sessions == 2 else 'does not re-authenticate'}",
               sessions == _want_sessions)
 
-    #  7k) an unrecognized skip key is dropped loudly, not silently
+    # 7k) an unrecognized skip key is dropped loudly, not silently
     print("7k) dropped skip_setup_items keys are logged with their names")
     import logging as _logging
 
-    class _Capture(_logging.Handler):
-        def __init__(self):
-            super().__init__(level=_logging.WARNING)
-            self.messages = []
-
-        def emit(self, record):
-            self.messages.append(record.getMessage())
-
-    cap = _Capture()
+    cap = LogCapture(level=_logging.WARNING)
     dep_log = _logging.getLogger("controller.services.dep_manager")
     dep_log.addHandler(cap)
     try:
@@ -1234,7 +1181,7 @@ async def main():
     check("...and the recognized keys are still sent",
           skipped["skip_setup_items"] == ["AppleID", "Passcode"])
 
-    #  8) unlink wipes secrets
+    # 8) unlink wipes secrets
     print("8) unlink wipes secret material")
     await dep_manager.unlink(server)
     await server.refresh_from_db()
@@ -1242,7 +1189,7 @@ async def main():
           server.token_enc is None and server.private_key_enc is None
           and server.status == "unlinked")
 
-    #  9) remove fully deletes an unfinished connection
+    # 9) remove fully deletes an unfinished connection
     print("9) remove deletes the row, its profiles, and clears device linkage")
     scratch = await dep_manager.begin_link(tenant, "scratch")
     await DepProfile.create(tenant=tenant, dep_server=scratch, profile_id="p1")

@@ -22,7 +22,7 @@ export class ApiError extends Error {
 // rather than leave the page toasting errors.
 function handleUnauthorized(path: string) {
     if (typeof window === "undefined") return;
-    // login, discover, password-change, and MFA-verify all legitimately 401 on bad input; elsewhere it means dead session.
+    // login, discover, password-change and MFA-verify answer 401 for bad input; anywhere else it means a dead session.
     if (
         path.startsWith("/api/v1/auth/login") ||
         path.startsWith("/api/v1/auth/discover") ||
@@ -91,7 +91,7 @@ async function request<T>(
 }
 
 // Config documents editable through the validated PUT, with version history. "config" is readable but not editable,
-// since it embeds secrets. Kept in sync with the controller allow-list (controller/api/main.py).
+// since it embeds secrets. Kept in sync with the controller allow-list (controller/api/routes/config.py).
 export type EditableConfigType = "groups" | "apps" | "profiles" | "tags" | "flows" | "dispatcher" | "declarations";
 export type ReadableConfigType = EditableConfigType | "config";
 
@@ -695,7 +695,7 @@ export const api = {
         return {...data, version: res.headers.get(CONFIG_VERSION_HEADER) ?? null};
     },
 
-    //  Dispatcher (compliance)
+    // == Dispatcher (compliance) ==
     getDispatcherCheckCatalog(token: string) {
         return request<{ checks: DispatcherCheckSpec[] }>("/api/v1/dispatcher/check-catalog", token);
     },
@@ -779,7 +779,7 @@ export const api = {
         return request<TenantInfo>("/api/v1/tenant", token);
     },
 
-    //  FileVault recovery-key escrow (admin only)
+    // == FileVault recovery-key escrow (admin only) ==
     getFileVaultEscrow(token: string) {
         return request<FileVaultEscrowStatus>("/api/v1/tenant/filevault-escrow", token);
     },
@@ -807,6 +807,21 @@ export const api = {
             throw new ApiError(res.status, detail);
         }
         return res.text();
+    },
+
+    // == Enrollment profile signing identity (admin only). The private key is write-only. ==
+    getProfileSigning(token: string) {
+        return request<ProfileSigningStatus>("/api/v1/tenant/profile-signing", token);
+    },
+    // Files are sent as base64: a Keychain Access .p12 export and optional DER .cer intermediates.
+    importProfileSigning(token: string, body: { p12_b64: string; password: string; intermediates_b64: string[] }) {
+        return request<ProfileSigningStatus>("/api/v1/tenant/profile-signing", token, {
+            method: "POST",
+            body: JSON.stringify(body),
+        });
+    },
+    deleteProfileSigning(token: string) {
+        return request<ProfileSigningStatus>("/api/v1/tenant/profile-signing", token, {method: "DELETE"});
     },
 
     // Update tenant settings (admin only). Any omitted field is left unchanged.
@@ -919,7 +934,7 @@ export const api = {
             actor?: string;
             target_type?: string;
             target_id?: string;
-            // true for system rows (no human); false for person-written; omitted for both. Test undefined, not truthiness.
+            // true for system rows, false for rows a person wrote, omitted for both; check undefined, not truthiness.
             system?: boolean;
             // ISO-8601 datetimes (inclusive at both ends).
             since?: string;
@@ -937,7 +952,7 @@ export const api = {
         );
     },
 
-    //  Automated Device Enrollment (ADE/DEP) + ABM/ASM
+    // == Automated Device Enrollment (ADE/DEP) + ABM/ASM ==
     listDepServers(token: string) {
         return request<{ servers: DepServer[] }>("/api/v1/dep/servers", token);
     },
@@ -1028,7 +1043,7 @@ export const api = {
         return request<{ skip_keys: DepSkipKey[] }>("/api/v1/dep/skip-keys", token);
     },
 
-    //  Declarative Device Management (DDM)
+    // == Declarative Device Management (DDM) ==
     // Device DDM state (desired vs reported, sync status, drift); include_payloads returns payloads.
     getDeviceDdm(token: string, deviceId: string, includePayloads = false) {
         const qs = includePayloads ? "?include_payloads=1" : "";
@@ -1051,7 +1066,7 @@ export const api = {
     },
 };
 
-//  Types
+// == Types ==
 
 export interface DiscoveredTenant {
     tenant_id: string;
@@ -1113,7 +1128,8 @@ export interface ConfigVersion {
 export interface DeviceSecret {
     id: string;
     device_id: string;
-    kind: string;         // managed_admin_password | firmware_password | recovery_lock | filevault_prk
+    // managed_admin_password, firmware_password, recovery_lock, filevault_prk, activation_lock_bypass_code
+    kind: string;
     kind_label: string;
     label: string | null;
     // Lifecycle bookkeeping (non-secret or ciphertext, never plaintext).
@@ -1195,6 +1211,7 @@ export interface Device {
     poll_interval_minutes: number;
     // Name the tenant's naming template would produce (detail endpoint only).
     suggested_name?: string | null;
+    bootstrap_token_escrowed?: boolean;
     // Full device-reported state (DeviceInformation QueryResponses, SecurityInfo). Detail endpoint only.
     attributes?: Record<string, unknown>;
     // Most recent failed task for this device (detail endpoint only), so a failed deployment can show its reason
@@ -1346,7 +1363,7 @@ export interface EnrollmentAttempt {
     created_at: string | null;
 }
 
-//  ADE/DEP and ABM/ASM. No token or key material is ever in here.
+// == ADE/DEP and ABM/ASM. No token or key material is ever in here. ==
 export type DepServerStatus = "unlinked" | "awaiting_token" | "linked" | "error";
 
 // FileVault recovery-key escrow keypair. key_decrypts null until checked, false when key doesn't match.
@@ -1355,6 +1372,19 @@ export interface FileVaultEscrowStatus {
     cert_pem: string | null;
     cert_expires_at: string | null;
     fingerprint_sha256: string | null;
+    key_decrypts: boolean | null;
+}
+
+// Enrollment profile signing certificate. subject, issuer and expires_at are null when not configured.
+export interface ProfileSigningStatus {
+    configured: boolean;
+    subject: string | null;
+    issuer: string | null;
+    expires_at: string | null;
+    expired: boolean;
+    chain_count: number;
+    self_signed: boolean;
+    // null when nothing is configured; false when the stored key does not decrypt, so profiles go out unsigned.
     key_decrypts: boolean | null;
 }
 
@@ -1628,17 +1658,16 @@ export interface User {
     external_id: string | null;
 }
 
-//  ATC flow types
+// == ATC flow types ==
 
 export interface FlowNodeParamSpec {
     name: string;
     label: string;
-    // tags | profile_ids | app_ids | name_template | condition | command |
-    // command_params | signal | int | string
+    // tags | profile_ids | app_ids | name_template | condition | command | command_params | signal | int | string
     type: string;
     required?: boolean;
     help?: string;
-    // Warns the editor to say this value lands in plain-text, versioned yaml.
+    // Marks a credential, which is stored in plain-text, versioned yaml.
     secret?: boolean;
     // scope rides along on the start node's trigger options, which are the start kinds.
     options?: { value: string; label: string; description?: string; scope?: string }[];
@@ -1759,7 +1788,7 @@ export interface FlowRunDetail extends FlowRunSummary {
     flow_source?: FlowSource;
 }
 
-//  flows.yaml document shape (authored by the visual editor)
+// == flows.yaml document shape (authored by the visual editor) ==
 
 export interface FlowNode {
     id: string;
@@ -1894,7 +1923,7 @@ export interface FlowWarning {
     message: string;
 }
 
-//  Dispatcher (compliance) types
+// == Dispatcher (compliance) types ==
 
 export interface DispatcherCheckParamSpec {
     name: string;

@@ -5,7 +5,6 @@ The user API, ATC flows and Dispatcher remediation all send commands through her
 
 import logging
 import re
-from datetime import datetime, timezone
 from typing import Any, Dict, Optional, Tuple
 
 from controller.auth import DESTRUCTIVE_COMMANDS
@@ -14,8 +13,8 @@ from controller.services import crypto_secrets, device_secrets
 from controller.services.command_catalog import (
     build_generic_fields,
     get_command,
+    public_params,
     retirement_reason,
-    secret_param_names,
     unsupported_reason,
 )
 from controller.services.mdm_connector import MDMConnector
@@ -60,6 +59,14 @@ async def _ddm_sync(device: Device, connector: MDMConnector) -> Dict[str, Any]:
     return await ddm_manager.enqueue_sync_command(device, connector)
 
 
+def build_activation_lock_bypass_code_command(
+    connector: Optional[MDMConnector] = None,
+) -> Tuple[bytes, str]:
+    """Build the ActivationLockBypassCode command plist."""
+    conn = connector or MDMConnector()
+    return conn._create_command_plist("ActivationLockBypassCode")
+
+
 def _automation_source(user: str) -> Tuple[str, Optional[str]]:
     """Split the actor string into the subsystem that acted and what inside it.
 
@@ -87,8 +94,7 @@ async def _record_automated_command(
 ) -> None:
     """Write the audit row for a command a flow or a rule sent, machine-attributed via source / source_ref.
 
-    Best-effort and swallowing: this runs beside a command that already went out, and failing to describe it
-    must never undo it.
+    Best-effort: swallows its own errors, since the command has already been sent.
     """
     from controller.services import audit
 
@@ -136,8 +142,7 @@ async def dispatch_catalog_command(
 ) -> Dict[str, Any]:
     """Send a catalog command to a device, audited, with a Task to track it.
 
-    Audit boundary: sent, failed and refused each write one row. caller_audits is for the API endpoint, which
-    writes its own row; every other caller leaves it False and is audited here by default.
+    Sent, failed and refused each write one audit row; the API endpoint sets caller_audits and writes its own.
     """
     try:
         outcome = await _dispatch(
@@ -183,10 +188,9 @@ async def _dispatch(
     rts_payload: Optional[Dict[str, Any]] = None,
     mdm_connector: Optional[MDMConnector] = None,
 ) -> Dict[str, Any]:
-    """Send a catalog command to a device with a secret-redacted Task audit.
+    """Send a catalog command to a device with a secret-redacted Task audit; returns task_id, result and command_uuid.
 
-    Returns {"task_id", "result", "command_uuid"}. DESTRUCTIVE_COMMANDS need allow_destructive, set only by the
-    API endpoint after its admin-role check; without it, raises CommandNotAllowed.
+    A DESTRUCTIVE_COMMANDS entry raises CommandNotAllowed unless allow_destructive is set.
     """
     params = params or {}
     entry = get_command(command_type)
@@ -300,6 +304,11 @@ async def _dispatch(
             "clear_passcode": lambda: connector.clear_passcode(device.udid, unlock_token),
             "rotate_filevault_key": lambda: connector.rotate_filevault_key(
                 device.udid, params.get("password") or "", fv_reply_cert),
+            "fetch_activation_lock_bypass_code": lambda: (
+                connector.fetch_activation_lock_bypass_code(device.udid)
+                if hasattr(connector, "fetch_activation_lock_bypass_code")
+                else connector.send_raw_command(device.udid, "ActivationLockBypassCode", {})
+            ),
             # Routed through ddm_manager, not a bare DeclarativeManagement command, so ddm_enabled_at /
             # ddm_last_published_token bookkeeping stays correct.
             "ddm_sync": lambda: _ddm_sync(device, connector),
@@ -317,8 +326,7 @@ async def _dispatch(
             handler = lambda: connector.send_raw_command(device.udid, request_type, fields)  # noqa: E731
 
         # Audit who ran what, minus the secrets and PINs.
-        redacted = secret_param_names(entry) | {"pin"}
-        audit_details = {k: v for k, v in params.items() if k not in redacted}
+        audit_details = public_params(entry, params)
         audit_details.update(extra_details)
         task = await TaskManager().create_task(
             tenant=tenant,
@@ -340,14 +348,9 @@ async def _dispatch(
                 # distinguishable from a down push channel.
                 task.details["push_failed"] = True
                 task.details["push_errors"] = result.get("push_errors") or {}
-            task.status = "running"
-            await task.save()
+            await task.mark_sent(result.get("command_uuid"))
         except Exception as exc:
-            task.status = "failed"
-            task.error = str(exc)
-            # Terminal outside update_progress, so stamp what retention keys on.
-            task.completed_at = datetime.now(timezone.utc)
-            await task.save()
+            await task.mark_push_failed(str(exc))
             if lock_change is not None:
                 # Nothing reached the Mac, so nothing about its lock changed.
                 await device_secrets.abort_lock_change(lock_change)
@@ -380,9 +383,7 @@ async def _plan_lock(device: Device, command_type: str, params: Dict[str, Any],
                      *, user: str):
     """Decide how to escrow an ad-hoc lock change, and fill in CurrentPassword.
 
-    A lost firmware password or unknown recovery lock strands the Mac, so an ad-hoc change is escrowed exactly
-    as a flow's is; a blank current_password falls back to the escrowed value. Raises CommandError (a plain
-    400) before any task exists and with nothing sent.
+    A blank current_password falls back to the escrow. Raises CommandError before any task exists, with nothing sent.
     """
     try:
         change = await device_secrets.plan_lock_change(
@@ -408,8 +409,7 @@ async def _fill_verify_password(device: Device, command_type: str,
                                 params: Dict[str, Any]):
     """Let a Verify command run against the escrowed password by default.
 
-    Returns the params to send and whether the password came from the escrow, which is what tells
-    device_secrets.reconcile_command_ack that the device's answer is about the stored value rather than a typed string.
+    Returns the params to send and whether the password came from the escrow (reconcile_command_ack reads that flag).
     """
     if str(params.get("password") or "").strip():
         return params, False
@@ -443,10 +443,9 @@ async def _unlock_token_for(device: Device) -> bytes:
 
 async def _plan_filevault_rotation(device: Device, tenant: Tenant,
                                    params: Dict[str, Any]):
-    """Fill in the FileVault unlock value and the reply certificate.
+    """Fill in the FileVault unlock value (the escrowed recovery key when password is blank) and the reply certificate.
 
-    A blank password falls back to the escrowed recovery key (the ordinary case). Refuses before any task
-    exists when the tenant has no escrow keypair or there is no recovery key to unlock with.
+    Raises CommandError before any task exists when the tenant has no escrow keypair or no recovery key is available.
     """
     from controller.services import filevault_escrow
     reply_cert = filevault_escrow.certificate_der(tenant)

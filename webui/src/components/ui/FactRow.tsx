@@ -1,8 +1,5 @@
-// One label-and-value line in a fact table. Shared so the device pages, the peek modals and anything else showing
-// inventory all lay a fact out the same way and a change to the layout lands in one place.
-//
-// Pass `value` for a plain value and it renders through Value, which makes it copyable. Pass children for anything
-// that is not text: a badge, a progress bar, a link, several values in a row.
+// One label-and-value line in a fact table. Pass value for plain text (rendered through Value, so copyable) or
+// children for anything else, such as a badge, a progress bar or a link.
 
 import {Box, Group, Text} from "@mantine/core";
 import type {ReactNode} from "react";

@@ -51,9 +51,8 @@ def _pooled_url(url: str) -> str:
         minsize = DB_POOL_MIN
         if maxsize is not None and minsize > maxsize:
             logging.getLogger(__name__).warning(
-                "pool minimum %s is above the configured maximum %s; using %s for both. asyncpg refuses "
-                "min_size > max_size and the process would restart forever. Raise DB_POOL_MAX_SIZE if you meant the "
-                "minimum.",
+                "pool minimum %s is above the configured maximum %s; using %s for both. asyncpg refuses min_size > "
+                "max_size and the process would restart forever. Raise DB_POOL_MAX_SIZE if you meant the minimum.",
                 minsize, maxsize, maxsize,
             )
             minsize = maxsize
@@ -98,8 +97,8 @@ _AUX_DDL = [
     'ALTER TABLE "devices" ADD COLUMN IF NOT EXISTS "dep_profile_uuid" VARCHAR(64) NULL',
     'ALTER TABLE "devices" ADD COLUMN IF NOT EXISTS "dep_profile_status" VARCHAR(30) NULL',
     'ALTER TABLE "devices" ADD COLUMN IF NOT EXISTS "dep_last_synced_at" TIMESTAMPTZ NULL',
-    # DepServer.sync_cursor widened from VARCHAR(255) to TEXT: Apple allows up to 1000 characters here and an
-    # over-long cursor silently fell back to a full fleet fetch every tick.
+    # Converts the DepServer.sync_cursor column to TEXT if it has another type. Apple allows a cursor of up to 1000
+    # characters, and saving one that does not fit fails, so the stored cursor never advances.
     # https://developer.apple.com/documentation/devicemanagement/fetchdevicerequest
     "DO $$\n"
     "BEGIN\n"
@@ -114,15 +113,15 @@ _AUX_DDL = [
     "END\n"
     "$$",
     # ATC: a run's entry node and the event that started it (run identity is device, flow_id, start_node). See
-    # models.py and the doc for why flow_id leads and why two indexes.
+    # models.tenant.FlowRun.
     'ALTER TABLE "flow_runs" ADD COLUMN IF NOT EXISTS "start_node" VARCHAR(100) NULL',
     'ALTER TABLE "flow_runs" ADD COLUMN IF NOT EXISTS "event_kind" VARCHAR(20) NULL',
     'CREATE INDEX IF NOT EXISTS "idx_flowruns_dev_flow_start_event" '
     'ON "flow_runs" (device_id, flow_id, start_node, event_kind, started_at)',
     'CREATE INDEX IF NOT EXISTS "idx_flowruns_tenant_flow_start_event_dev" '
     'ON "flow_runs" (tenant_id, flow_id, start_node, event_kind, device_id, started_at)',
-    # The pre-multi-flow pair the two above replace. Dropped after the creates, so a failed upgrade never leaves the
-    # table with neither.
+    # Drops the flow_runs indexes keyed without flow_id, since every lookup by start node also filters on flow_id.
+    # Listed after the creates, so a failed upgrade never leaves the table with neither.
     'DROP INDEX IF EXISTS "idx_flowruns_dev_start_event"',
     'DROP INDEX IF EXISTS "idx_flowruns_tenant_start_event_dev"',
     # Declarative Device Management (services.ddm_manager).
@@ -133,25 +132,21 @@ _AUX_DDL = [
     'ALTER TABLE "devices" ADD COLUMN IF NOT EXISTS "ddm_status" JSONB NOT NULL DEFAULT \'{}\'::jsonb',
     'ALTER TABLE "devices" ADD COLUMN IF NOT EXISTS "ddm_declaration_status" JSONB NOT NULL DEFAULT \'{}\'::jsonb',
     'ALTER TABLE "devices" ADD COLUMN IF NOT EXISTS "ddm_client_capabilities" JSONB NOT NULL DEFAULT \'{}\'::jsonb',
+    'ALTER TABLE "devices" ADD COLUMN IF NOT EXISTS "bootstrap_token_escrowed" BOOLEAN NOT NULL DEFAULT FALSE',
     # Plain UUID, no FK: the retention sweep deletes tasks, and a dangling pointer just means the attempt aged
     # out. See models.tenant.AppDeployment.
     'ALTER TABLE "app_deployments" ADD COLUMN IF NOT EXISTS "last_task_id" UUID NULL',
     'ALTER TABLE "profile_deployments" ADD COLUMN IF NOT EXISTS "last_task_id" UUID NULL',
     # Paces services.reconciler's retry backoff. NOT NULL DEFAULT 0, since the loop reads this on every row.
-    'ALTER TABLE "app_deployments" ADD COLUMN IF NOT EXISTS '
-    '"failed_attempts" INTEGER NOT NULL DEFAULT 0',
-    'ALTER TABLE "profile_deployments" ADD COLUMN IF NOT EXISTS '
-    '"failed_attempts" INTEGER NOT NULL DEFAULT 0',
+    'ALTER TABLE "app_deployments" ADD COLUMN IF NOT EXISTS "failed_attempts" INTEGER NOT NULL DEFAULT 0',
+    'ALTER TABLE "profile_deployments" ADD COLUMN IF NOT EXISTS "failed_attempts" INTEGER NOT NULL DEFAULT 0',
     # Device-reported version, which need not match what the deployment asked for. NULL means never
     # confirmed. TEXT because the device-supplied string length is not ours to promise.
-    'ALTER TABLE "app_deployments" ADD COLUMN IF NOT EXISTS '
-    '"reported_version" TEXT',
+    'ALTER TABLE "app_deployments" ADD COLUMN IF NOT EXISTS "reported_version" TEXT',
     # Who asked for a profile the device's own scope does not, written as remediation:<rule id>; NULL is the
     # ordinary scoped case. TEXT since a rule id is authored and unbounded. See models.tenant.ProfileDeployment.
-    'ALTER TABLE "profile_deployments" ADD COLUMN IF NOT EXISTS '
-    '"install_source" TEXT NULL',
-    'ALTER TABLE "app_deployments" ADD COLUMN IF NOT EXISTS '
-    '"install_source" TEXT NULL',
+    'ALTER TABLE "profile_deployments" ADD COLUMN IF NOT EXISTS "install_source" TEXT NULL',
+    'ALTER TABLE "app_deployments" ADD COLUMN IF NOT EXISTS "install_source" TEXT NULL',
     # Session cut-off for a password change (auth.dependencies). Null on every existing row, which reads as "never
     # changed" and refuses nothing.
     'ALTER TABLE "users" ADD COLUMN IF NOT EXISTS "password_changed_at" TIMESTAMPTZ NULL',
@@ -164,13 +159,12 @@ _AUX_DDL = [
     'UPDATE "tasks" SET "command_uuid" = "details"->>\'command_uuid\' '
     "WHERE \"command_uuid\" IS NULL AND \"details\"->>'command_uuid' IS NOT NULL",
     # Partial: tasks that never enqueued a command stay NULL and are never looked up this way.
-    'CREATE INDEX IF NOT EXISTS "idx_tasks_command_uuid" '
-    'ON "tasks" (command_uuid) WHERE command_uuid IS NOT NULL',
+    'CREATE INDEX IF NOT EXISTS "idx_tasks_command_uuid" ON "tasks" (command_uuid) WHERE command_uuid IS NOT NULL',
     # Task.dedup_key: the reconciler's duplicate-task key, mirrored the same way command_uuid is (see
     # models.tenant.task_dedup_key). TEXT not VARCHAR(n).
     'ALTER TABLE "tasks" ADD COLUMN IF NOT EXISTS "dedup_key" TEXT NULL',
-    # Backfill: matches only rows whose key SQL can reproduce identically (every component a JSON string). See
-    # the doc for why str() and ->> disagree otherwise, and how reconciler._unmirrored_task_keys covers the rest.
+    # Backfill: matches only rows whose key SQL can reproduce identically (every component a JSON string).
+    # reconciler._unmirrored_task_keys computes the key in Python for the rest.
     'UPDATE "tasks" SET "dedup_key" = CASE "type" '
     'WHEN \'profile_install\' THEN "details"->\'profile_info\'->>\'id\' '
     'WHEN \'profile_remove\' THEN "details"->>\'profile_id\' '
@@ -186,8 +180,8 @@ _AUX_DDL = [
     'OR ("type" = \'app_install\' '
     'AND jsonb_typeof("details"->\'app_info\'->\'app_id\') = \'string\' '
     'AND jsonb_typeof("details"->\'app_info\'->\'version\') = \'string\'))',
-    # Fixes legacy rows where installed_apps holds an object (from the old model default of {}) instead of the
-    # array Apple actually sends; nothing writes an object here now.
+    # Resets installed_apps to an empty array where it holds a JSON object, since the column holds Apple's
+    # InstalledApplicationList, which is an array.
     'UPDATE "devices" SET "installed_apps" = \'[]\'::jsonb '
     "WHERE jsonb_typeof(\"installed_apps\") = 'object'",
 
@@ -195,61 +189,64 @@ _AUX_DDL = [
     # Tortoise indexes only primary keys and unique_together, so every query below was a sequential scan.
     # Plain CREATE INDEX, not CONCURRENTLY.
 
-    # The device command list (api.main) and the pending-task cancel on checkout.
-    'CREATE INDEX IF NOT EXISTS "idx_tasks_device_created" '
-    'ON "tasks" (device_id, created_at DESC)',
+    # The device command list (api.routes.devices) and the pending-task cancel on checkout.
+    'CREATE INDEX IF NOT EXISTS "idx_tasks_device_created" ON "tasks" (device_id, created_at DESC)',
     # reconciler._active_task_keys / _fail_timed_out_tasks, the Tasks list page, and poller._prune_scheduled_tasks.
-    'CREATE INDEX IF NOT EXISTS "idx_tasks_tenant_status_created" '
-    'ON "tasks" (tenant_id, status, created_at)',
+    'CREATE INDEX IF NOT EXISTS "idx_tasks_tenant_status_created" ON "tasks" (tenant_id, status, created_at)',
     # dispatcher._active_alert and _recent_remediation_state run per (device, rule) for every rule on every evaluation,
     # so this one is per-check-in hot.
-    'CREATE INDEX IF NOT EXISTS "idx_alerts_device_rule_status" '
-    'ON "alerts" (device_id, rule_id, status)',
+    'CREATE INDEX IF NOT EXISTS "idx_alerts_device_rule_status" ON "alerts" (device_id, rule_id, status)',
     # The tenant alert list and the unresolved severity counts.
-    'CREATE INDEX IF NOT EXISTS "idx_alerts_tenant_status" '
-    'ON "alerts" (tenant_id, status)',
+    'CREATE INDEX IF NOT EXISTS "idx_alerts_tenant_status" ON "alerts" (tenant_id, status)',
     # ATC manual-gate alerts are looked up by rule_id alone (atc:gate:<run>).
     'CREATE INDEX IF NOT EXISTS "idx_alerts_rule" ON "alerts" (rule_id)',
-    # The fleet sweep every loop starts with: reconciler, poller, dispatcher, ATC schedule starts and the dashboard
-    # counts.
-    'CREATE INDEX IF NOT EXISTS "idx_devices_tenant_enrollstate" '
-    'ON "devices" (tenant_id, enrollment_state)',
+    # The fleet sweep each pass starts with (reconciler, poller, dispatcher, ATC schedule starts) and the per-state
+    # device counts in api.routes.devices.
+    'CREATE INDEX IF NOT EXISTS "idx_devices_tenant_enrollstate" ON "devices" (tenant_id, enrollment_state)',
     # atc.sweep_timeouts (waiting + deadline) and the orphaned-running recovery, both of which run per tenant on every
     # poll tick.
     'CREATE INDEX IF NOT EXISTS "idx_flowruns_tenant_status_deadline" '
     'ON "flow_runs" (tenant_id, status, wait_deadline)',
     # The fleet run list sorts newest-first across a whole tenant, so the index above, which leads with status, does not
     # serve it. Check-in triggered flows can add dozens of rows per device per day.
-    'CREATE INDEX IF NOT EXISTS "idx_flowruns_tenant_started" '
-    'ON "flow_runs" (tenant_id, started_at DESC)',
+    'CREATE INDEX IF NOT EXISTS "idx_flowruns_tenant_started" ON "flow_runs" (tenant_id, started_at DESC)',
     # The audit log query is tenant-scoped and always newest-first.
-    'CREATE INDEX IF NOT EXISTS "idx_auditlogs_tenant_created" '
-    'ON "audit_logs" (tenant_id, created_at DESC)',
+    'CREATE INDEX IF NOT EXISTS "idx_auditlogs_tenant_created" ON "audit_logs" (tenant_id, created_at DESC)',
     # webhook_handler._record_attempt does this lookup on the enrollment path, for exactly the devices that are already
     # failing repeatedly.
-    'CREATE INDEX IF NOT EXISTS "idx_enrollattempts_udid_outcome" '
-    'ON "enrollment_attempts" (udid, outcome)',
+    'CREATE INDEX IF NOT EXISTS "idx_enrollattempts_udid_outcome" ON "enrollment_attempts" (udid, outcome)',
     # reconciler._fail_timed_out_tasks looks deployments up by the task that was installing them. Partial, because a row
     # only has a pointer once something has tried to deploy it.
     'CREATE INDEX IF NOT EXISTS "idx_appdeploy_last_task" '
     'ON "app_deployments" (last_task_id) WHERE last_task_id IS NOT NULL',
     'CREATE INDEX IF NOT EXISTS "idx_profiledeploy_last_task" '
     'ON "profile_deployments" (last_task_id) WHERE last_task_id IS NOT NULL',
-    # Both deployment tables are read tenant-wide on every tick by the reconciler, dispatcher, and poller. See
-    # the doc for why status is the second column on the app one but not the profile one.
-    'CREATE INDEX IF NOT EXISTS "idx_appdeploy_tenant_status" '
-    'ON "app_deployments" (tenant_id, status)',
-    'CREATE INDEX IF NOT EXISTS "idx_profiledeploy_tenant" '
-    'ON "profile_deployments" (tenant_id)',
+    # Both deployment tables are read tenant-wide on every tick by the reconciler, dispatcher, and poller.
+    'CREATE INDEX IF NOT EXISTS "idx_appdeploy_tenant_status" ON "app_deployments" (tenant_id, status)',
+    'CREATE INDEX IF NOT EXISTS "idx_profiledeploy_tenant" ON "profile_deployments" (tenant_id)',
     # The daily retention sweep (services.task_manager.run_retention), whose cross-tenant deletes miss every
     # tenant-led index above. Status leads and this is composite, not partial.
-    'CREATE INDEX IF NOT EXISTS "idx_tasks_status_completed" '
-    'ON "tasks" (status, completed_at)',
-    'CREATE INDEX IF NOT EXISTS "idx_alerts_status_resolved" '
-    'ON "alerts" (status, resolved_at)',
-    'CREATE INDEX IF NOT EXISTS "idx_flowruns_status_started" '
-    'ON "flow_runs" (status, started_at)',
+    'CREATE INDEX IF NOT EXISTS "idx_tasks_status_completed" ON "tasks" (status, completed_at)',
+    'CREATE INDEX IF NOT EXISTS "idx_alerts_status_resolved" ON "alerts" (status, resolved_at)',
+    'CREATE INDEX IF NOT EXISTS "idx_flowruns_status_started" ON "flow_runs" (status, started_at)',
     'ALTER TABLE "tenants" ADD COLUMN IF NOT EXISTS "payload_identifier_prefix" VARCHAR(120) NULL',
+    'CREATE TABLE IF NOT EXISTS "service_tokens" ('
+    '    "id" UUID PRIMARY KEY,'
+    '    "tenant_id" VARCHAR(100) NOT NULL REFERENCES "tenants"("id") ON DELETE CASCADE,'
+    '    "name" VARCHAR(255) NOT NULL,'
+    '    "token_hash" VARCHAR(64) NOT NULL UNIQUE,'
+    '    "scopes" JSONB NOT NULL DEFAULT \'[]\'::jsonb,'
+    '    "expires_at" TIMESTAMPTZ NOT NULL,'
+    '    "last_used_at" TIMESTAMPTZ NULL,'
+    '    "revoked_at" TIMESTAMPTZ NULL,'
+    '    "created_at" TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,'
+    '    "created_by" VARCHAR(255) NULL'
+    ')',
+    'CREATE INDEX IF NOT EXISTS "idx_service_tokens_tenant_hash" ON "service_tokens" (tenant_id, token_hash)',
+    'ALTER TABLE "tenants" ADD COLUMN IF NOT EXISTS "profile_signing_cert_pem" TEXT NULL',
+    'ALTER TABLE "tenants" ADD COLUMN IF NOT EXISTS "profile_signing_key_enc" TEXT NULL',
+    'ALTER TABLE "tenants" ADD COLUMN IF NOT EXISTS "profile_signing_chain_pem" TEXT NULL',
+    'ALTER TABLE "tenants" ADD COLUMN IF NOT EXISTS "profile_signing_cert_expires_at" TIMESTAMPTZ NULL',
 ]
 
 # Best-effort DDL: applied where possible, logged and skipped where not. For constraints that existing data might
@@ -279,9 +276,8 @@ _IN_SCHEMA_LOCK: ContextVar[bool] = ContextVar(
 
 @asynccontextmanager
 async def _schema_lock(conn):
-    """Hold _AUX_DDL_LOCK_KEY on one pinned connection for the whole block (yielded, or None with no advisory
-    locks). Must stay on that one connection; a lock taken through the pool is gone before the next statement
-    runs. Not re-entrant: refuses rather than hangs, since a nested acquisition deadlocks invisibly to Postgres.
+    """Hold _AUX_DDL_LOCK_KEY on one pinned connection for the whole block, yielding it (None where there are no
+    advisory locks). Guarded statements must run on that connection. Not re-entrant, so a nested acquisition raises.
     """
     log = logging.getLogger(__name__)
 
@@ -350,11 +346,8 @@ async def _apply_aux_ddl(execute, log) -> None:
 
 
 async def ensure_aux_columns():
-    """Apply the idempotent post-create DDL. Call after Tortoise is initialized.
-
-    Mutually exclusive between processes via the session-level advisory lock (_AUX_DDL_LOCK_KEY). Nothing in the
-    repo calls this today; init_schema() covers startup. Never call from inside a hold of the lock, since
-    _schema_lock refuses to nest; call _apply_aux_ddl directly there instead.
+    """Apply the idempotent post-create DDL under the schema lock. Call after Tortoise is initialized. init_schema()
+    covers startup; inside a hold of the lock call _apply_aux_ddl instead, since _schema_lock refuses to nest.
     """
     log = logging.getLogger(__name__)
     conn = Tortoise.get_connection("default")
@@ -363,11 +356,8 @@ async def ensure_aux_columns():
 
 
 async def init_schema():
-    """Create the missing tables and apply the aux DDL, as one critical section.
-
-    All three supervisord processes run this at startup and race on a fresh database, so both phases sit inside
-    one hold of _AUX_DDL_LOCK_KEY rather than two sequential ones. Covers the default connection only. See the
-    doc for why the schema SQL runs on the pinned connection instead of Tortoise.generate_schemas().
+    """Create the missing tables and apply the aux DDL as one critical section, since all three supervisord processes
+    run this at startup and race on a fresh database. Covers the default connection only.
     """
     log = logging.getLogger(__name__)
     conn = Tortoise.get_connection("default")
@@ -394,11 +384,8 @@ def schema_fingerprint() -> str:
 
 
 async def _record_schema_state(log, pinned=None) -> None:
-    """Record that this database is at the running code's schema.
-
-    Idempotent; a failure is logged and swallowed, since the schema is applied either way. Writes through the
-    pinned connection as SQL, not the ORM: an ORM query would ask the pool for a second connection that a pool
-    of one can never supply while the caller holds the schema lock on the first.
+    """Record that this database is at the running code's schema. A failure is logged and swallowed, since the schema is
+    applied either way. It writes SQL on the pinned connection, because an ORM query would need a second pooled one.
     """
     from controller.models.tenant import SchemaState
     from controller.version import __version__
@@ -453,11 +440,7 @@ _DATABASE_URL_UNSET = (
 
 
 def current_database_url() -> str:
-    """DATABASE_URL as the environment has it now, blank when unset.
-
-    The module constant is read once at import; this is for a caller running long after import that wants
-    whatever the environment says then (services.nanomdm_store).
-    """
+    """DATABASE_URL as the environment has it now, blank when unset. The module constant is read once at import."""
     return os.getenv("DATABASE_URL", "")
 
 
@@ -467,11 +450,8 @@ def database_url_error() -> Optional[str]:
 
 
 def enforce_database_url() -> None:
-    """Refuse to go on when there is no DSN to connect with.
-
-    Startup only, never at import: api.main and api.webhook build their register_tortoise config from this at
-    import, and test suites import both while running Tortoise on their own sqlite. Raises SystemExit with one
-    explanatory line, so the reason is the last thing in the container's output, not buried in a restart loop.
+    """Log the reason and raise SystemExit when there is no DSN to connect with. Call it at startup, not at import,
+    since test suites import api.main and api.webhook while running Tortoise on their own sqlite.
     """
     problem = database_url_error()
     if problem:

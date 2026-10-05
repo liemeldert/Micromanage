@@ -1,5 +1,6 @@
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Dict, Optional
+import uuid
 
 from tortoise import fields
 from tortoise.models import Model
@@ -35,6 +36,11 @@ class Tenant(Model):
     fv_escrow_private_key_enc = fields.TextField(null=True)
     fv_escrow_cert_pem = fields.TextField(null=True)
     fv_escrow_cert_expires_at = fields.DatetimeField(null=True)
+    # Enrollment profile signing certificate and keypair, Fernet-encrypted at rest.
+    profile_signing_cert_pem = fields.TextField(null=True)
+    profile_signing_key_enc = fields.TextField(null=True)
+    profile_signing_chain_pem = fields.TextField(null=True)
+    profile_signing_cert_expires_at = fields.DatetimeField(null=True)
     created_at = fields.DatetimeField(auto_now_add=True)
     updated_at = fields.DatetimeField(auto_now=True)
     is_active = fields.BooleanField(default=True)
@@ -141,15 +147,14 @@ class Device(Model):
     ddm_status = fields.JSONField(default=dict)
     ddm_declaration_status = fields.JSONField(default=dict)
     ddm_client_capabilities = fields.JSONField(default=dict)
+    bootstrap_token_escrowed = fields.BooleanField(default=False)
 
     class Meta:
         table = "devices"
 
 
-# Deployments record confirmed state; a Task records the attempt that last moved it. last_task_id links them,
-# stamped at enqueue time rather than when the device answers, since the case that matters most is the device
-# never answering. Plain UUID, not a ForeignKeyField. A dangling pointer is expected once a task
-# ages out of retention, and readers must treat a missing Task that way rather than erroring.
+# Deployments record confirmed state; a Task records the attempt that last moved it. last_task_id links them, stamped at
+# enqueue time. It is a plain UUID, not a ForeignKeyField, so it can dangle once the task ages out of retention.
 
 class AppDeployment(Model):
     id = fields.UUIDField(pk=True)
@@ -259,10 +264,9 @@ class EnrollmentProfile(Model):
 
 
 class EnrollmentAttempt(Model):
-    """A POST-SCEP webhook check-in that could not be turned into, or matched to, a Device row (the two silent-
-    drop points inside _upsert_device). Security: tenant is populated ONLY when a real Tenant row was resolved;
-    a no_tenant drop's request tenant id is UNVERIFIED (anyone can pass ?tenant=<victim>), so it is never
-    written to the FK, only optionally into detail, and never used to scope a query."""
+    """A POST-SCEP webhook check-in that could not be turned into, or matched to, a Device row (the two silent drop
+    points inside _upsert_device). tenant is set only when a real Tenant row was resolved. The request's tenant id is
+    unverified (anyone can pass ?tenant=), so on a no_tenant drop it never goes in the FK or scopes a query."""
     id = fields.UUIDField(pk=True)
     tenant = fields.ForeignKeyField("models.Tenant", related_name="enrollment_attempts", null=True)
     udid = fields.CharField(max_length=40, null=True)
@@ -330,10 +334,9 @@ DEDUP_KEY_TYPES = ("profile_install", "profile_remove", "app_install")
 
 
 def task_dedup_key(task_type: str, details: Dict[str, Any]) -> Optional[str]:
-    """What makes two tasks of the same type on the same device duplicates; the reconciler will not queue a
-    second task while one with the same (device, type, key) is pending or running. This is the sole definition
-    of that key, shared by four call sites; they must never disagree. Returns None for tasks with no
-    dedup identity. Never raises: an exception here would fail Task.save() or take down a reconcile cycle."""
+    """The duplicate key for a task, or None when it has no dedup identity. The reconciler queues no second task while
+    one with the same (device, type, key) is pending or running. The sole definition of the key, shared by four call
+    sites; it never raises, since Task.save() and the reconcile cycle call it."""
     if not isinstance(details, dict):
         # Covers None and what "details or {}" does not: a JSONField holds whatever was put in it, and a list here would
         # make every .get() below raise. Same reasoning as the isinstance guard on profile_info.
@@ -359,7 +362,7 @@ class Task(Model):
     id = fields.UUIDField(pk=True)
     tenant = fields.ForeignKeyField("models.Tenant", related_name="tasks")
     type = fields.CharField(max_length=50)  # app_install, app_remove, profile_install, profile_remove, etc.
-    status = fields.CharField(max_length=20)  # pending, running, completed, failed
+    status = fields.CharField(max_length=20)  # pending, running, completed, failed, cancelled
     device = fields.ForeignKeyField("models.Device", related_name="tasks", null=True)
     user = fields.CharField(max_length=255, null=True)  # User who initiated the task
     description = fields.TextField()
@@ -413,10 +416,23 @@ class Task(Model):
         if status:
             self.status = status
         if status == 'running' and not self.started_at:
-            self.started_at = datetime.utcnow()
+            self.started_at = datetime.now(timezone.utc)
         elif status in ['completed', 'failed', 'cancelled'] and not self.completed_at:
-            self.completed_at = datetime.utcnow()
+            self.completed_at = datetime.now(timezone.utc)
         await self.save(update_fields=['progress', 'status', 'started_at', 'completed_at', 'error'])
+
+    async def mark_sent(self, command_uuid: Optional[str]) -> None:
+        """Record the enqueued command and leave the task running until the device answers."""
+        self.details['command_uuid'] = command_uuid
+        self.status = 'running'
+        await self.save()
+
+    async def mark_push_failed(self, error: str) -> None:
+        """Fail a task whose command was never enqueued. Stamps completed_at, which retention keys its delete on."""
+        self.status = 'failed'
+        self.error = error
+        self.completed_at = datetime.now(timezone.utc)
+        await self.save()
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert task to dictionary for API responses"""
@@ -437,10 +453,8 @@ class Task(Model):
 
 
 class FlowRun(Model):
-    """A per-device run of an ATC enrollment flow (services.atc). A state machine, not a coroutine: it runs
-    forward until a wait_for barrier, persists its position, and resumes on the matching webhook signal. The
-    flow definition is snapshotted into context['flow'] and fingerprinted by flow_hash, so mid-run edits to
-    flows.yaml do not change what an unfinished run executes.
+    """A per-device run of an ATC flow (services.atc). It stops at a wait_for barrier and resumes on the matching
+    webhook signal. The definition it started with is pinned, so edits to flows.yaml do not change an unfinished run.
     """
     id = fields.UUIDField(pk=True)
     tenant = fields.ForeignKeyField("models.Tenant", related_name="flow_runs")
@@ -503,10 +517,9 @@ class FlowRun(Model):
 
 
 class Alert(Model):
-    """A Dispatcher compliance alert for a (device, rule) pair (services.dispatcher). At most one non-resolved
-    row exists per (device, rule_id); re-evaluation updates it rather than adding duplicates. Lifecycle: pending
-    (grace anchor) -> open (grace_minutes elapsed, actions run) -> acknowledged / resolved (compliant again or
-    an operator resolved it; reversible actions are undone). Severity ranks black > red > yellow > green."""
+    """A Dispatcher compliance alert for a (device, rule) pair (services.dispatcher). At most one non-resolved row
+    exists per (device, rule_id); re-evaluation updates it. pending anchors the grace period, and open means
+    grace_minutes elapsed and the actions ran. Severity ranks black > red > yellow > green."""
     id = fields.UUIDField(pk=True)
     tenant = fields.ForeignKeyField("models.Tenant", related_name="alerts")
     device = fields.ForeignKeyField("models.Device", related_name="alerts")
@@ -549,9 +562,8 @@ class Alert(Model):
 
 
 class DepServer(Model):
-    """A linked Apple Business/School Manager MDM-server token (services.dep_manager). One row per ABM/ASM
-    token an admin links. token_enc and private_key_enc are encrypted at rest and never serialized or logged;
-    treat token_enc like a root credential, since it decides which devices enroll into which MDM org-wide.
+    """A linked Apple Business/School Manager MDM-server token (services.dep_manager). token_enc and private_key_enc are
+    encrypted at rest and never serialized or logged; token_enc decides which devices enroll into which MDM org-wide.
     """
     id = fields.UUIDField(pk=True)
     tenant = fields.ForeignKeyField("models.Tenant", related_name="dep_servers")
@@ -567,10 +579,8 @@ class DepServer(Model):
     token_expires_at = fields.DatetimeField(null=True)  # from access_token_expiry
     # /account cache (non-secret): org_name, server_name, org_id, admin_id, ...
     account_detail = fields.JSONField(default=dict)
-    # Delta-sync cursor (opaque, <7 days) + bookkeeping. TextField, not a bounded VARCHAR: Apple documents the
-    # cursor as up to 1000 hex chars
-    # (https://developer.apple.com/documentation/devicemanagement/), and a too-short column would silently break
-    # persistence.
+    # Delta-sync cursor (opaque, <7 days) + bookkeeping. TextField, not a bounded VARCHAR, since the cursor can reach
+    # 1000 hex chars (https://developer.apple.com/documentation/devicemanagement/).
     sync_cursor = fields.TextField(null=True)
     cursor_fetched_at = fields.DatetimeField(null=True)
     last_sync_at = fields.DatetimeField(null=True)
@@ -664,14 +674,16 @@ class DeviceSecret(Model):
     KIND_FIRMWARE = "firmware_password"
     KIND_RECOVERY_LOCK = "recovery_lock"
     KIND_FILEVAULT_PRK = "filevault_prk"
+    KIND_ACTIVATION_LOCK_BYPASS_CODE = "activation_lock_bypass_code"
     KINDS = (KIND_MANAGED_ADMIN, KIND_FIRMWARE, KIND_RECOVERY_LOCK,
-             KIND_FILEVAULT_PRK)
+             KIND_FILEVAULT_PRK, KIND_ACTIVATION_LOCK_BYPASS_CODE)
 
     _KIND_LABELS = {
         KIND_MANAGED_ADMIN: "Managed admin password",
         KIND_FIRMWARE: "Firmware password",
         KIND_RECOVERY_LOCK: "Recovery lock password",
         KIND_FILEVAULT_PRK: "FileVault recovery key",
+        KIND_ACTIVATION_LOCK_BYPASS_CODE: "Activation Lock bypass code",
     }
 
     id = fields.UUIDField(pk=True)
@@ -729,11 +741,26 @@ class DeviceSecret(Model):
         }
 
 
+class ServiceToken(Model):
+    """Scoped authentication tokens for external integrations such as Ansible dynamic inventory."""
+    id = fields.UUIDField(pk=True, default=uuid.uuid4)
+    tenant = fields.ForeignKeyField("models.Tenant", related_name="service_tokens", on_delete=fields.CASCADE)
+    name = fields.CharField(max_length=255)
+    token_hash = fields.CharField(max_length=64, unique=True, index=True)
+    scopes = fields.JSONField(default=list)
+    expires_at = fields.DatetimeField()
+    last_used_at = fields.DatetimeField(null=True)
+    revoked_at = fields.DatetimeField(null=True)
+    created_at = fields.DatetimeField(auto_now_add=True)
+    created_by = fields.CharField(max_length=255, null=True)
+
+    class Meta:
+        table = "service_tokens"
+
+
 class SchemaState(Model):
-    """One row per distinct schema this database has been brought to. There is no migration tool here: each
-    successful init_schema pass records a fingerprint of everything it applied, stamped with the controller
-    version. The newest row is the database's state; readiness compares it against what the running code would
-    produce.
+    """One row per schema this database has been brought to (a fingerprint of everything an init_schema pass applied,
+    with the controller version). Readiness compares the newest row with what the running code would apply.
     """
     fingerprint = fields.CharField(max_length=64, pk=True)
     controller_version = fields.CharField(max_length=40)

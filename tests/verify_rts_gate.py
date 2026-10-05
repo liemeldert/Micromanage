@@ -2,16 +2,10 @@
 
 Run: PYTHONPATH=. ./.venv/bin/python tests/verify_rts_gate.py
 
-Return to Service is the ReturnToService dictionary inside Apple's EraseDevice command: the device wipes and re-enrolls
-itself with nobody in front of it. Pinned here: the version floor is per platform and macOS and watchOS never get the
-key; supervision is not required; and the two conditions the server cannot settle for the device, no Wi-Fi profile and
-Activation Lock, come back as warnings an admin confirms rather than refusals. Apple's own description of the command is
-at
-
+ReturnToService is the dictionary in Apple's EraseDevice command that has the device re-enroll itself after the wipe:
 https://raw.githubusercontent.com/apple/device-management/release/mdm/commands/device.erase.yaml
-
-Nothing here reaches a device: the MDM connector and the enrollment profile builder are stand-ins, so what is under test
-is the refusal logic and the payload handed to the connector.
+The MDM connector and the enrollment profile builder are stand-ins, so only the refusal logic and the payload handed to
+the connector are under test.
 """
 import os
 
@@ -22,12 +16,11 @@ os.environ.setdefault("SECRET_ENCRYPTION_KEY", Fernet.generate_key().decode())
 from fastapi import HTTPException  # noqa: E402
 from tortoise import Tortoise  # noqa: E402
 
+from tests._verify_harness import make_check
+
 PASS, FAIL = [], []
 
-
-def check(label, cond):
-    (PASS if cond else FAIL).append(label)
-    print(f"  [{'PASS' if cond else 'FAIL'}] {label}")
+check = make_check(FAIL, PASS)
 
 
 class FakeConnector:
@@ -71,13 +64,14 @@ async def main():
                         modules={"models": ["controller.models.tenant"]})
     await Tortoise.generate_schemas()
 
-    import controller.api.main as api_main
-    api_main.MDMConnector = FakeConnector
-    api_main.enrollment_svc = FakeEnrollment
+    import controller.api.runtime as api_services
+    api_services.MDMConnector = FakeConnector
+    api_services.enrollment_svc = FakeEnrollment
 
     from controller.auth.dependencies import Principal
     from controller.models.tenant import Tenant, User, Device
-    from controller.api.main import CommandRequest, send_device_command, _rts_floor
+    from controller.api.device_summary import _rts_floor
+    from controller.api.routes.commands import CommandRequest, send_device_command
 
     tenant = await Tenant.create(id="t1", name="Test Tenant")
     admin_user = await User.create(tenant=tenant, email="admin@t1", role="admin")
@@ -100,7 +94,7 @@ async def main():
         except HTTPException as exc:
             return exc.status_code, exc.detail
 
-    #  1. The platform floors, straight off Apple's supportedOS table.
+    # 1. The platform floors, straight off Apple's supportedOS table.
     print("1) per-platform floors")
     check("iOS floor is 17", _rts_floor("iPhone15,2") == ("iOS", 17))
     check("iPadOS floor is 17", _rts_floor("iPad13,8") == ("iPadOS", 17))
@@ -117,7 +111,7 @@ async def main():
     check("a device that reported no model at all is the same case",
           _rts_floor(None) == (None, None) and _rts_floor("") == (None, None))
 
-    #  2. Supervision is not a requirement: Apple marks it nowhere on ReturnToService, while
+    # 2. Supervision is not a requirement: Apple marks it nowhere on ReturnToService, while
     #     MDMProfileData, the key that is conditional on supervision, is sent on every one of these.
     print("2) an unsupervised device is allowed")
     unsupervised = await device("IPHONE-U", "iPhone15,2", "17.5", IsSupervised=False)
@@ -136,7 +130,7 @@ async def main():
     status, _ = await erase(supervised, wifi_ssid="Lab")
     check("a supervised iPhone is accepted too", status == 200)
 
-    #  3. Below the floor, per platform.
+    # 3. Below the floor, per platform.
     print("3) devices below their platform's floor are refused")
     old_iphone = await device("IPHONE-16", "iPhone13,2", "16.7", IsSupervised=True)
     status, detail = await erase(old_iphone, wifi_ssid="Lab")
@@ -164,7 +158,7 @@ async def main():
     status, _ = await erase(vision26, wifi_ssid="Lab")
     check("a Vision Pro on visionOS 26 is accepted", status == 200)
 
-    #  4. macOS is n/a whatever it reports.
+    # 4. macOS is n/a whatever it reports.
     print("4) a Mac is refused outright")
     mac = await device("MAC-1", "MacBookPro18,3", "26.0", IsSupervised=True)
     status, detail = await erase(mac, pin="123456", wifi_ssid="Lab")
@@ -179,7 +173,7 @@ async def main():
     check("that refusal talks about the missing model, not about macOS",
           isinstance(detail, str) and "model" in detail and "macOS" not in detail)
 
-    #  5. No Wi-Fi network: a warning the admin can confirm, not a refusal.
+    # 5. No Wi-Fi network: a warning the admin can confirm, not a refusal.
     print("5) no Wi-Fi network is a confirmable warning")
     status, detail = await erase(supervised)
     check("an unconfirmed wipe with no network is refused", status == 400)
@@ -207,7 +201,7 @@ async def main():
           (FakeConnector.last_erase or {}).get("return_to_service", {})
           .get("enrollment_profile") == b"<enrollment-profile>")
 
-    #  6. Activation Lock warns for the same reason: the wipe would succeed and
+    # 6. Activation Lock warns for the same reason: the wipe would succeed and
     #     the device would stop at the activation screen.
     print("6) Activation Lock is a confirmable warning")
     locked = await device("IPAD-AL", "iPad13,8", "17.5",
@@ -244,7 +238,7 @@ async def main():
     check("a device reporting Activation Lock off needs no confirmation",
           status == 200)
 
-    #  7. A plain erase is untouched by any of this.
+    # 7. A plain erase is untouched by any of this.
     print("7) an ordinary erase is unaffected")
     FakeConnector.last_erase = None
     await send_device_command(
@@ -253,7 +247,7 @@ async def main():
     check("erase without return_to_service sends no RTS payload",
           (FakeConnector.last_erase or {}).get("return_to_service") is None)
 
-    #  8. An unconfigured enrollment cannot build the profile the device needs.
+    # 8. An unconfigured enrollment cannot build the profile the device needs.
     print("8) enrollment has to be configured")
     FakeEnrollment.configured = False
     try:

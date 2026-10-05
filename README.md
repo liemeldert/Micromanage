@@ -5,7 +5,7 @@ Micromanage is an open source MDM platform for Apple devices. It aims to be simp
 Micromanage at its heart is built off of the NanoMDM project, and is designed to be an orchestration layer and interface
 on top of their work.
 
-I have spent a good deal of effort into getting things to the state they are now, however, I also am just one person. I
+I have spent a good deal of effort getting things to the state they are in now, but I am just one person. I
 do not have the budget or time of a commercial team to dedicate to this project. I have already spent a decent amount of
 my personal funds on testing devices and accounts to get things working. Micromanage is and will always be free and
 open-source software with no expectation of payment. However, should you want to support me and this project, I have
@@ -23,13 +23,13 @@ the commercial MDM product we used bothered me, and turned me into the MDM versi
 to pinning my own 95 theses to JAMF's front door. They called the police on me after I broke a pane of glass on their
 revolving door. <sub>may or may not be a true story</sub>
 I built this project to get more familiar with MDM and to cosplay as a sysadmin at home; it is not a commercial product
-or something I profit from. However, that said as someone that's been around school IT a lot, more affordable and
+or something I profit from. That said, as someone that's been around school IT a lot, more affordable and
 especially open-source options for device management are sorely needed. It's hard to justify the cost of a commercial
 MDM solution for a small school where they only have a few hundred devices, and very few shared devices that someone
-*could* just setup manually (but where's the fun in that).
+*could* just set up manually (but where's the fun in that).
 
 Most of my time still goes into the project rather than the docs, because writing documentation is really boring.
-[DEPLOY.md](DEPLOY.md) has some instructions on how to deploy Micromanage, but it is to provide a starting point for
+[DEPLOY.md](DEPLOY.md) has some instructions on how to deploy Micromanage, but it is only a starting point for
 your own deployment.
 
 I am personally eating the Micromanage dog food by running all my personal Apple stuff on it, as well as a few testing
@@ -52,17 +52,20 @@ contract behind it. As such, I would not recommend using it for anything high st
 * App packages in S3, handed to devices as presigned manifests.
 * Flows: a node editor for what happens to a device at enrollment.
 * A compliance dispatcher that watches device state, remediates, and can POST a signed webhook.
-* Break-glass escrow for managed admin, firmware and recovery lock passwords, and FileVault recovery keys.
+* Break-glass escrow for managed admin, firmware and recovery lock passwords, FileVault recovery keys, and Activation
+  Lock bypass codes for supervised devices (with audited reveal).
     * Break-glass is a hidden secret that creates an obvious flag when it is used, similar to the mechanism in EPIC
 * FileVault recovery key escrow: a per-tenant keypair, the escrow payload served beside any FileVault profile, and the
   key decrypted out of the device's SecurityInfo report. A rotate command re-keys a Mac whose current recovery key is
-  escrowed or typed in; an already-encrypted Mac whose key nobody holds bootstraps with one local rotation (see
-  DEPLOY.md).
+  escrowed or typed in; an already-encrypted Mac whose key nobody holds bootstraps with one local rotation.
+* Bootstrap token status, and whether the Mac allows it for authentication.
 * OS update enforcement over DDM
 * Clear passcode on iPhone and iPad, using the UnlockToken read from NanoMDM's store.
 * An audit log that keeps every admin action.
 * Two roles, member and admin, split on who authors configuration.
 * A REST API, and a CLI that talks to it.
+* Scoped service tokens for external integrations and an Ansible dynamic inventory endpoint.
+* Enrollment profile CMS/PKCS#7 signing using enterprise or public CA certificates.
 
 ## What it does not do yet
 
@@ -75,12 +78,7 @@ I plan to get to these in the future, but keep in mind we do not do these things
   for older devices.
 * Clear passcode is iPhone and iPad only. Apple's `ClearPasscode` is n/a on macOS and tvOS, so a Mac cannot have its
   FileVault or login password cleared this way.
-* No bootstrap token handling and no Activation Lock bypass.
 * No user channel. A user-channel enrollment gets an empty declaration set, so Shared iPad is not really managed.
-* The enrollment profile is not frozen yet. Device identity certificates all share one subject per tenant, and the
-  server capabilities the profile advertises are still changing. A device keeps working across upgrades, because the
-  profile it already installed is the one it keeps using, but a device has to re-enroll to pick up changes made here.
-  Worth knowing before you roll this out to a fleet you would not want to re-enroll by hand.
 * No local daemon (yet), however, I plan to work on one soon. I have some existing work for a local daemon for macOS
   that handles app installations and updates more gracefully, so I could extend upon that work easily.
     * The daemon would also integrate JIT admin access, so users can stay at the minimum privilege level needed.
@@ -88,7 +86,7 @@ I plan to get to these in the future, but keep in mind we do not do these things
 
 ### Some future integrations I would like to implement
 
-These aren't in the app yet, however, are things I would like to implement in the future and would be able to do easily
+These aren't in the app yet, but are things I would like to implement in the future and would be able to do easily
 with what I own.
 
 * Unifi integration
@@ -97,14 +95,11 @@ with what I own.
 * Tailscale integration
     * Tailscale has a lot of features that I think could be used for remote triage without needing to worry about
       certain firewall rules or security implications.
-        * I think the daemon would also be able to integrate with the Tailscale daemon as well, to colect some extra
+        * I think the daemon would also be able to integrate with the Tailscale daemon, to collect some extra
           stats
-        * The compliance and flows system could integrate nicely to allow/disallow connection to privilaged services
+        * The compliance and flows system could integrate nicely to allow/disallow connection to privileged services
           based on device posture etc.
-        * there is existing device posture support in tailscale for some commercial VPNs
-* Ansible integration
-    * Ansible is a great tool for automating things, so with a Tailscale integration as well, we could have providers to
-      create inventories etc automatically
+        * There is existing device posture support in Tailscale for some commercial VPNs
 
 ## Requirements for app packages
 
@@ -129,16 +124,16 @@ At the moment, packages have to be signed and silently fail if not. Soon I plan 
 ## Micromanage WebUI
 
 The WebUI is based on Next.JS and Mantine. By default, the WebUI hides the YAML configuration given to the IAC
-controller, however, has a toggle in settings to enable it. I decided on that until I could get a better idea of how
+controller, but has a toggle in settings to enable it. I decided on that until I could get a better idea of how
 YAML configuration errors could manifest themselves on the actual devices.
 
 ## Deployment
 
-See [DEPLOY.md](DEPLOY.md) for deployment instructions, including backup, restore and upgrades. However, please do note
-that obtaining the actual MDM push certificate from Apple is difficult and relatively expensive, as it needs a Vendor
-CSR. I have access to the necessary resources so I might be able to see what I can do to help provide *something* to
-interested users. However, I won't guarantee anything since I want to make sure I stay within Apple's rules. They don't
-seem to be particularly fond of an MDM outside of business or education uses.
+See [DEPLOY.md](DEPLOY.md) for deployment instructions. However, obtaining the actual MDM push certificate from Apple is
+difficult and relatively expensive, as it needs a Vendor CSR. I have access to the necessary resources so I might be
+able to see what I can do to help provide *something* to interested users.
+However, I won't guarantee anything since I want to make sure I stay within Apple's rules. They don't seem to be
+particularly fond of an MDM outside of business or education uses.
 
 I'm also working on a little hosted version of Micromanage, but this is nowhere near ready for public use. In the
 future, I plan to slowly roll out the hosted version to people that are interested in testing it out.

@@ -1,9 +1,7 @@
 """Compliance rules engine, alerting, and guarded auto-remediation.
 
-Rules live in dispatcher.yaml: check a scoped device, raise/notify/auto-remediate on failure.
-Auto-remediation guardrails (off by default, destructive commands need approval, audited
-command path, dry_run + kill switches, cooldown/escalation, full ledger) live in
-_attempt_remediation.
+Rules live in dispatcher.yaml: check a scoped device, raise/notify/auto-remediate on failure. The auto-remediation
+guardrails live in _attempt_remediation.
 """
 
 import hashlib
@@ -12,7 +10,7 @@ import json
 import logging
 import os
 import re
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 from functools import partial
 from typing import Any, Dict, List, Optional, Set, Tuple
 
@@ -25,23 +23,23 @@ from controller.models.tenant import (
     ProfileDeployment,
     Tenant,
 )
-from controller.services import tenant_config
+from controller.services import scoping, tenant_config
 from controller.services.compliance_catalog import evaluate_check
-from controller.services.scoping import device_in_rollout, evaluate_scope
+from controller.services.device_tags import write_tags
+from controller.services.scoping import device_in_rollout
 from controller.services.severity import escalate as _escalate_severity, RANK
+from controller.utils.coerce import env_flag, str_list
+from controller.utils.timeutil import as_utc, utcnow
 
 logger = logging.getLogger(__name__)
 
-# The shared severity table, read from this module by api.main and by the verify suites. Assigned rather than
+# The shared severity table, read from this module by api.routes.alerts and by the verify suites. Assigned rather than
 # aliased on the import line, where an import optimizer sees a name this file never uses and drops it.
 SEVERITY_RANK = RANK
 
 # Rule id shape (mirrors yaml_validator.DispatcherRule.validate_id), used by _resolve_orphaned_alerts to tell a
 # dispatcher-raised alert from one namespaced with a colon by the flow engine or break-glass.
 _DISPATCHER_RULE_ID = re.compile(r'^[a-z0-9-_]+$')
-
-# Board ranking: higher is more severe (black > red > yellow > green). Shared with services/severity.py so the two
-# engines cannot drift apart.
 
 # Check types whose evaluation reads the deployment tables (_build_ctx).
 _DRIFT_CHECK_TYPES = frozenset({"missing_profile", "config_drift"})
@@ -51,19 +49,14 @@ _FLOW_CHECK_TYPES = frozenset({"flow_parked_for"})
 
 # Flow-run fetch width: only the fields compliance_catalog._flow_parked_for and the prefetch below read. A run's
 # pinned flow snapshot and step timeline are the biggest part of the row and no check reads them. A field missing
-# here reads as None (getattr fallback) rather than raising, so a parked run silently stops looking parked; see
-# docs/controller/services/dispatcher.md.
+# here reads as None (getattr fallback) rather than raising, so a parked run silently stops looking parked.
 _FLOW_RUN_FIELDS = (
     "id", "device_id", "flow_id", "status", "current_node", "waiting_signal",
     "wait_deadline", "updated_at",
 )
 
-# Sweep fetch width: only the Device fields the evaluation path reads (checks, scoping, DDM desired-set, remediation,
-# tag actions, notification payload); the full row's installed_apps/installed_profiles can be 100-400KB each and
-# nothing here needs them. Any new device-field read on the evaluation path must join this list: an unfetched
-# Tortoise partial field raises on direct read, but getattr fallbacks (including the DDM declaration cache
-# fingerprint) silently treat a missing field as empty. verify_ddm
-# asserts the subset mechanically.
+# Sweep fetch width: the Device fields the evaluation path reads, minus installed_apps/installed_profiles (100-400KB
+# each). A new device-field read on that path must be added here; a getattr fallback treats an unfetched field as empty.
 _SWEEP_DEVICE_FIELDS = (
     "id", "tenant_id", "udid", "serial_number", "device_model", "os_version",
     "hostname", "name", "enrollment_state", "enrollment_date", "last_seen",
@@ -80,9 +73,8 @@ _ENV_WARNED: set = set()
 def _env_number(name: str, default: Any) -> Any:
     """One tunable, read fresh, coerced to the type of its default.
 
-    A value that will not convert falls back to the default and says so once. These are read on the per-device
-    evaluation path, so raising there would turn one mistyped variable into a failure per device per sweep, and every
-    one of these numbers is a pace rather than a permission.
+    A value that will not convert falls back to the default and is warned about once. Raising would fail every
+    per-device evaluation over one mistyped variable, and a default is safe here because these numbers only set pace.
     """
     raw = os.getenv(name)
     if raw is None:
@@ -116,20 +108,12 @@ def _webhook_max_attempts() -> int:
     return _env_number("DISPATCHER_WEBHOOK_MAX_ATTEMPTS", 3)
 
 
-def _now() -> datetime:
-    return datetime.now(timezone.utc)
-
-
-def _truthy(v: Any) -> bool:
-    return str(v).strip().lower() in ("1", "true", "yes", "on") if v is not None else False
+_now = utcnow
 
 
 def _load_dispatcher(tenant_id: str) -> Dict[str, Any]:
-    """dispatcher.yaml as a copy the caller owns.
-
-    approve_remediation is the one caller that wants this rather than the readonly variant: it re-derives an action's
-    params from the document and hands them to the audited command path, which builds a Task's details out of their
-    values. Evaluation uses _load_dispatcher_readonly."""
+    """dispatcher.yaml as a copy the caller owns. approve_remediation needs one because the params it passes to the
+    audited command path end up in a Task's details. Evaluation uses _load_dispatcher_readonly."""
     doc = tenant_config._load(tenant_id, "dispatcher.yaml")
     return doc if isinstance(doc, dict) else {}
 
@@ -137,10 +121,8 @@ def _load_dispatcher(tenant_id: str) -> Dict[str, Any]:
 def _load_dispatcher_readonly(tenant_id: str) -> Dict[str, Any]:
     """dispatcher.yaml for rule evaluation, without the deep copy.
 
-    Everything evaluation does with this document is a read: rules, webhooks, scopes and checks are only inspected,
-    evaluate_check builds its params fresh instead of writing into the check, and every value that reaches Alert.detail
-    is a fresh dict of scalars. Sweep already loads once per tenant and hands the same object to every device it
-    evaluates. Anything that stores part of the document must use _load_dispatcher instead."""
+    Evaluation only reads the document, and sweep hands the same object to every device it evaluates. Anything that
+    stores part of it must use _load_dispatcher instead."""
     doc = tenant_config._load_readonly(tenant_id, "dispatcher.yaml")
     return doc if isinstance(doc, dict) else {}
 
@@ -148,37 +130,24 @@ def _load_dispatcher_readonly(tenant_id: str) -> Dict[str, Any]:
 def _auto_remediation_enabled(doc: Dict[str, Any]) -> bool:
     """Effective kill switch: the env master switch and the per-document one, either of them false disabling every
     remediation for the tenant."""
-    env_on = _truthy(os.getenv("DISPATCHER_AUTO_REMEDIATION_ENABLED", "true"))
+    env_on = env_flag("DISPATCHER_AUTO_REMEDIATION_ENABLED", "true")
     doc_on = doc.get("auto_remediation_enabled", True) is not False
     return env_on and doc_on
 
 
-def _scope_matches(device: Device, device_groups: List[str], scope: Optional[Dict[str, Any]]) -> bool:
-    """An empty scope matches every device; otherwise the shared scope engine decides."""
-    scope = scope or {}
-    if not any(scope.get(k) for k in
-               ("groups", "conditions", "include_devices", "exclude_devices")):
-        return True
-    return evaluate_scope(device, device_groups, scope)
-
-
-def _list(v: Any) -> List[str]:
-    items = v if isinstance(v, list) else ([v] if v else [])
-    return [str(x) for x in items if x]
+_scope_matches = scoping.matches_or_all
 
 
 def _action_key(action: Dict[str, Any]) -> str:
     """A stable, secret-free identifier for an action, used for cooldown and attempt tracking and as the approval key
-    stored in Alert.detail. Secret command params are stripped so the key can go out over the API without carrying a
-    wipe PIN or a password; the real params live only in dispatcher.yaml and are re-derived at approval time.
+    stored in Alert.detail. Secret command params are stripped, so the real ones live only in dispatcher.yaml and are
+    re-derived at approval time.
     """
     params = dict(action.get("params") or {})
     if action.get("type") == "send_command":
-        from controller.services.command_catalog import get_command, secret_param_names
+        from controller.services.command_catalog import get_command, public_params
         entry = get_command(params.get("command")) or {}
-        secret = secret_param_names(entry) | {"pin"}
-        inner = {k: v for k, v in (params.get("params") or {}).items() if k not in secret}
-        params = {**params, "params": inner}
+        params = {**params, "params": public_params(entry, params.get("params") or {})}
     return json.dumps({"type": action.get("type"), "params": params},
                       sort_keys=True, default=str)
 
@@ -191,10 +160,8 @@ async def evaluate_device(device: Device, reason: str = "event",
                           active_pairs: Optional[Set[Tuple[str, str]]] = None,
                           drift_ctx: Optional[Dict[str, Any]] = None,
                           flow_ctx: Optional[Dict[str, Any]] = None) -> None:
-    """Evaluate every enabled rule for a device and reconcile its alerts. Best-effort: never raises into the caller,
-    which is the webhook or the sweep.
-
-    tenant/doc/active_pairs/drift_ctx/flow_ctx are sweep()'s pass-throughs and prefetches, never module state; the
+    """Evaluate every enabled rule for a device and reconcile its alerts. Best-effort, so it never raises into the
+    caller (the webhook or the sweep). tenant, doc, active_pairs, drift_ctx and flow_ctx are sweep()'s prefetches; the
     single-device webhook path passes none of them.
     """
     try:
@@ -219,7 +186,6 @@ async def evaluate_device(device: Device, reason: str = "event",
                 if not isinstance(rule, dict) or not rule.get("enabled", True):
                     continue
                 if not _scope_matches(device, device_groups, rule.get("scope")):
-                    # Left the rule's scope -> its alert (if any) no longer applies.
                     await _resolve_if_active(device, rule, "out of scope", active_pairs)
                     continue
                 finding = evaluate_check(rule.get("check") or {}, device, ctx)
@@ -233,6 +199,14 @@ async def evaluate_device(device: Device, reason: str = "event",
     except Exception:
         logger.exception("dispatcher: evaluate_device failed for %s",
                          getattr(device, "serial_number", "?"))
+
+
+async def evaluate_device_id(device_id: Any, reason: str) -> None:
+    """evaluate_device on the device as stored now; nothing when it no longer exists."""
+    device = await Device.get_or_none(id=device_id)
+    if device is None:
+        return
+    await evaluate_device(device, reason=reason)
 
 
 async def sweep(tenant: Tenant) -> int:
@@ -256,8 +230,7 @@ async def sweep(tenant: Tenant) -> int:
         ).values("id", "device_id", "rule_id")
         active_pairs = {(str(p["device_id"]), str(p["rule_id"])) for p in alert_rows}
     except Exception:
-        logger.warning("dispatcher: alert prefetch failed for tenant %s; "
-                       "falling back to per-device queries this sweep",
+        logger.warning("dispatcher: alert prefetch failed for tenant %s; falling back to per-device queries this sweep",
                        tenant.id, exc_info=True)
     if alert_rows is not None:
         # active_pairs keeps any pair resolved just below, which is safe: it is a read-side filter that may only be
@@ -266,8 +239,7 @@ async def sweep(tenant: Tenant) -> int:
         try:
             await _resolve_orphaned_alerts(tenant, doc, alert_rows)
         except Exception:
-            logger.exception("dispatcher: resolving orphaned alerts failed for "
-                             "tenant %s", tenant.id)
+            logger.exception("dispatcher: resolving orphaned alerts failed for tenant %s", tenant.id)
     try:
         if not rules:
             return 0
@@ -310,7 +282,7 @@ async def sweep_all_tenants() -> None:
             logger.exception("dispatcher: sweep failed for tenant %s", tenant.id)
 
 
-#  Context: the drift signal, read from the deployment tables (no new queries)
+# ==Context: the drift signal, read from the deployment tables (no new queries)==
 
 async def _prefetch_drift_ctx(tenant: Tenant,
                               rules: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
@@ -335,13 +307,8 @@ async def _prefetch_drift_ctx(tenant: Tenant,
 async def _prefetch_flow_ctx(tenant: Tenant,
                              rules: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
     """Sweep-wide flow-run prefetch: one tenant query instead of one per device. None when no rule reads the flow runs,
-    so a posture-only tenant pays nothing, as in _prefetch_drift_ctx above.
-
-    Pre-filtered to parked runs, the only status flow_parked_for reports on, so the query returns a small slice of a
-    busy tenant's flow_runs table rather than its history. The check filters by status again itself, so this is a
-    narrowing and not a contract.
-
-    The rows are read-only here, and a run that parks or unparks mid-sweep is judged on the next tick.
+    as in _prefetch_drift_ctx above. Only parked (waiting) runs are fetched, which is all flow_parked_for reports on.
+    The rows are read-only here.
     """
     check_types = {
         (r.get("check") or {}).get("type") for r in rules if isinstance(r, dict)
@@ -441,11 +408,9 @@ async def _build_ctx(device: Device, tenant: Tenant, rules: List[Dict[str, Any]]
 # ==Alert lifecycle==
 
 async def _active_alert(device: Device, rule_id: str) -> Optional[Alert]:
-    """The single active (non-resolved) alert for a (device, rule).
-
-    At most one is enforced in code rather than by a DB constraint, since resolved rows accumulate. evaluate_device can
-    run concurrently on the webhook and sweep paths and briefly create duplicates, so this keeps the oldest active row
-    and resolves any extras, and the invariant reconverges on every evaluation."""
+    """The single active (non-resolved) alert for a (device, rule). No DB constraint enforces that, since resolved rows
+    accumulate, so concurrent evaluations can create duplicates; this keeps the oldest active row and resolves extras.
+    """
     active = await Alert.filter(device_id=device.id, rule_id=rule_id).exclude(
         status="resolved"
     ).order_by("first_detected_at").all()
@@ -477,10 +442,7 @@ async def _recent_remediation_state(device: Device, rule_id: str) -> Dict[str, A
         return {}
     if prev is None or prev.resolved_at is None:
         return {}
-    resolved_at = prev.resolved_at
-    if resolved_at.tzinfo is None:
-        resolved_at = resolved_at.replace(tzinfo=timezone.utc)
-    if (_now() - resolved_at) > timedelta(minutes=_remediation_cooldown_minutes()):
+    if (_now() - as_utc(prev.resolved_at)) > timedelta(minutes=_remediation_cooldown_minutes()):
         return {}
     d = prev.detail or {}
     return {k: d[k] for k in ("attempt_counts", "last_fired_at", "remediation_failed")
@@ -515,9 +477,7 @@ async def _handle_noncompliant(tenant: Tenant, device: Device, rule: Dict[str, A
 
     if alert.status == "pending":
         grace = int(rule.get("grace_minutes") or 0)
-        anchor = alert.first_detected_at or now
-        if anchor.tzinfo is None:
-            anchor = anchor.replace(tzinfo=timezone.utc)
+        anchor = as_utc(alert.first_detected_at or now)
         # Fresh timestamp: first_detected_at is stamped during create (just after now), so comparing against now would
         # go slightly negative and a grace_minutes=0 rule would never open on first sighting.
         if (_now() - anchor) >= timedelta(minutes=grace):
@@ -556,8 +516,7 @@ async def _handle_compliant(device: Device, rule: Dict[str, Any],
 
 async def _resolve_if_active(device: Device, rule: Dict[str, Any], reason: str,
                              active_pairs: Optional[Set[Tuple[str, str]]] = None) -> None:
-    # The device left scope, so the rule no longer applies and its alert is moot whatever auto_resolve says. Resolve it
-    # and undo whatever can be undone.
+    # The rule does not apply to an out-of-scope device, so its alert resolves whatever auto_resolve says.
     if active_pairs is not None \
         and (str(device.id), str(rule["id"])) not in active_pairs:
         return
@@ -568,12 +527,9 @@ async def _resolve_if_active(device: Device, rule: Dict[str, Any], reason: str,
 
 async def _resolve_orphaned_alerts(tenant: Tenant, doc: Dict[str, Any],
                                    alert_rows: List[Dict[str, Any]]) -> int:
-    """Resolve the alerts a retired rule left behind. Returns how many.
-
-    Without this, retiring a rule leaves its already-raised alerts (and any tag refcount they hold) stranded, since
-    every other resolve path needs the rule to still be there. Only touches alerts whose rule_id is a dispatcher
-    slug (never a colon-namespaced flow/break-glass alert), and does nothing unless the document carries a rules
-    key.
+    """Resolve the alerts a retired rule left behind, and return how many. Every other resolve path needs the rule to
+    still exist. Only alerts whose rule_id is a dispatcher slug are touched (not colon-namespaced flow or break-glass
+    alerts), and nothing happens unless the document has a rules key.
     """
     rules = doc.get("rules")
     if not isinstance(rules, list):
@@ -656,9 +612,8 @@ async def _resolve_alert(alert: Alert, device: Device, reason: str) -> None:
 def _notified_severity(detail: Dict[str, Any], target: str) -> Optional[str]:
     """The severity the named webhook target was last notified at.
 
-    Stored per target so a rule with several webhook actions notifies each of them; the old one-scalar-per-alert form
-    starved every target after the first. A stored scalar (a pre-map row) reads as the answer for every target, so
-    upgrading does not re-notify a fleet of long-open alerts."""
+    Stored per target, so each webhook action of a rule is judged on its own. A scalar stored by older rows counts for
+    every target, which keeps long-open alerts from being notified again."""
     ns = detail.get("notified_severity")
     if isinstance(ns, dict):
         return ns.get(target)
@@ -688,14 +643,14 @@ async def _fire_actions(tenant: Tenant, device: Device, rule: Dict[str, Any],
                     _spawn_webhook(tenant, device, rule, alert, webhooks.get(params.get("target")))
                     _stamp_notified(detail, target_name, alert.severity)
             elif atype == "assign_tag":
-                tags = _list(params.get("tags"))
+                tags = str_list(params.get("tags"))
                 await _apply_tags(device, tags, add=True, rule_id=str(rule.get("id")))
                 bucket = detail.setdefault("reversible_tags", [])
                 for t in tags:
                     if t not in bucket:
                         bucket.append(t)
             elif atype == "remove_tag":
-                await _apply_tags(device, _list(params.get("tags")), add=False,
+                await _apply_tags(device, str_list(params.get("tags")), add=False,
                                   rule_id=str(rule.get("id")))
             elif atype in ("install_profiles", "install_apps", "send_command"):
                 await _attempt_remediation(tenant, device, rule, alert, action, master_on, detail)
@@ -716,12 +671,9 @@ async def _fire_actions(tenant: Tenant, device: Device, rule: Dict[str, Any],
 
 
 async def _with_fresh_vetoes(alert: Alert, detail: Dict[str, Any]) -> Dict[str, Any]:
-    """The detail this pass is about to write, with any admin decision recorded while it was working folded back in.
-
-    Alert.detail is one JSON column a whole pass reads then writes, so a concurrent decision would otherwise be
-    lost (a dropped decline can mean a live command going out again). Only the declined/approved lists and the
-    queued requests they cover are merged in; everything else belongs to this pass. Best-effort: a failed re-read
-    leaves the pass writing what it had.
+    """The detail this pass is about to write, with any admin decision recorded while it ran merged back in. A pass
+    writes the whole Alert.detail column, so a concurrent decision would otherwise be lost. Only the declined and
+    approved lists and the queued requests they cover are merged. Best-effort: a failed re-read leaves the detail as is.
     """
     try:
         fresh = await Alert.filter(id=alert.id).values_list("detail", flat=True)
@@ -830,7 +782,7 @@ async def _attempt_remediation(tenant: Tenant, device: Device, rule: Dict[str, A
     outcome, attempted = await _run_remediation(tenant, device, rule, action)
     record(outcome)
     if not attempted:
-        # Unattempted (rollout wave not open, or ids name nothing) never counts, or it would escalate on work never tried.
+        # Unattempted (rollout wave not open, or ids name nothing) never counts, or it would escalate on untried work.
         return
     last_fired[akey] = now.isoformat()
     counts[akey] = attempts + 1
@@ -862,12 +814,12 @@ async def _run_remediation(tenant: Tenant, device: Device, rule: Dict[str, Any],
             return f"send failed: {exc}", True
 
     if atype == "install_profiles":
-        n = await _queue_profile_installs(tenant, device, _list(params.get("profile_ids")),
+        n = await _queue_profile_installs(tenant, device, str_list(params.get("profile_ids")),
                                           user, str(rule["id"]))
         return f"queued {n} profile install(s)", n > 0
 
     if atype == "install_apps":
-        n = await _queue_app_installs(tenant, device, _list(params.get("app_ids")),
+        n = await _queue_app_installs(tenant, device, str_list(params.get("app_ids")),
                                       user, str(rule["id"]))
         return f"queued {n} app install(s)", n > 0
 
@@ -879,9 +831,8 @@ async def _queue_profile_installs(tenant: Tenant, device: Device,
                                   rule_id: str) -> int:
     """Queue the profile installs a compliance rule asked for.
 
-    Every task is marked with profile_manager.INSTALL_SOURCE_KEY so the sync loop never takes a remediation profile
-    straight back off the device; the mark persists as long as the rule exists. See
-    docs/controller/services/dispatcher.md and reconciler._held_by_remediation.
+    Every task carries profile_manager.INSTALL_SOURCE_KEY, which keeps the sync loop from taking the profile straight
+    back off the device (see reconciler._held_by_remediation).
     """
     from controller.services.profile_manager import (
         INSTALL_SOURCE_KEY, ProfileManager, remediation_source,
@@ -921,12 +872,8 @@ async def _queue_profile_installs(tenant: Tenant, device: Device,
 
 
 def _remediable_version(device: Device, app: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-    """The version of an authored app a remediation may install on this device, in the form an app install task carries,
-    or None when there is not one.
-
-    Walks versions newest-first (stored oldest-first) like AppManager._get_applicable_version, but skips scope: a
-    remediation is for reaching a device the app's own scope does not. Rollout waves are still honoured. See
-    docs/controller/services/dispatcher.md.
+    """The newest version of an authored app that this device's rollout wave allows, in the form an app install task
+    carries, or None. Like AppManager._get_applicable_version, but a remediation ignores the app's own scope.
     """
     for version in reversed(app.get("versions") or []):
         if not isinstance(version, dict):
@@ -958,9 +905,8 @@ async def _queue_app_installs(tenant: Tenant, device: Device,
                               rule_id: str) -> int:
     """Queue the app installs a compliance rule asked for.
 
-    The app half of _queue_profile_installs, marked the same way so the sync loop does not retire a remediation
-    install. Looked up in apps.yaml by id, never through the reconciler's scope-filtered pass (that would be a
-    silent no-op for the one case this serves).
+    The app half of _queue_profile_installs, marked the same way. Apps are looked up in apps.yaml by id, since the
+    reconciler's scope-filtered pass would skip the apps a device is not scoped into.
     """
     from controller.services.profile_manager import (
         INSTALL_SOURCE_KEY, remediation_source,
@@ -978,8 +924,7 @@ async def _queue_app_installs(tenant: Tenant, device: Device,
     for aid in app_ids:
         app = by_id.get(aid)
         if not app:
-            logger.warning("dispatcher: rule %s asked to install app '%s', which is "
-                           "not in apps.yaml", rule_id, aid)
+            logger.warning("dispatcher: rule %s asked to install app '%s', which is not in apps.yaml", rule_id, aid)
             continue
         info = _remediable_version(device, app)
         if info is None:
@@ -1005,31 +950,21 @@ async def _queue_app_installs(tenant: Tenant, device: Device,
 
 async def _apply_tags(device: Device, tags: List[str], *, add: bool,
                       rule_id: Optional[str] = None, reason: Optional[str] = None) -> None:
-    tags = _list(tags)
+    tags = str_list(tags)
     if not tags:
         return
-    current = [str(t) for t in (device.tags or [])]
-    before = set(current)
-    if add:
-        result = current + [t for t in tags if t not in before]
-    else:
-        drop = set(tags)
-        result = [t for t in current if t not in drop]
-    if set(result) == before:
+    written = await write_tags(device, add=tags) if add else await write_tags(device, remove=tags)
+    if written is None:
         return
-    device.tags = result
-    await device.save(update_fields=["tags"])
+    _, added, removed = written
     from controller.services.audit import record_tag_change
-    await record_tag_change(device, added=sorted(set(result) - before),
-                            removed=sorted(before - set(result)),
+    await record_tag_change(device, added=added, removed=removed,
                             source="dispatcher", source_ref=rule_id, reason=reason)
     # Recompute groups (tags can drive membership) and reconcile scoping.
     try:
-        from controller.services.group_manager import GroupManager
+        from controller.services.group_manager import current_groups
         groups_before = set(device.groups or [])
-        device.groups = GroupManager(str(device.tenant_id)).evaluate_device_groups(
-            device, tenant_config.load_groups(str(device.tenant_id))
-        )
+        device.groups = current_groups(device)
         if set(device.groups or []) != groups_before:
             await device.save(update_fields=["groups"])
     except Exception:
@@ -1053,10 +988,9 @@ def _redact_action_params(action: Dict[str, Any]) -> Dict[str, Any]:
     """A copy of a send_command action's params for the alert ledger, with the known-secret ones dropped. No secret is
     ever persisted to an alert."""
     params = (action.get("params") or {}).get("params") or {}
-    from controller.services.command_catalog import get_command, secret_param_names
+    from controller.services.command_catalog import get_command, public_params
     entry = get_command((action.get("params") or {}).get("command")) or {}
-    secret = secret_param_names(entry) | {"pin"}
-    return {k: v for k, v in params.items() if k not in secret}
+    return public_params(entry, params)
 
 
 def _webhook_payload(tenant: Tenant, device: Device, rule: Dict[str, Any],
@@ -1107,9 +1041,8 @@ def _private_webhook_allowlist() -> Tuple[Set[str], List[Any]]:
 
 async def _webhook_target_blocked(url: str) -> bool:
     """SSRF guard: resolve the webhook host and refuse a private, loopback, link-local (including the cloud metadata
-    address 169.254.169.254), reserved, or otherwise non-public address. Fails closed on any parse/resolution error.
-    Internal collectors go in DISPATCHER_WEBHOOK_PRIVATE_ALLOWLIST; DISPATCHER_WEBHOOK_ALLOW_PRIVATE is a deprecated
-    global bypass."""
+    address 169.254.169.254), reserved, or otherwise non-public address; any error fails closed. Internal collectors go
+    in DISPATCHER_WEBHOOK_PRIVATE_ALLOWLIST, and DISPATCHER_WEBHOOK_ALLOW_PRIVATE is a deprecated global bypass."""
     import asyncio
     import ipaddress
     import socket
@@ -1118,13 +1051,12 @@ async def _webhook_target_blocked(url: str) -> bool:
         parsed = urlparse(url)
         if parsed.scheme not in ("http", "https") or not parsed.hostname:
             return True
-        if _truthy(os.getenv("DISPATCHER_WEBHOOK_ALLOW_PRIVATE", "false")):
+        if env_flag("DISPATCHER_WEBHOOK_ALLOW_PRIVATE"):
             if ("DISPATCHER_WEBHOOK_ALLOW_PRIVATE", "deprecated") not in _ENV_WARNED:
                 _ENV_WARNED.add(("DISPATCHER_WEBHOOK_ALLOW_PRIVATE", "deprecated"))
                 logger.warning(
-                    "DISPATCHER_WEBHOOK_ALLOW_PRIVATE disables the webhook SSRF "
-                    "guard for every tenant and is deprecated; list the internal "
-                    "destinations in DISPATCHER_WEBHOOK_PRIVATE_ALLOWLIST instead")
+                    "DISPATCHER_WEBHOOK_ALLOW_PRIVATE disables the webhook SSRF guard for every tenant and is "
+                    "deprecated; list the internal destinations in DISPATCHER_WEBHOOK_PRIVATE_ALLOWLIST instead")
             return False
         allowed_hosts, allowed_nets = _private_webhook_allowlist()
         host_allowed = parsed.hostname.lower() in allowed_hosts
@@ -1220,8 +1152,7 @@ async def _record_approval_outcome(alert: Alert, action_key: str, command: str,
                                    outcome: str, approver: str) -> None:
     """Write an executed approval to the alert with a fresh read-modify-write.
 
-    Appends to the remediations ledger and to approved_approvals, the list _with_fresh_vetoes reads so an evaluation
-    pass running during the dispatch cannot resurrect the entry the claim removed. Best-effort past the claim: losing
+    Appends to the remediations ledger and to approved_approvals, which _with_fresh_vetoes reads. Best-effort: losing
     this write loses a ledger line, never the once-only guard."""
     now_iso = _now().isoformat()
     for _ in range(_DETAIL_WRITE_ATTEMPTS):
@@ -1249,10 +1180,8 @@ async def _record_approval_outcome(alert: Alert, action_key: str, command: str,
 async def approve_remediation(alert: Alert, action_key: str, approver: str) -> Dict[str, Any]:
     """Execute a queued destructive remediation after an admin approves it.
 
-    Runs through the same audited command path with allow_destructive=True and records the outcome. Raises
-    ValueError when the approval is not found. The pending entry is claimed atomically first
-    (_claim_pending_approval), since the caller's in-memory alert can be stale; see
-    docs/controller/services/dispatcher.md."""
+    Runs through the audited command path with allow_destructive=True and records the outcome. Raises ValueError when
+    the approval is not found."""
     tenant = await Tenant.get_or_none(id=alert.tenant_id)
     device = await Device.get_or_none(id=alert.device_id)
     if tenant is None or device is None:
@@ -1275,8 +1204,8 @@ async def approve_remediation(alert: Alert, action_key: str, approver: str) -> D
     if command not in DESTRUCTIVE_COMMANDS:
         raise ValueError("Only a destructive remediation requires approval")
 
-    # Claim first, dispatch second: once the conditional write lands, no other approval of the same entry can reach the
-    # command path.
+    # Claim first, dispatch second. The caller's alert can be stale, so the claim re-reads it; once its conditional
+    # write succeeds, no other approval of the same entry can reach the command path.
     await _claim_pending_approval(alert, action_key)
 
     from controller.services.device_commands import CommandError, dispatch_catalog_command
@@ -1308,11 +1237,10 @@ def _is_declined(detail: Dict[str, Any], action_key: str) -> bool:
 
 async def reject_remediation(alert: Alert, action_key: str, rejector: str,
                              reason: Optional[str] = None) -> Dict[str, Any]:
-    """Decline a queued destructive remediation, the counterpart of approve_remediation and the narrower of the two.
+    """Decline a queued destructive remediation, the counterpart of approve_remediation.
 
-    Drops the entry from pending_approvals, ledgers the refusal, and remembers it so the next evaluation does not
-    queue it again; the alert itself stays open and untouched otherwise, since no command was ever sent. Raises
-    ValueError when the key names no queued remediation on this alert.
+    Drops the entry from pending_approvals, ledgers the refusal, and remembers it so the next evaluation does not queue
+    it again; the alert stays open. Raises ValueError when the key names no queued remediation on this alert.
     """
     # Re-read before deciding: the alert handed in is milliseconds old, and a sweep evaluating this device in the
     # meantime rewrites the whole detail column.

@@ -2,12 +2,6 @@
 (controller/services/filevault_escrow.py).
 
 Run: PYTHONPATH=. python tests/verify_filevault_escrow.py
-
-macOS escrows a FileVault personal recovery key by encrypting it to a certificate the escrow profile carries, wrapping
-it as CMS EnvelopedData and handing it to the MDM server in SecurityInfo (FDE_PersonalRecoveryKeyCMS) and in a
-RotateFileVaultKey answer. This suite mints a real per-tenant keypair, builds a real CMS envelope to that certificate
-the way a Mac would, and proves the controller opens it and stores the key like the firmware and recovery-lock
-passwords.
 """
 import base64
 import os
@@ -28,13 +22,11 @@ from tortoise import Tortoise
 
 from controller.models.tenant import Device, DeviceSecret, Tenant
 from controller.services import crypto_secrets, filevault_escrow
+from tests._verify_harness import make_check
 
 PASS, FAIL = [], []
 
-
-def check(label, cond):
-    (PASS if cond else FAIL).append(label)
-    print(f"  [{'PASS' if cond else 'FAIL'}] {label}")
+check = make_check(FAIL, PASS)
 
 
 def seal_to_cert(cert_pem: str, plaintext: bytes) -> bytes:

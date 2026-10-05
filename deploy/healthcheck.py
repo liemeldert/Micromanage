@@ -1,16 +1,8 @@
 """Container healthcheck for the controller image.
 
-The image runs three supervisord programs. supervisord keeps the container up
-when one of them has crashed. Specifically, it queries:
-
-  userapi   GET http://127.0.0.1:8001/api/v1/health   (+ DB)
-  webhook   GET http://127.0.0.1:8000/health          (+ DB)
-  controller  mtime of the heartbeat file it touches every 30 sec
-
-The scheduler's heartbeat also can detect a dead controller process, which is why the heartbeat file is used
-Only sends exit 3 on consensus
-
-Used by Dockerfile.controller
+supervisord keeps the container up when one of its three programs has crashed, so this checks each: the userapi and
+webhook health endpoints (both reach the database) and the heartbeat file the controller touches. Exits 0 if all three
+pass, else 1. Copied in by Dockerfile.controller and run by the compose healthcheck.
 """
 import os
 import sys
@@ -18,7 +10,7 @@ import time
 import urllib.request
 
 HEARTBEAT_FILE = os.getenv("MDM_CONTROLLER_HEARTBEAT_FILE", "/tmp/micromanage-controller.heartbeat")
-# 4 heartbaet intervals
+# 4 heartbeat intervals
 HEARTBEAT_MAX_AGE = int(os.getenv("MDM_CONTROLLER_HEARTBEAT_SECONDS", "30")) * 4
 TIMEOUT = 5
 

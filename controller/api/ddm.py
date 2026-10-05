@@ -5,7 +5,8 @@ import logging
 import plistlib
 from typing import Any, Optional, Tuple
 
-from controller.models.tenant import Device, Tenant
+from controller.api.anonymous import active_tenant_or_404
+from controller.models.tenant import Device
 from controller.services import ddm_manager, enrollment
 from fastapi import APIRouter, HTTPException, Query, Request, Response
 from fastapi.responses import JSONResponse
@@ -144,11 +145,7 @@ async def download_bridged_profile(tenant_id: str, profile_id: str,
     Authorized by HMAC signature; profile must be bridged in declarations.yaml.
     """
     remote = request.client.host if request.client else None
-    tenant = await Tenant.get_or_none(id=tenant_id)
-    if not tenant or not tenant.is_active:
-        enrollment.log_token_refusal(
-            "DDM bridge", tenant_id, "no such active tenant", remote)
-        raise HTTPException(status_code=404, detail="Not found")
+    tenant = await active_tenant_or_404(tenant_id, "DDM bridge", remote, enrollment)
     if not ddm_manager.verify_profile_bridge_sig(tenant_id, profile_id, sig):
         # The profile id is a caller-supplied path segment like the tenant id; log_token_refusal strips control
         # characters from the whole reason.

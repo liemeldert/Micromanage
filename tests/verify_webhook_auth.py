@@ -15,16 +15,14 @@ from urllib.parse import urlencode
 from starlette.requests import Request
 
 import controller.api.webhook as wh
+from tests._verify_harness import LogCapture, make_check
 
 REPO = Path(__file__).resolve().parents[1]
 
 PASS: list = []
 FAIL: list = []
 
-
-def check(name, cond):
-    (PASS if cond else FAIL).append(name)
-    print(f"  {'PASS' if cond else 'FAIL'}: {name}")
+check = make_check(FAIL, PASS)
 
 
 def sign(key: str, body: bytes) -> str:
@@ -87,8 +85,8 @@ def main():
     check("with WEBHOOK_HMAC_KEY unset the HMAC key falls back to WEBHOOK_SECRET",
           wh._authorized(req, BODY) == "body-hmac")
 
-    # And the other direction: once WEBHOOK_HMAC_KEY is set, WEBHOOK_SECRET is no longer the HMAC key, so the two
-    # domains really are separate.
+    # And the other direction: once WEBHOOK_HMAC_KEY is set, WEBHOOK_SECRET stops being the HMAC key, so the two domains
+    # are separate.
     env(WEBHOOK_SECRET="query-only-secret", WEBHOOK_HMAC_KEY="hmac-key")
     req = make_request(
         headers={"X-Hmac-Signature": sign("query-only-secret", BODY)})
@@ -236,15 +234,7 @@ def main():
     # the one where nothing is configured.
     import logging
 
-    class Capture(logging.Handler):
-        def __init__(self):
-            super().__init__()
-            self.records = []
-
-        def emit(self, record):
-            self.records.append(record)
-
-    handler = Capture()
+    handler = LogCapture()
     wh.logger.addHandler(handler)
     try:
         env(WEBHOOK_SECRET="s", WEBHOOK_HMAC_KEY="k")

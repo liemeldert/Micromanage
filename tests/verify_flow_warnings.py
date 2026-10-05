@@ -12,15 +12,14 @@ import yaml
 
 from controller.utils import payload_types
 from controller.utils.yaml_validator import Profile, YAMLValidator
+from tests._verify_harness import make_check
 
 PASS, FAIL = [], []
 
 SEEDED_TENANT = Path(__file__).resolve().parents[1] / "deploy" / "tenant-template" / "default"
 
 
-def check(label, cond):
-    (PASS if cond else FAIL).append(label)
-    print(f"  [{'PASS' if cond else 'FAIL'}] {label}")
+check = make_check(FAIL, PASS)
 
 
 WIFI = {
@@ -60,8 +59,7 @@ DEP_NO_AWAIT = {
 def run(flow, profiles=None, dispatcher=None, declarations=None, apps=None):
     """Validate a synthetic tenant whose flows.yaml holds the given flow.
 
-    dispatcher, declarations and apps, when given, are written as their own files, so the rule-scope, legacy-bridge and
-    app-schema checks run from the same harness.
+    dispatcher, declarations and apps are written as their own files when given.
     """
     with tempfile.TemporaryDirectory() as td:
         tdir = Path(td)
@@ -447,8 +445,8 @@ def scope_asymmetry_checks():
           valid and not rule_warns(warnings))
 
     print("20) the validator's empty test still agrees with both engines")
-    # The predicate lives in three files. Rather than hoist it into scoping.py, this asserts the copies agree and fails
-    # loudly when they drift. Both engines return True for "matches everyone", which the validator calls empty.
+    # All three names resolve to services.scoping. Both engines return True for "matches everyone", which the validator
+    # calls empty.
     from controller.utils.yaml_validator import _scope_is_empty
     from controller.services.atc import _scope_matches as atc_matches
     from controller.services.dispatcher import _scope_matches as disp_matches
@@ -505,7 +503,8 @@ async def endpoint_checks():
     base = Path(tempfile.mkdtemp())
     os.environ["YAML_CONFIG_PATH"] = str(base)
     from tortoise import Tortoise
-    import controller.api.main as apimain
+    from controller.api import runtime
+    from controller.api.routes import config as config_api
     from controller.auth.dependencies import Principal
     from controller.models.tenant import AuditLog, Tenant, User
 
@@ -527,7 +526,7 @@ async def endpoint_checks():
     admin = Principal(tenant=tenant, user=admin_user, email="admin@t1", role="admin")
     # A spy rather than a no-op: dry runs must leave no reconcile behind, and the real save must spawn one.
     reconciles = []
-    apimain._spawn_tenant_reconcile = lambda tenant_id: reconciles.append(str(tenant_id))
+    runtime._spawn_tenant_reconcile = lambda tenant_id: reconciles.append(str(tenant_id))
 
     doc = {"flow": flow_doc([
         dict(START, params={"kind": "enroll_dep", "match": {}}),
@@ -540,7 +539,7 @@ async def endpoint_checks():
     # Always close the sqlite connection: an aiosqlite connection is a non-daemon thread, and one left behind by a stray
     # exception hangs the interpreter at exit instead of failing the suite.
     try:
-        res = await apimain.update_yaml_config("flows", dict(doc), admin, dry_run=True)
+        res = await config_api.update_yaml_config("flows", dict(doc), admin, dry_run=True)
         check("dry run reports valid with structured flow_warnings",
               res.get("valid") is True
               and any(w["code"] == "release-ordering"
@@ -551,7 +550,7 @@ async def endpoint_checks():
         check("dry run leaves no audit row", await AuditLog.all().count() == 0)
 
         bad = {"flow": flow_doc([{"id": "e", "type": "end"}])}
-        res = await apimain.update_yaml_config("flows", dict(bad), admin, dry_run=True)
+        res = await config_api.update_yaml_config("flows", dict(bad), admin, dry_run=True)
         check("dry run reports errors instead of raising",
               res.get("valid") is False and res.get("errors"))
 
@@ -564,7 +563,7 @@ async def endpoint_checks():
             dict(START, params={"kind": "enroll_dep", "match": {}}, next="end-1"),
             {"id": "end-1", "type": "end"},
         ])}
-        res = await apimain.update_yaml_config("flows", dict(plain), admin2,
+        res = await config_api.update_yaml_config("flows", dict(plain), admin2,
                                                dry_run=True)
         check("dry run against a dir-less tenant validates",
               res.get("valid") is True)
@@ -572,7 +571,7 @@ async def endpoint_checks():
               not (base / "tenants" / "t2").exists())
         check("dry runs spawn no reconcile", reconciles == [])
 
-        res = await apimain.update_yaml_config("flows", dict(doc), admin)
+        res = await config_api.update_yaml_config("flows", dict(doc), admin)
         check("real save succeeds and carries the same flow_warnings",
               "updated" in res.get("message", "")
               and any(w["code"] == "release-ordering"
@@ -585,9 +584,7 @@ async def endpoint_checks():
 
 
 def barrier_checks():
-    """code barrier-empty: a live wait_for on a ref-based signal with no producer queuing to it.
-    See the doc for details on ref-based signals and gate: false.
-    """
+    """code barrier-empty: a live wait_for on a ref-based signal with no producer queuing to it."""
     print("22) wait_for with no producer above it -> barrier-empty fires")
     flow = flow_doc([
         dict(START, next="wait-1"),
@@ -1053,8 +1050,8 @@ def profile_with(payload_type, **over):
 
 
 def payload_type_warning_checks():
-    """A PayloadType Apple does not document is a warning, not an error.
-    See the doc for why typos look like working deployments.
+    """A PayloadType Apple does not document is a warning, not an error. A device that does not recognize a payload type
+    can still report the profile installed, so a typo looks like a successful deployment.
     """
     flow = flow_doc([SCOPED_START, END])
 
@@ -1176,9 +1173,8 @@ def payload_type_warning_checks():
         check("the container half of the copy matches too",
               gen_containers == server_containers)
         for d in sorted(set(gen_containers) ^ set(server_containers)):
-            print(f"     container drift for {d}: "
-                  f"generated {sorted(gen_containers.get(d, []))} "
-                  f"vs server {sorted(server_containers.get(d, []))}")
+            print(f"     container drift for {d}: generated {sorted(gen_containers.get(d, []))} vs server "
+                  f"{sorted(server_containers.get(d, []))}")
 
         # A fixed list of Apple payload types could not describe a third-party payload at all.
         check("the table reaches past Apple's own payload types",
@@ -1205,10 +1201,9 @@ def payload_type_warning_checks():
 
     # ==39. Legacy-bridge declarations and the payload types Apple forbids==
     #
-    # A com.apple.configuration.legacy declaration hands the device a URL for an existing profile. Apple forbids
-    # com.apple.mdm and com.apple.declarations inside one:
+    # Apple forbids com.apple.mdm and com.apple.declarations in a profile that a legacy declaration bridges:
     # https://raw.githubusercontent.com/apple/device-management/release/declarative/declarations/configurations/legacy.yaml
-    # An error rather than a warning: the device refuses the download, and retrying at the device end cannot help.
+    # An error rather than a warning, since the device refuses the download and retrying at the device end cannot help.
     def bridge(profile_id):
         return {"declarations": [{"id": "bridged", "type": "com.apple.configuration.legacy",
                                   "groups": ["lab"], "profile": profile_id}]}
@@ -1277,11 +1272,9 @@ def payload_type_warning_checks():
 
     # ==39f. Software update enforcement declaration sanity checks==
     #
-    # com.apple.configuration.softwareupdate.enforcement.specific enforces one OS version by a deadline. Apple marks
-    # TargetOSVersion and TargetLocalDateTime required, and TargetLocalDateTime is a local time with no timezone suffix:
+    # Apple requires TargetOSVersion and TargetLocalDateTime, the latter a local time with no timezone suffix:
     # https://raw.githubusercontent.com/apple/device-management/release/declarative/declarations/configurations/softwareupdate.enforcement.specific.yaml
-    # Warnings rather than errors, because Apple's declaration schemas move and a per-type check that hard-failed a save
-    # would age badly.
+    # Warnings rather than errors, since a per-type check that blocked saves would go stale as Apple's schemas change.
     def enforce(payload):
         return {"declarations": [{
             "id": "os-enforce", "type":
@@ -1341,9 +1334,8 @@ def payload_type_warning_checks():
 
     # ==39g. The declaration ids the server serves on its own==
     #
-    # ddm_manager emits mm.cfg.status-subscriptions and mm.act.status-subscriptions itself, off the top-level
-    # status_subscriptions list. An authored item with that id becomes a second Identifier of the same name carrying a
-    # different ServerToken, and the device cannot tell which one it is being asked for.
+    # ddm_manager emits mm.cfg.status-subscriptions and mm.act.status-subscriptions itself, from status_subscriptions.
+    # An authored item with that id would be a second Identifier of the same name with a different ServerToken.
     print("\n39g) the reserved status-subscriptions declaration id is refused")
     valid, errors, warnings, fw = run(None, declarations={"declarations": [{
         "id": "status-subscriptions",
@@ -1371,9 +1363,8 @@ def payload_type_warning_checks():
 
     # ==39h. A scope carrying an absurd number of conditions==
     #
-    # Every condition is evaluated synchronously for every device on every pass, and a regex one can spend
-    # GROUP_REGEX_TIMEOUT before giving up. Nothing caps the count at evaluate time, since a scope that silently stopped
-    # matching would pull profiles back off devices, so the author is told at save time.
+    # Every condition is evaluated for every device on every pass, and a regex one can spend GROUP_REGEX_TIMEOUT.
+    # Evaluation does not cap the count, since a scope that silently stopped matching would pull profiles off devices.
     print("\n39h) a scope with more conditions than scoping is sized for warns")
     from controller.services.scoping import MAX_SCOPE_CONDITIONS
 
@@ -1394,10 +1385,10 @@ def payload_type_warning_checks():
     check("config accepted with no condition-count warning",
           valid and not any("conditions, over the" in w for w in warnings))
 
-    # ==39i. iOS platform lists after the watchOS/visionOS split==
+    # ==39i. iOS platform lists without watchOS or visionOS==
     #
-    # 'iOS' is no longer the fallback platform for every non-Mac, non-TV model, so platforms: ['iOS'] no longer reaches
-    # watches or Vision Pro. The validator says so once per document rather than once per item.
+    # Watches map to watchOS and Vision Pro to visionOS, so platforms: ['iOS'] does not reach them. The validator warns
+    # once per document rather than once per item.
     print("\n39i) platforms: ['iOS'] without watchOS/visionOS warns once per document")
     ios_a = dict(WIFI, id="wifi-ios", platforms=["iOS"])
     ios_b = dict(WIFI, id="vpn-ios", name="VPN", platforms=["iOS", "macOS"])
@@ -1432,9 +1423,8 @@ def payload_type_warning_checks():
     #
     # SkipPrimarySetupAccountCreation and SetPrimarySetupAccountAsRegularUser both require AutoSetupAdminAccounts when
     # true, and the managed admin is what fills that key:
-    # https://raw.githubusercontent.com/apple/device-management/release/mdm/commands/account.configuration.yaml A
-    # warning rather than an error: the step itself refuses to send like this, so a save loses that step, not the
-    # config.
+    # https://raw.githubusercontent.com/apple/device-management/release/mdm/commands/account.configuration.yaml
+    # A warning rather than an error, since the step refuses to send like this and a save loses only that step.
     def accounts_flow(params):
         return flow_doc([
             {"id": "start-1", "type": "start",
@@ -1562,8 +1552,7 @@ def param_warns(warnings, key):
 
 
 def checkin_param_type_checks():
-    """A check-in start with tag and condition knobs; see the doc for ATC semantics.
-    """
+    """A check-in start whose cooldown_minutes or once the engine cannot read warns, and still saves."""
     from controller.services.atc import (
         CHECKIN_COOLDOWN_DEFAULT_MINUTES, _checkin_cooldown_minutes, _truthy_param,
     )
@@ -1652,9 +1641,7 @@ def checkin_flow(*, cooldown=None, once=None, tail=None):
 
 
 def checkin_cadence_warning_checks():
-    """A check-in start with an unset cooldown should have one set.
-    See the doc for why infinite cooldown is problematic.
-    """
+    """An explicit cooldown_minutes: 0 above a step that queues work warns, since the run can restart itself."""
     print("\n45) cooldown_minutes: 0 above a step that queues work -> warns")
     valid, errors, warnings, fw = run(checkin_flow(cooldown=0))
     hits = by_code(fw, "checkin-every-event")
@@ -1714,7 +1701,7 @@ def checkin_cadence_warning_checks():
 
 
 def app_managed_key_checks():
-    # See the doc for why install_as_managed type checking is needed.
+    # Only an explicit false turns managed install off, so a value that is not a boolean has to be refused.
     flow = flow_doc([SCOPED_START, END])
 
     def app(**over):
@@ -1756,7 +1743,6 @@ def webhook_warns(warnings, needle):
 
 
 def webhook_target_warning_checks():
-    # See the doc for webhook delivery details and private allowlist.
     flow = flow_doc([SCOPED_START, END])
     before = os.environ.get("DISPATCHER_WEBHOOK_ALLOW_PRIVATE")
 
@@ -1802,8 +1788,7 @@ def webhook_target_warning_checks():
         check("a public address draws no delivery warning",
               not webhook_warns(warnings, "deliveries are refused"))
 
-        print("47c) near miss: the allow-private setting is honoured, from the "
-              "delivery path's own predicate")
+        print("47c) near miss: the allow-private setting is honoured, from the delivery path's own predicate")
         for value in ("true", "1", "yes"):
             _, _, warnings, _ = with_targets(lan, allow_private=value)
             check(f"DISPATCHER_WEBHOOK_ALLOW_PRIVATE={value} silences it",
@@ -1872,11 +1857,7 @@ def webhook_target_warning_checks():
 
 
 def model_error_wording_checks():
-    """A rejected document says what is wrong in the reader's vocabulary.
-
-    Stringifying a pydantic failure hands the console a header counting the errors, the field on its own line, and a
-    machine code after the message. The code names an internal class and cannot help anyone fix a document.
-    """
+    """A rejected document's error reads as plain text, with no pydantic count header, line breaks or error code."""
     from controller.utils.yaml_validator import _model_error
 
     print("\n44) a missing required field reads as a plain sentence")
@@ -1940,8 +1921,8 @@ def remediation_warns(warnings):
 
 
 def remediation_hold_warning_checks():
-    """A remediation install is held on the device until the rule is deleted.
-    See the doc for why removal pass cannot remove it.
+    """A remediation install is held on the device until the rule is deleted. Without the hold, the removal pass would
+    take the profile off, since the device's own scope does not ask for it.
     """
     flow = flow_doc([SCOPED_START, END])
     # lab-remedy is a remediation profile with no scope of its own, so the rule is what puts it on a device. WIFI is
@@ -2021,8 +2002,8 @@ def bridge_warns(warnings):
 
 
 def bridge_url_warning_checks():
-    """A legacy bridge with no PUBLIC_API_URL will be dropped from the declaration set.
-    See the doc for why this matters at save time.
+    """A legacy bridge with no PUBLIC_API_URL will be dropped from the declaration set. Without the warning the config
+    saves clean and no device hears about the declaration.
     """
     flow = flow_doc([SCOPED_START, END])
     legacy = {"declarations": [{"id": "bridged", "type": "com.apple.configuration.legacy",
@@ -2087,8 +2068,8 @@ def retired_warns(warnings):
 
 
 def retired_command_checks():
-    """A command the catalog has retired is a warning in both branches.
-    See the doc for why this matters for dispatcher rules.
+    """A command the catalog has retired is a warning in both branches. Dispatcher rules allow destructive commands, so
+    a saved dispatcher.yaml can carry a retired destructive one.
     """
     from controller.services import command_catalog as _cc
     from controller.services.command_catalog import VALID_COMMAND_TYPES
@@ -2098,8 +2079,7 @@ def retired_command_checks():
     # to it. The reason wording matters because the assertions below check it reaches the warning.
     _saved_retired = dict(_cc.RETIRED_COMMANDS)
     retired = "clear_passcode_legacy"
-    _cc.RETIRED_COMMANDS[retired] = ("Apple requires a key for it that nothing "
-                                     "in this deployment can supply")
+    _cc.RETIRED_COMMANDS[retired] = "Apple requires a key for it that nothing in this deployment can supply"
     check("this suite injected a retired command to exercise the path",
           retired in _cc.RETIRED_COMMANDS)
 

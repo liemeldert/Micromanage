@@ -11,12 +11,12 @@ export interface RolloutCounts {
     installing: number;
     pending: number;
     /**
-     * Apps only, always 0 for profiles: the device acknowledged InstallApplication but no inventory report has named
+     * Apps only (always 0 for profiles). The device acknowledged InstallApplication but no inventory report has named
      * the bundle id yet, so unlike "installing" there is no attempt left to wait on.
      */
     accepted: number;
     failed: number;
-    /** Left the app's scope after being installed: no longer managed and no install coming, unlike "pending". */
+    /** Left the app's scope after installing, with nothing uninstalled and no install coming, unlike "pending". */
     unscoped: number;
     /** Devices that have a deployment row of any status. */
     total: number;

@@ -6,38 +6,37 @@ Never speaks OAuth/HTTP itself or returns/logs secret material.
 import hashlib
 import json
 import logging
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional
 
 from controller.models.tenant import DepProfile, DepServer, Device, Tenant
 from controller.services import crypto_secrets, dep_pki, tenant_config
 from controller.services.dep_client import DepClient, DepError, Transport
 from controller.services.skip_keys import filter_valid_skip_keys
+from controller.utils.timeutil import as_utc, utcnow
 
 logger = logging.getLogger(__name__)
 
-# Devices per DEP fetch/sync page. Apple's maximum (fetchdevicerequest docs); see dep_manager.md.
+# Devices per DEP fetch/sync page. Apple's maximum (fetchdevicerequest docs).
 _SYNC_PAGE = 1000
 
-# Pagination backstop against a server that never clears more_to_follow. See dep_manager.md.
+# Pagination backstop against a server that never clears more_to_follow.
 _MAX_SYNC_PAGES = 500
 
-# Apple expires a sync cursor after 7 days (EXPIRED_CURSOR); dropped locally first. See dep_manager.md.
+# Apple expires a sync cursor after 7 days (EXPIRED_CURSOR); dropped locally first.
 _CURSOR_MAX_AGE = timedelta(days=7)
 
-# Serials per local IN-query, sized for sqlite's bound-parameter limit. See dep_manager.md.
+# Serials per local IN-query, sized for sqlite's bound-parameter limit.
 _DB_IN_CHUNK = 500
 
-
-def _now() -> datetime:
-    return datetime.now(timezone.utc)
+_now = utcnow
 
 
-#  client construction
+# ==client construction==
 
 def _binding(tenant_id: Any, kind: str) -> str:
     """What a DEP credential's ciphertext is bound to. Order/separator are part of the stored format; changing
-    them makes every already-bound row undecryptable. See dep_manager.md."""
+    them makes every already-bound row undecryptable."""
     return f"{tenant_id}|dep|{kind}"
 
 
@@ -61,7 +60,7 @@ def build_client(dep_server: DepServer, transport: Optional[Transport] = None) -
     return DepClient(token, base_url=base, user_agent=ua, transport=transport)
 
 
-#  link lifecycle 
+# ==link lifecycle==
 
 async def begin_link(tenant: Tenant, name: str) -> DepServer:
     """Create (or reset) a DepServer and generate its PKI keypair. Returns the row with public_cert_pem populated (the
@@ -120,7 +119,7 @@ async def complete_link(dep_server: DepServer, p7m: bytes) -> DepServer:
     dep_server.token_enc = crypto_secrets.encrypt(
         json.dumps(token), aad=_binding(dep_server.tenant_id, "token"))
     if not key_bound:
-        # Predates the binding; re-bound here since the row is being written anyway. See dep_manager.md.
+        # Predates the binding; re-bound here since the row is being written anyway.
         rebound = crypto_secrets.rebind(private_pem, aad=key_aad)
         if rebound:
             dep_server.private_key_enc = rebound
@@ -176,8 +175,7 @@ async def unlink(dep_server: DepServer) -> None:
 
 
 async def remove(dep_server: DepServer) -> None:
-    """Fully delete a DepServer and its profile mappings, unlike unlink which keeps the row re-linkable. See
-    dep_manager.md."""
+    """Fully delete a DepServer and its profile mappings, unlike unlink which keeps the row re-linkable."""
     await DepProfile.filter(dep_server=dep_server).delete()
     await Device.filter(
         tenant_id=dep_server.tenant_id, dep_server_id=dep_server.id
@@ -186,8 +184,7 @@ async def remove(dep_server: DepServer) -> None:
 
 
 async def _upgrade_token_binding(dep_server: DepServer) -> None:
-    """Re-encrypt a pre-binding server token in place, best-effort, once, since the scheduled sync opens it anyway.
-    See dep_manager.md."""
+    """Re-encrypt a pre-binding server token in place, best-effort, once, since the scheduled sync opens it anyway."""
     aad = _binding(dep_server.tenant_id, "token")
     plaintext, bound = crypto_secrets.decrypt_bound(dep_server.token_enc, aad=aad)
     if plaintext is None or bound:
@@ -203,11 +200,11 @@ async def _upgrade_token_binding(dep_server: DepServer) -> None:
                          dep_server.id)
 
 
-#  device sync
+# ==device sync==
 
 async def sync_devices(dep_server: DepServer, transport: Optional[Transport] = None) -> Dict[str, Any]:
     """Delta-sync assigned devices from Apple into local placeholders. Idempotent. Returns a summary dict; never
-    raises into the scheduler (records the error on the row). See dep_manager.md."""
+    raises into the scheduler (records the error on the row)."""
     client = build_client(dep_server, transport=transport)
     if client is None:
         await _mark_error(dep_server, "Not linked (no token)")
@@ -220,7 +217,7 @@ async def sync_devices(dep_server: DepServer, transport: Optional[Transport] = N
         records = await _collect_devices(client, dep_server, summary)
     except DepError as exc:
         # A cursor Apple refuses to accept at all -> restart with a full fetch once. EXHAUSTED_CURSOR is excluded: it
-        # means the sync is finished. See dep_manager.md.
+        # means the sync is finished.
         if exc.code in ("EXPIRED_CURSOR", "INVALID_CURSOR", "CURSOR_REQUIRED"):
             logger.warning("DEP: cursor rejected (%s); doing a full refetch", exc.code)
             dep_server.sync_cursor = None
@@ -249,7 +246,7 @@ async def sync_devices(dep_server: DepServer, transport: Optional[Transport] = N
     assign_serials: List[str] = []
 
     # Optimization, not a requirement: a transient DB error here costs this sync its batching, and _upsert_device
-    # falls back to a per-record query when the map is None. See dep_manager.md.
+    # falls back to a per-record query when the map is None.
     device_map: Optional[Dict[str, Device]] = None
     if latest:
         try:
@@ -296,7 +293,7 @@ async def _collect_devices(client: DepClient, dep_server: DepServer,
     across pages."""
     records: List[Dict[str, Any]] = []
     # Mode is fixed for the whole run (cursor present = delta /devices/sync, else full /server/devices); switching
-    # endpoints halfway through pagination drops pages. See dep_manager.md.
+    # endpoints halfway through pagination drops pages.
     delta = bool(dep_server.sync_cursor)
     cursor = dep_server.sync_cursor
     issued_cursor = False
@@ -304,11 +301,10 @@ async def _collect_devices(client: DepClient, dep_server: DepServer,
     while True:
         guard += 1
         if guard > _MAX_SYNC_PAGES:
-            # Listing unfinished: records so far are returned but no cursor is staged. See dep_manager.md.
+            # Listing unfinished: records so far are returned but no cursor is staged.
             logger.error(
-                "DEP: sync paging stopped after %s pages for server %s with more "
-                "pages still outstanding; the device list is incomplete and the "
-                "stored cursor is left where it was",
+                "DEP: sync paging stopped after %s pages for server %s with more pages still outstanding; the device "
+                "list is incomplete and the stored cursor is left where it was",
                 _MAX_SYNC_PAGES, dep_server.id)
             summary["incomplete"] = True
             return records
@@ -318,7 +314,7 @@ async def _collect_devices(client: DepClient, dep_server: DepServer,
             else:
                 resp = await client.fetch_devices(limit=_SYNC_PAGE, cursor=cursor)
         except DepError as exc:
-            # EXHAUSTED_CURSOR: listing is complete, cursor kept as-is (sync-devices docs; dep_manager.md).
+            # EXHAUSTED_CURSOR: listing is complete, cursor kept as-is (sync-devices docs).
             if exc.code != "EXHAUSTED_CURSOR":
                 raise
             logger.info("DEP: cursor for server %s had already returned every "
@@ -333,7 +329,7 @@ async def _collect_devices(client: DepClient, dep_server: DepServer,
             issued_cursor = True
         if not resp.get("more_to_follow"):
             break
-    # Staged in memory only; sync_devices persists it after every record is processed. See dep_manager.md.
+    # Staged in memory only; sync_devices persists it after every record is processed.
     dep_server.sync_cursor = cursor
     if issued_cursor:
         dep_server.cursor_fetched_at = _now()
@@ -342,17 +338,14 @@ async def _collect_devices(client: DepClient, dep_server: DepServer,
 
 def _drop_aged_cursor(dep_server: DepServer) -> None:
     """Forget a stored cursor past Apple's 7-day expiry, so the run starts from a full fetch instead of spending a
-    call Apple will reject with EXPIRED_CURSOR. See dep_manager.md."""
+    call Apple will reject with EXPIRED_CURSOR."""
     fetched_at = dep_server.cursor_fetched_at
     if not dep_server.sync_cursor or fetched_at is None:
         return
-    if fetched_at.tzinfo is None:
-        fetched_at = fetched_at.replace(tzinfo=timezone.utc)
-    age = _now() - fetched_at
+    age = _now() - as_utc(fetched_at)
     if age < _CURSOR_MAX_AGE:
         return
-    logger.info("DEP: stored cursor for server %s is %s old (Apple expires them "
-                "after %s); starting from a full fetch",
+    logger.info("DEP: stored cursor for server %s is %s old (Apple expires them after %s); starting from a full fetch",
                 dep_server.id, age, _CURSOR_MAX_AGE)
     dep_server.sync_cursor = None
     dep_server.cursor_fetched_at = None
@@ -360,7 +353,7 @@ def _drop_aged_cursor(dep_server: DepServer) -> None:
 
 def _parse_op_date(value: Any) -> Optional[datetime]:
     """An ADE record's op_date as an aware datetime, or None when it is missing or unreadable. Apple's ISO 8601
-    does not sort lexicographically; see dep_manager.md."""
+    does not sort lexicographically."""
     if isinstance(value, datetime):
         parsed = value
     else:
@@ -374,12 +367,12 @@ def _parse_op_date(value: Any) -> Optional[datetime]:
             parsed = datetime.fromisoformat(text)
         except ValueError:
             return None
-    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+    return as_utc(parsed)
 
 
 def _op_date_at_least(candidate: Any, current: Any) -> bool:
     """Is candidate the same age or newer than current? Unparseable op_date compares as older than any real
-    timestamp. See dep_manager.md."""
+    timestamp."""
     a, b = _parse_op_date(candidate), _parse_op_date(current)
     if a is None:
         return b is None
@@ -389,7 +382,7 @@ def _op_date_at_least(candidate: Any, current: Any) -> bool:
 
 
 # Columns _upsert_device reads or writes on a Device row; a prefetched (.only()) row must list every touched
-# field or save(update_fields=...) raises IncompleteInstanceError. See dep_manager.md.
+# field or save(update_fields=...) raises IncompleteInstanceError.
 _DEVICE_PREFETCH_FIELDS = (
     "id", "tenant_id", "serial_number", "dep_server_id", "dep_profile_uuid",
     "dep_profile_status", "dep_last_synced_at",
@@ -398,7 +391,7 @@ _DEVICE_PREFETCH_FIELDS = (
 
 async def _prefetch_devices_by_serial(tenant_id) -> Dict[str, Device]:
     """Tenant-wide serial -> Device map, so a first full sync costs one query instead of one per record. Keyed
-    stripped, no case-folding, to match the (tenant_id, serial_number) unique index. See dep_manager.md."""
+    stripped, no case-folding, to match the (tenant_id, serial_number) unique index."""
     mapping: Dict[str, Device] = {}
     for device in await Device.filter(tenant_id=tenant_id).only(*_DEVICE_PREFETCH_FIELDS):
         key = str(device.serial_number or "").strip()
@@ -411,7 +404,7 @@ async def _prefetch_devices_by_serial(tenant_id) -> Dict[str, Device]:
 async def _upsert_device(dep_server: DepServer, serial: str, rec: Dict[str, Any],
                          device_map: Optional[Dict[str, Device]] = None) -> bool:
     """Create or update a Device placeholder for a DEP-assigned serial. Returns True if created. device_map is
-    the optional tenant-wide prefetch; None falls back to a per-record query. See dep_manager.md."""
+    the optional tenant-wide prefetch; None falls back to a per-record query."""
     tenant_id = dep_server.tenant_id
     if device_map is not None:
         device = device_map.get(serial)
@@ -489,7 +482,7 @@ async def _finish_sync(dep_server: DepServer, summary: Dict[str, Any],
     return summary
 
 
-#  enrollment profiles 
+# ==enrollment profiles==
 
 def _load_profile_yaml(tenant_id: str, profile_id: str) -> Optional[Dict[str, Any]]:
     profiles = tenant_config._load(str(tenant_id), "profiles.yaml").get("profiles", [])
@@ -500,7 +493,7 @@ def _load_profile_yaml(tenant_id: str, profile_id: str) -> Optional[Dict[str, An
 
 
 # Apple's define-profile 400 list gives a max length per field; text fields are trimmed to fit, the URL is not
-# (a truncated enrollment URL can't enroll a device). See dep_manager.md.
+# (a truncated enrollment URL can't enroll a device).
 _PROFILE_NAME_MAX = 125
 _URL_MAX = 2000
 _STR_FIELD_MAX = {
@@ -517,8 +510,7 @@ def _build_apple_profile(profile_yaml: Dict[str, Any], dep_server: DepServer,
     payload = profile_yaml.get("payload") or profile_yaml.get("enrollment") or {}
     if len(enroll_url) > _URL_MAX:
         raise DepError("CONFIG_URL_INVALID",
-                       f"The enrollment URL is {len(enroll_url)} characters; Apple "
-                       f"accepts at most {_URL_MAX}")
+                       f"The enrollment URL is {len(enroll_url)} characters; Apple accepts at most {_URL_MAX}")
     out: Dict[str, Any] = {
         "profile_name": str(
             profile_yaml.get("name") or profile_yaml.get("id"))[:_PROFILE_NAME_MAX],
@@ -532,7 +524,7 @@ def _build_apple_profile(profile_yaml: Dict[str, Any], dep_server: DepServer,
         if k in payload and payload[k] is not None:
             out[k] = bool(payload[k])
     # Apple rejects is_mdm_removable=false without is_supervised=true as FLAGS_INVALID
-    # (https://developer.apple.com/documentation/devicemanagement/define-profile). See dep_manager.md.
+    # (https://developer.apple.com/documentation/devicemanagement/define-profile).
     if out.get("is_mdm_removable") is False and out.get("is_supervised") is not True:
         raise DepError(
             "FLAGS_INVALID",
@@ -550,7 +542,7 @@ def _build_apple_profile(profile_yaml: Dict[str, Any], dep_server: DepServer,
                 value = value[:limit]
             out[k] = value
     # Trusted anchors for a controller behind a private/enterprise CA, base64 DER
-    # (https://developer.apple.com/documentation/devicemanagement/profile). See dep_manager.md.
+    # (https://developer.apple.com/documentation/devicemanagement/profile).
     anchors = payload.get("anchor_certs")
     if isinstance(anchors, list) and anchors:
         certs = [str(c).strip() for c in anchors if str(c or "").strip()]
@@ -616,7 +608,7 @@ async def push_profile(dep_server: DepServer, profile_id: str, enroll_url: str,
 async def repush_changed_profiles(dep_server: DepServer, enroll_url: str,
                                   transport: Optional[Transport] = None) -> Dict[str, int]:
     """Re-define at Apple every mapped profile whose profiles.yaml definition has changed since it was pushed. One
-    profile failing does not stop the others. See dep_manager.md."""
+    profile failing does not stop the others."""
     result = {"checked": 0, "pushed": 0, "failed": 0}
     for mapping in await DepProfile.filter(dep_server=dep_server):
         result["checked"] += 1
@@ -640,7 +632,7 @@ async def repush_changed_profiles(dep_server: DepServer, enroll_url: str,
 
 
 async def _default_profile_uuid(dep_server: DepServer) -> Optional[str]:
-    """The Apple profile_uuid auto-assigned to newly-synced devices, or None. See dep_manager.md."""
+    """The Apple profile_uuid auto-assigned to newly-synced devices, or None."""
     tcfg = tenant_config._load(str(dep_server.tenant_id), "config.yaml").get("tenant")
     dep_cfg = tcfg.get("dep") if isinstance(tcfg, dict) else None
     profile_id = ""
@@ -653,7 +645,7 @@ async def _default_profile_uuid(dep_server: DepServer) -> Optional[str]:
     return mapping.profile_uuid if mapping else None
 
 
-# Columns the assign/unassign paths read or write on a Device row. See dep_manager.md.
+# Columns the assign/unassign paths read or write on a Device row.
 _ASSIGN_FIELDS = (
     "id", "tenant_id", "serial_number", "dep_profile_uuid", "dep_profile_status",
     "attributes",
@@ -669,8 +661,7 @@ def _serial_list(serials: List[str], cap: int = 20) -> str:
 
 
 async def _devices_by_serial(tenant_id, serials: List[str]) -> Dict[str, Device]:
-    """serial -> Device for the given serials, in as few queries as the database will take them. See
-    dep_manager.md."""
+    """serial -> Device for the given serials, in as few queries as the database will take them."""
     found: Dict[str, Device] = {}
     unique = list(dict.fromkeys(s for s in serials if s))
     for start in range(0, len(unique), _DB_IN_CHUNK):
@@ -686,7 +677,7 @@ async def _devices_by_serial(tenant_id, serials: List[str]) -> Dict[str, Device]
 async def _assign_and_record(dep_server: DepServer, profile_uuid: str,
                              serials: List[str], client: DepClient) -> Dict[str, Any]:
     """Assign a profile to serials at Apple and reflect the per-serial result onto the local Device rows. Only
-    SUCCESS stamps the row. Returns the results map and retry_after_seconds. See dep_manager.md."""
+    SUCCESS stamps the row. Returns the results map and retry_after_seconds."""
     resp = await client.assign_profile(profile_uuid, serials)
     results = resp.get("devices") or {}
     retry_after = resp.get("retry_after_seconds")
@@ -713,7 +704,7 @@ async def _assign_and_record(dep_server: DepServer, profile_uuid: str,
                 **({"retry_after_seconds": retry_after} if retry_after is not None else {}),
             }
         # attributes is a whole-column write; only rows whose result changes it are re-read and written, so the
-        # merge is against current content, not the bulk-read snapshot. See dep_manager.md.
+        # merge is against current content, not the bulk-read snapshot.
         if record is not None or "dep_assign_result" in (device.attributes or {}):
             fresh = await Device.filter(id=device.id).only("id", "attributes").first()
             attrs = dict((fresh.attributes if fresh else device.attributes) or {})
@@ -737,7 +728,7 @@ async def _assign_and_record(dep_server: DepServer, profile_uuid: str,
 
 async def assign_profile(dep_server: DepServer, profile_id: str, serials: List[str],
                          enroll_url: str, transport: Optional[Transport] = None) -> Dict[str, Any]:
-    """Ensure a profile is defined at Apple, then assign it to the given serials. See dep_manager.md."""
+    """Ensure a profile is defined at Apple, then assign it to the given serials."""
     mapping = await push_profile(dep_server, profile_id, enroll_url, transport=transport)
     client = build_client(dep_server, transport=transport)
     if client is None:
@@ -747,8 +738,7 @@ async def assign_profile(dep_server: DepServer, profile_id: str, serials: List[s
 
 async def unassign_profile(dep_server: DepServer, serials: List[str],
                            transport: Optional[Transport] = None) -> Dict[str, Any]:
-    """Clear the assigned profile from serials at Apple, marking locally only the ones Apple reports as SUCCESS.
-    See dep_manager.md."""
+    """Clear the assigned profile from serials at Apple, marking locally only the ones Apple reports as SUCCESS."""
     client = build_client(dep_server, transport=transport)
     if client is None:
         raise DepError("NOT_LINKED", "DEP server is not linked")

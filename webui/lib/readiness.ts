@@ -1,9 +1,5 @@
-// GET /api/v1/readiness: whether the environment and this tenant have what each capability needs to run
-// (an enrollment topic, a bucket for app packages, the webhook's shared secret). Admin only, since the body
-// names deployment-wide settings.
-//
-// A 404 means either the running controller has no such route or the route is refusing to answer this caller.
-// Both read as an absence of readiness data rather than an error: no extra retries, and nothing renders.
+// GET /api/v1/readiness (admin only): whether the environment and this tenant have what each capability needs to run.
+// A 404 (no such route, or the controller refusing this caller) reads as no readiness data, not an error.
 
 import {useCallback, useEffect, useState} from "react";
 import {api, ApiError, type Readiness} from "./api";

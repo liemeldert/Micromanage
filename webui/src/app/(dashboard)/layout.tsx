@@ -281,8 +281,7 @@ function NavItem({
             })}
             data-active={active ? true : undefined}
             data-child={child ? true : undefined}
-            // On a phone the navbar is an overlay: leaving it open would cover the
-            // page it just navigated to.
+            // On a phone the navbar is an overlay: leaving it open would cover the page it just navigated to.
             onClick={onNavigate}
         >
             <destination.icon size={child ? 16 : 18} className="mm-nav-icon"/>

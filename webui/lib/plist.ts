@@ -287,8 +287,7 @@ function uuid(): string {
     }
 }
 
-// Build a downloadable .mobileconfig wrapping one or more payloads, matching how the controller assembles the
-// profile.
+// Build a downloadable .mobileconfig wrapping one or more payloads, matching how the controller assembles the profile.
 export function profileToMobileconfig(p: {
     id: string;
     name: string;

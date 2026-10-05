@@ -11,13 +11,13 @@ from pathlib import Path
 import httpx
 from tortoise import Tortoise, connections
 
+from tests._verify_harness import make_check, SqlSpy
+
 PASS, FAIL = [], []
 REPO = Path(__file__).resolve().parent.parent
 
 
-def check(label, cond):
-    (PASS if cond else FAIL).append(label)
-    print(f"  [{'PASS' if cond else 'FAIL'}] {label}")
+check = make_check(FAIL, PASS)
 
 
 class FakeS3Client:
@@ -116,33 +116,8 @@ async def main():
         s3_config={"bucket": "pkgs", "access_key_id": "AK", "secret_access_key": "SK"})
 
     conn = connections.get("default")
-    seen_sql = []
-
-    class _Spy:
-        """Records the SQL a block issues, so the query arithmetic can be counted rather than argued."""
-
-        def __enter__(self):
-            self._q, self._qd = conn.execute_query, conn.execute_query_dict
-
-            async def spy_q(sql, values=None):
-                seen_sql.append(sql)
-                return await self._q(sql, values)
-
-            async def spy_qd(sql, values=None):
-                seen_sql.append(sql)
-                return await self._qd(sql, values)
-
-            seen_sql.clear()
-            conn.execute_query, conn.execute_query_dict = spy_q, spy_qd
-            return self
-
-        def __exit__(self, *exc):
-            conn.execute_query, conn.execute_query_dict = self._q, self._qd
-            return False
-
-    def _selects(table):
-        return [s for s in seen_sql
-                if s.lstrip().upper().startswith("SELECT") and f'"{table}"' in s]
+    spy = SqlSpy(conn)
+    _selects = spy.selects
 
     seq = {"n": 0}
 
@@ -207,11 +182,10 @@ async def main():
         dev = await new_device()
         await seed_removable(dev, kind)
         task = await new_task(dev, kind, DETAILS[kind])
-        with _Spy():
+        with spy:
             await handler(task)
         row, ok = await reached_mdm(task, MDM_KIND[kind], dev)
-        check(f"{kind}: the fetch path reaches the MDM enqueue "
-              f"(status={row.status}, error={row.error!r})", ok)
+        check(f"{kind}: the fetch path reaches the MDM enqueue (status={row.status}, error={row.error!r})", ok)
         check(f"{kind}: the fetch costs one device SELECT and one tenant SELECT "
               f"(got {len(_selects('devices'))} and {len(_selects('tenants'))})",
               len(_selects("devices")) == 1 and len(_selects("tenants")) == 1)
@@ -247,7 +221,7 @@ async def main():
             await seed_removable(dev, kind)
             task = await new_task(dev, kind, DETAILS[kind])
             partial_dev = await Device.filter(id=dev.id).only(*sorted(fields)).first()
-            with _Spy():
+            with spy:
                 await handler(task, device=partial_dev, tenant=tenant)
             row, ok = await reached_mdm(task, MDM_KIND[kind], dev)
             check(f"{width_name} + {kind}: reaches the enqueue off a partial row "
@@ -289,7 +263,7 @@ async def main():
     # Device bound and tenant omitted costs one tenant read, rather than passing None into the manager.
     half_dev = await new_device()
     half_task = await new_task(half_dev, "profile_install", DETAILS["profile_install"])
-    with _Spy():
+    with spy:
         await HANDLERS["profile_install"](half_task, device=half_dev)
     half_row, half_ok = await reached_mdm(half_task, "install_profile", half_dev)
     check("device bound with tenant omitted still deploys", half_ok)
@@ -302,14 +276,14 @@ async def main():
     bound_devs = [await new_device() for _ in range(n)]
     bound_tasks = [await new_task(d, "profile_install", DETAILS["profile_install"])
                    for d in bound_devs]
-    with _Spy():
+    with spy:
         for d, t in zip(bound_devs, bound_tasks):
             await HANDLERS["profile_install"](t, device=d, tenant=tenant)
     bound_reads = len(_selects("devices")) + len(_selects("tenants"))
     cold_devs = [await new_device() for _ in range(n)]
     cold_tasks = [await new_task(d, "profile_install", DETAILS["profile_install"])
                   for d in cold_devs]
-    with _Spy():
+    with spy:
         for t in cold_tasks:
             await HANDLERS["profile_install"](t)
     cold_reads = len(_selects("devices")) + len(_selects("tenants"))
@@ -323,15 +297,14 @@ async def main():
     HANDLER_DEVICE_FIELDS = {"id", "udid", "serial_number"}
     for width_name, fields in WIDTHS.items():
         missing = sorted(HANDLER_DEVICE_FIELDS - fields)
-        check(f"{width_name} still lists id, udid and serial_number "
-              f"(missing: {missing})", not missing)
+        check(f"{width_name} still lists id, udid and serial_number (missing: {missing})", not missing)
     check("...and all three carry tenant_id, which the tenant-less branch reads",
           all("tenant_id" in fields for fields in WIDTHS.values()))
 
     print("\n== 6. Every services-layer spawn binds, and a partial survives ==")
     # A dropped binding is silent: the handler falls back to the fetch and still works, two queries per task slower, so
     # it is asserted structurally.
-    for module in ("reconciler", "dispatcher", "atc"):
+    for module in ("reconciler", "dispatcher", "atc_node_effects"):
         tree = ast.parse((REPO / f"controller/services/{module}.py").read_text())
         bound = set()
         for call in ast.walk(tree):
@@ -348,15 +321,14 @@ async def main():
         check(f"{module}.py binds device and tenant at every handler spawn "
               f"(unbound: {unbound})", bool(used) and not unbound)
 
-    check("TASK_HANDLERS is still the bare functions, so retry_task keeps "
-          "exercising the fetch",
+    check("TASK_HANDLERS is still the bare functions, so retry_task keeps exercising the fetch",
           all(th.TASK_HANDLERS[k] is HANDLERS[k] for k in HANDLERS))
 
     # execute_task calls handler(task) positionally, so a partial carrying only keyword arguments has to survive it. It
     # is also the only place here that drives the handler the way the reconciler does.
     exec_dev = await new_device()
     exec_task = await new_task(exec_dev, "app_install", DETAILS["app_install"])
-    with _Spy():
+    with spy:
         await TaskManager().execute_task(
             exec_task,
             partial(th.handle_app_install_task, device=exec_dev, tenant=tenant))

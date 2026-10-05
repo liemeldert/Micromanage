@@ -70,8 +70,7 @@ def certificate_der(tenant: Tenant) -> Optional[bytes]:
         cert = x509.load_pem_x509_certificate(tenant.fv_escrow_cert_pem.encode())
         return cert.public_bytes(serialization.Encoding.DER)
     except Exception:
-        logger.exception("filevault: stored escrow certificate would not parse "
-                         "for tenant %s", tenant.id)
+        logger.exception("filevault: stored escrow certificate would not parse for tenant %s", tenant.id)
         return None
 
 

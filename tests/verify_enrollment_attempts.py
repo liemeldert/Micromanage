@@ -1,16 +1,6 @@
 """E2E checks for enrollment-attempt logging, on in-memory sqlite.
 
 Run: PYTHONPATH=. .venv/bin/python tests/verify_enrollment_attempts.py
-
-Covers the two silent-drop points in WebhookHandler._upsert_device (services/webhook_handler.py) and the list endpoints.
-
-A no_tenant drop records an EnrollmentAttempt with tenant=None: the requested id was never verified, so it stays in
-detail rather than the FK, where a forged ?tenant=<victim> would pollute that tenant's view. A no_serial drop, where the
-tenant resolved but an unknown udid checked in with no SerialNumber, records the resolved tenant FK. A successful enroll
-records nothing, since the devices table already shows it.
-
-GET /api/v1/enrollment-attempts is tenant-scoped, excluding cross-tenant and tenant=None rows. GET
-/api/v1/enrollment-attempts/unattributed is the admin-only view of the tenant=None rows.
 """
 import inspect
 
@@ -18,18 +8,16 @@ from tortoise import Tortoise
 
 from controller.auth.dependencies import Principal, require_admin
 from controller.models.tenant import Tenant, User, Device, EnrollmentAttempt
-from controller.api.main import (
+from controller.api.routes.enrollment import (
     list_enrollment_attempts,
     list_unattributed_enrollment_attempts,
 )
 from controller.services.webhook_handler import WebhookHandler
+from tests._verify_harness import make_check
 
 PASS, FAIL = [], []
 
-
-def check(label, cond):
-    (PASS if cond else FAIL).append(label)
-    print(f"  [{'PASS' if cond else 'FAIL'}] {label}")
+check = make_check(FAIL, PASS)
 
 
 async def main():
@@ -38,7 +26,7 @@ async def main():
 
     handler = WebhookHandler()
 
-    #  1. no_tenant drop: nothing resolves a tenant, neither the ?tenant hint, the single-tenant fallback, nor a
+    # 1. no_tenant drop: nothing resolves a tenant, neither the ?tenant hint, the single-tenant fallback, nor a
     # "default" tenant.
     dev = await handler._upsert_device(
         "UDID-NO-TENANT", {"tenant": "victim-tenant"}, {"SerialNumber": "SN1"},
@@ -59,7 +47,7 @@ async def main():
             a.detail.get("requested_tenant") == "victim-tenant" and a.tenant_id is None,
         )
 
-    #  1b. A device stuck in a drop state repeats this on every check-in, so the single row is updated with the
+    # 1b. A device stuck in a drop state repeats this on every check-in, so the single row is updated with the
     # latest values and a count. An unbounded, externally driven table is a DoS vector.
     await handler._upsert_device(
         "UDID-NO-TENANT", {"tenant": "victim-tenant"}, {"SerialNumber": "SN1"},
@@ -71,7 +59,7 @@ async def main():
         check("repeated drop increments the detail count", no_tenant_after[0].detail.get("count") == 2)
         check("repeated drop refreshes topic to the latest", no_tenant_after[0].topic == "mdm.TokenUpdate")
 
-    #  2. no_serial drop: a tenant resolves (single-tenant install) but an unknown udid checks in with no
+    # 2. no_serial drop: a tenant resolves (single-tenant install) but an unknown udid checks in with no
     # SerialNumber. The FK is safe to set here because that tenant was actually looked up.
     tenant = await Tenant.create(id="t1", name="Tenant One")
     dev = await handler._upsert_device(
@@ -88,7 +76,7 @@ async def main():
         check("no_serial attempt records the udid", a.udid == "UDID-NO-SERIAL")
         check("no_serial attempt records the topic", a.topic == "mdm.TokenUpdate")
 
-    #  3. Successful enroll: the device is created or upserted and no EnrollmentAttempt row is written.
+    # 3. Successful enroll: the device is created or upserted and no EnrollmentAttempt row is written.
     before = await EnrollmentAttempt.all().count()
     dev = await handler._upsert_device(
         "UDID-OK", {},
@@ -107,7 +95,7 @@ async def main():
     check("repeat check-in for a known device still resolves", dev2 is not None)
     check("repeat check-in for a known device logs no attempt", after2 == before2)
 
-    #  4. GET /api/v1/enrollment-attempts is tenant-scoped.
+    # 4. GET /api/v1/enrollment-attempts is tenant-scoped.
     other_tenant = await Tenant.create(id="t2", name="Tenant Two")
     await EnrollmentAttempt.create(tenant=other_tenant, outcome="no_serial", udid="OTHER-UDID")
 
@@ -129,7 +117,7 @@ async def main():
         res_filtered["total"] == 1 and res_filtered["attempts"][0]["outcome"] == "no_serial",
     )
 
-    #  5. GET /api/v1/enrollment-attempts/unattributed is the only view of the tenant=None rows, which come from a
+    # 5. GET /api/v1/enrollment-attempts/unattributed is the only view of the tenant=None rows, which come from a
     # profile naming a tenant this controller does not have.
     unattributed = await list_unattributed_enrollment_attempts(
         skip=0, limit=100, outcome=None, admin=admin)

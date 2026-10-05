@@ -84,12 +84,9 @@ function SecretParamInput({
     );
 }
 
-/** The opt-out on a step that the release barrier waits for. Label and help come from the step catalog, so the
- * editor shows the same wording the server publishes. The switch renders even when a node's spec carries no gate
- * param, since an author left without the control has to hand-edit flows.yaml.
- *
- * An absent key means the barrier waits and only a literal false opts out, so turning the wait back on writes
- * undefined and drops the key rather than leaving gate: true in the document. */
+/** The opt-out on a step that the release barrier waits for. The switch renders even when a node's spec has no gate
+ * param, so the author need not hand-edit flows.yaml. An absent key means the barrier waits and only a literal false
+ * opts out, so turning the wait back on drops the key instead of writing true. */
 function GateSwitch({
                         spec,
                         p,

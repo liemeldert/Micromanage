@@ -259,7 +259,7 @@ export function PayloadForm({
         const description = fieldDescriptionNode(field);
 
         if (field.type === "boolean") {
-            // Booleans under a secret-named key arrive unredacted, but the sentinel still lands on a boolean-typed
+            // Booleans under a secret-named key arrive unredacted, but the sentinel still appears on a boolean-typed
             // key when the stored value is not a boolean. It is a string, so coercing it to a checkbox would show a
             // switched-off restriction as on.
             if (val === REDACTED) {

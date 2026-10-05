@@ -1,7 +1,6 @@
 """The profile payload types this server recognizes.
 
 Both sets and the data-key tables further down are copies of their sources, not runtime-read.
-See docs/controller/utils/payload_types.md for regeneration and validation details.
 """
 
 from typing import Any

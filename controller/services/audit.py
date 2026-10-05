@@ -21,6 +21,25 @@ _NEVER_LOGGED = frozenset({"pin", "passcode", "password", "current_password",
 _NEVER_LOGGED_SUBSTRINGS = ("password", "passcode", "secret", "token")
 
 
+async def _create(tenant, actor_email: Optional[str], actor_role: Optional[str], action: str,
+                  target_type: Optional[str], target_id: Optional[str], detail: Optional[Dict[str, Any]],
+                  kind: str) -> None:
+    """Write one audit row, logging a failure instead of raising it."""
+    try:
+        await AuditLog.create(
+            tenant=tenant,
+            actor_email=actor_email,
+            actor_role=actor_role,
+            action=action,
+            target_type=target_type,
+            target_id=target_id,
+            detail=detail or {},
+        )
+    except Exception:
+        logger.exception("audit: failed to record %s %s (target=%s/%s)",
+                         kind, action, target_type, target_id)
+
+
 async def record_audit(
     principal: Principal,
     action: str,
@@ -33,19 +52,8 @@ async def record_audit(
 
     Swallows and logs failures; never rolls back completed work. Detail must not contain secrets.
     """
-    try:
-        await AuditLog.create(
-            tenant=principal.tenant,
-            actor_email=principal.email,
-            actor_role=principal.role,
-            action=action,
-            target_type=target_type,
-            target_id=target_id,
-            detail=detail or {},
-        )
-    except Exception:
-        logger.exception("audit: failed to record action %s (target=%s/%s)",
-                         action, target_type, target_id)
+    await _create(principal.tenant, principal.email, principal.role, action, target_type, target_id, detail,
+                  "action")
 
 
 async def record_system_audit(
@@ -56,24 +64,10 @@ async def record_system_audit(
     target_id: Optional[str] = None,
     detail: Optional[Dict[str, Any]] = None,
 ) -> None:
-    """Record an action the system took, with no console user behind it. Best-effort.
-
-    tenant must be a Tenant row the caller actually resolved, never an id from the request.
-    Detail must not contain secrets.
+    """Record an action the system took, with no console user behind it. Best-effort. tenant must be a Tenant row the
+    caller resolved, never an id from the request. Detail must not contain secrets.
     """
-    try:
-        await AuditLog.create(
-            tenant=tenant,
-            actor_email=None,
-            actor_role=None,
-            action=action,
-            target_type=target_type,
-            target_id=target_id,
-            detail=detail or {},
-        )
-    except Exception:
-        logger.exception("audit: failed to record system action %s (target=%s/%s)",
-                         action, target_type, target_id)
+    await _create(tenant, None, None, action, target_type, target_id, detail, "system action")
 
 
 def redact_command_params(command_type: str,
@@ -150,10 +144,8 @@ async def record_tag_change(
     principal: Optional[Principal] = None,
     reason: Optional[str] = None,
 ) -> None:
-    """Record who or what changed a device's tags. Best-effort.
-
-    source: console, atc, or dispatcher. source_ref: the flow node or rule id.
-    Pass principal for console writes; omit for automated writes. Only call when tags really changed.
+    """Record who or what changed a device's tags. Best-effort. source is console, atc, or dispatcher; source_ref is the
+    flow node or rule id. Pass principal for console writes, omit it for automated ones; call only when tags changed.
     """
     added = [str(t) for t in (added or [])]
     removed = [str(t) for t in (removed or [])]

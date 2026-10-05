@@ -25,6 +25,21 @@ def tenant_dir(tenant_id: str) -> Path:
     return yaml_base() / "tenants" / str(tenant_id)
 
 
+def write_yaml_atomic(path: Path, data: Dict[str, Any], text: Optional[str] = None,
+                      tmp: Optional[Path] = None) -> None:
+    """Write YAML to path through a temporary file and os.replace. tmp defaults to path with ".tmp" appended.
+
+    A supplied text is written verbatim to keep comments; otherwise data is dumped with sort_keys=False.
+    """
+    tmp = tmp or path.with_suffix(path.suffix + ".tmp")
+    with open(tmp, "w", encoding="utf-8") as f:
+        if text is not None:
+            f.write(text)
+        else:
+            yaml.safe_dump(data, f, default_flow_style=False, sort_keys=False)
+    os.replace(tmp, path)
+
+
 def invalidate(tenant_id: Optional[str] = None) -> None:
     """Drop cached parses; escape hatch for tests and out-of-band edits."""
     if tenant_id is None:
@@ -79,28 +94,31 @@ def _load_readonly(tenant_id: str, filename: str) -> Dict[str, Any]:
     return load_file_readonly(tenant_dir(tenant_id) / filename)
 
 
+def _load_list(tenant_id: str, key: str, readonly: bool = False) -> List[Dict[str, Any]]:
+    """The key list from a tenant's <key>.yaml, empty if the file is absent or the value is not a list."""
+    doc = _load_readonly(tenant_id, f"{key}.yaml") if readonly else _load(tenant_id, f"{key}.yaml")
+    items = doc.get(key, [])
+    return items if isinstance(items, list) else []
+
+
 def load_groups(tenant_id: str) -> List[Dict[str, Any]]:
     """The groups list from a tenant's groups.yaml (empty if absent)."""
-    groups = _load(tenant_id, "groups.yaml").get("groups", [])
-    return groups if isinstance(groups, list) else []
+    return _load_list(tenant_id, "groups")
 
 
 def load_groups_readonly(tenant_id: str) -> List[Dict[str, Any]]:
     """Groups list cached; caller must not store or mutate."""
-    groups = _load_readonly(tenant_id, "groups.yaml").get("groups", [])
-    return groups if isinstance(groups, list) else []
+    return _load_list(tenant_id, "groups", readonly=True)
 
 
 def load_apps(tenant_id: str) -> List[Dict[str, Any]]:
     """The apps list from a tenant's apps.yaml (empty if absent)."""
-    apps = _load(tenant_id, "apps.yaml").get("apps", [])
-    return apps if isinstance(apps, list) else []
+    return _load_list(tenant_id, "apps")
 
 
 def load_profiles(tenant_id: str) -> List[Dict[str, Any]]:
     """The profiles list from a tenant's profiles.yaml (empty if absent)."""
-    profiles = _load(tenant_id, "profiles.yaml").get("profiles", [])
-    return profiles if isinstance(profiles, list) else []
+    return _load_list(tenant_id, "profiles")
 
 
 def load_declarations(tenant_id: str) -> Dict[str, Any]:

@@ -52,6 +52,11 @@ _gen_shared_secrets() {
   _env_set WEBHOOK_HMAC_KEY  "$(openssl rand -hex 32)"
 }
 
+# A key of its own, so rotating JWT_SECRET leaves stored secrets readable. Fernet wants urlsafe base64 of 32 bytes.
+_gen_encryption_key() {
+  _env_set SECRET_ENCRYPTION_KEY "$(openssl rand -base64 32 | tr '+/' '-_')"
+}
+
 cmd_env() {
   if [[ -f .env ]]; then
     warn ".env already exists, skipping. Delete it first to regenerate."
@@ -76,6 +81,7 @@ cmd_env() {
     -e "s/changeme_scep_challenge/${scep_ch}/" \
     .env && rm -f .env.bak
   _gen_shared_secrets
+  _gen_encryption_key
 
   echo
   read -rp "Enter your MDM public hostname (e.g. mdm.example.org): " hostname
@@ -209,7 +215,7 @@ cmd_apns_decrypt() {
   # The emailed file is hex text of a PKCS7 envelope encrypted to pki.crt.
   info "Decrypting the emailed request with certs/apns/pki.key"
   local tmp; tmp=$(mktemp)
-  # `xxd -r -p` turns the hex text back into DER. Falls back to python if xxd is absent.
+  # xxd -r -p turns the hex text back into DER. Falls back to python if xxd is absent.
   if command -v xxd &>/dev/null; then
     tr -d ' \n\r' < "$p7" | xxd -r -p > "$tmp"
   else
@@ -509,7 +515,7 @@ cmd_up() {
   echo -e "  step-ca:    ${GRN}https://localhost:9443${NC}"
 }
 
-# -- full interactive setup -----------------------------------------------------
+# full interactive setup --------------------------------------------------------
 cmd_interactive() {
   echo
   echo -e "${BLU}Micromanage First-time Setup!${NC}"
@@ -552,10 +558,10 @@ _scaffold_dev_tenant() {
   echo -e "  The controller will create the DB row on first sync."
 }
 
-# -- dev ----------------------------------------------------------------------
+# dev -------------------------------------------------------------------------
 cmd_dev() {
   echo
-  echo -e "${BLU}Micromanage testing/developement setup${NC}"
+  echo -e "${BLU}Micromanage testing/development setup${NC}"
   echo
 
   warn "Running in development mode! Do not use this for actual devices!"
@@ -581,6 +587,7 @@ cmd_dev() {
       -e "s/changeme_scep_challenge/${scep_ch}/" \
       .env && rm -f .env.bak
     _gen_shared_secrets
+    _gen_encryption_key
     ok ".env created"
   else
     ok ".env already exists, skipping"

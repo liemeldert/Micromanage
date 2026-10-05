@@ -223,8 +223,7 @@ export function AlertBoard() {
                             onOpenRun={(runId) => router.push(`/atc/runs/${runId}`)}
                             onAck={() => act(() => api.acknowledgeAlert(token!, a.id), a.id)}
                             onResolve={() => {
-                                // A break-glass alert asks for a reason first; everything else closes on
-                                // the click.
+                                // A break-glass alert asks for a reason first; everything else closes on the click.
                                 if (isBreakGlassAlert(a)) {
                                     setReason("");
                                     setDismissing(a);
@@ -339,8 +338,6 @@ export function AlertBoard() {
 
 const when = (iso?: string | null) => (iso ? new Date(iso).toLocaleString() : "");
 
-/** The expanded body of a break-glass alert: who revealed the credential, how many times it has been revealed,
- * and whether this reveal was part of a burst. */
 function BreakGlassDetail({detail}: { detail: BreakGlassAlertDetail }) {
     const revealed = detail.reveal_count ?? 0;
     return (
@@ -363,7 +360,7 @@ function BreakGlassDetail({detail}: { detail: BreakGlassAlertDetail }) {
                         {detail.last_revealed_at ? ` on ${when(detail.last_revealed_at)}` : ""}.
                     </>
                 ) : (
-                    "No record of who took it."
+                    "No record of who revealed it. This should not happen so something's wrong."
                 )}
             </Text>
             {detail.first_revealed_by && detail.first_revealed_by !== detail.last_revealed_by && (
@@ -383,15 +380,13 @@ function BreakGlassDetail({detail}: { detail: BreakGlassAlertDetail }) {
     );
 }
 
-/** One gap-ledger line as a sentence naming the wait step that came up short. An unrecognised kind falls back to
- * the raw value rather than disappearing. */
 function gapHeadline(gap: FlowGap): string {
     const node = gap.node || "an earlier step";
     switch (gap.kind) {
         case "not_queued":
-            return `${node} did not queue everything it named`;
+            return `${node} did not properly queue all blocks`;
         case "barrier_empty":
-            return `the wait at ${node} had nothing to hold`;
+            return `the wait at ${node} had nothing to wait for`;
         case "never_arrived":
             return `${node} gave up waiting for these`;
         default:
@@ -399,10 +394,7 @@ function gapHeadline(gap: FlowGap): string {
     }
 }
 
-/** The ledger the release guard snapshotted onto the alert: which ids the device did not get and why.
- *
- * A broken grade means the flow named something the engine could not deliver, so there is an id to look up. A
- * policy grade means the device was not entitled to it yet, usually a rollout wave. */
+
 function GapLedger({gaps}: { gaps: FlowGap[] }) {
     const worst = gaps.some(
         (g) => g.grade === "broken" || (g.items ?? []).some((i) => i.grade === "broken"),
@@ -420,27 +412,22 @@ function GapLedger({gaps}: { gaps: FlowGap[] }) {
                 p="xs"
                 title={
                     worst === "broken"
-                        ? "The device went out without something the flow asked for"
-                        : "The device went out early, but nothing it was owed is missing"
+                        ? "The device exited setup early and is missing something defined by a flow"
+                        : "The device exited setup early, but nothing appears to be missing"
                 }
             >
                 <Text fz="xs">
                     {worst === "broken" && named
-                        ? "It left Setup Assistant and is in use now. The ids below were named by the " +
-                        "flow and never reached the device, so check each one against this tenant's " +
-                        "config before another device runs this flow."
+                        ? "The device left Setup Assistant. The following were defined in the flow but " +
+                        "did not appear to run:"
                         : worst === "broken"
-                            ? "It left Setup Assistant and is in use now. Nothing above the wait step " +
-                            "below ever queued anything for it, so the flow is holding for something " +
-                            "it never asks for. Fix the flow before another device runs it."
+                            ? "The device has left Setup Assistant, but we have detected some anomalies. The flow " +
+                            "appears to be holding for something indefinitely."
                             : named
                                 ? "It left Setup Assistant before the wait step had anything to hold, " +
-                                "because this device was not entitled to the items below yet. If the " +
-                                "step is not meant to hold a device up, switch its gate off in the " +
-                                "flow editor."
-                                : "It left Setup Assistant before the wait step had anything to hold, and " +
-                                "nothing this device was owed is missing. If the step is not meant to " +
-                                "hold a device up, switch its gate off in the flow editor."}
+                                "because this device was not entitled to the items below yet."
+                                : "It left Setup Assistant before the wait block and does not appear to " +
+                                "be missing anything."}
                 </Text>
             </Alert>
 
@@ -489,9 +476,6 @@ function GapLedger({gaps}: { gaps: FlowGap[] }) {
     );
 }
 
-/** Everything a failed ATC run put on the board: the node it stopped at, the error, how often it has come back,
- * and the way through to the run itself. Failures coalesce into one row per device and flow, so this panel is the
- * only place the repeat count is visible. */
 function AtcFailureDetail({
                               detail,
                               onOpenRun,
@@ -624,8 +608,6 @@ function AlertRow({
 
     return (
         <GlassCard withBorder p="sm" style={{borderLeft: `4px solid var(--mantine-color-${color}-6)`}}>
-            {/* Wraps rather than squeezes: on a phone the buttons and the summary do not fit on one line, and
-          nowrap spends the width on the buttons and truncates the summary. */}
             <Group justify="space-between" wrap="wrap">
                 <Group gap="sm" wrap="nowrap" style={{minWidth: 0, flex: "1 1 260px"}}>
                     <ActionIcon variant="subtle" color="gray" onClick={onToggle}

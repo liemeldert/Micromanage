@@ -1,8 +1,5 @@
-// The glow a press leaves on the surface under it. It grows with hold time and with trackpad force where
-// there is any, so a tap barely marks the surface and a deliberate hold swells to full size.
-//
-// Drawn as one more background layer on the element, which clips it there and centres it on the cursor
-// position the pointer tracker already keeps. A table row could not carry a child node for it.
+// The glow a press leaves on the surface, growing with hold time and with trackpad force where there is any. It is a
+// background layer centred on the pointer position glass-pointer tracks, since a table row cannot carry a child node.
 
 const REDUCED_MOTION = "(prefers-reduced-motion: reduce)";
 

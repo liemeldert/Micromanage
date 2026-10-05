@@ -13,6 +13,8 @@ from typing import Any, Callable, Dict, List, Optional
 
 from packaging import version
 
+from controller.utils.timeutil import as_utc
+
 logger = logging.getLogger(__name__)
 
 try:
@@ -26,8 +28,8 @@ except ImportError:  # pragma: no cover - regex is pinned in requirements
 # Hard ceiling on a single condition's regex match, seconds.
 GROUP_REGEX_TIMEOUT = float(os.getenv("GROUP_REGEX_TIMEOUT_SECONDS", "2.0"))
 
-# Advisory ceiling on how many conditions one scope should carry. See the module docstring for why it is not enforced
-# here.
+# Advisory ceiling on how many conditions one scope should carry; yaml_validator warns above it at save time. It is not
+# enforced here, since a scope that silently stopped matching would pull profiles and apps back off devices.
 MAX_SCOPE_CONDITIONS = 64
 
 # Resolves membership of one named group. GroupManager supplies one (with its cycle guard) so group conditions can
@@ -248,6 +250,27 @@ def evaluate_scope(
     return True
 
 
+# The keys a scope understands. Anything else is ignored.
+SCOPE_KEYS = ("groups", "conditions", "include_devices", "exclude_devices")
+
+
+def scope_is_empty(scope: Any) -> bool:
+    """True when a scope sets none of SCOPE_KEYS. A truthy scope that is not a mapping counts as set."""
+    if not scope:
+        return True
+    if not isinstance(scope, dict):
+        return False
+    return not any(scope.get(k) for k in SCOPE_KEYS)
+
+
+def matches_or_all(device: Any, device_groups: List[str], scope: Optional[Dict[str, Any]]) -> bool:
+    """An empty scope matches every device; otherwise evaluate_scope decides. Flow starts and Dispatcher rules read
+    scopes this way."""
+    if scope_is_empty(scope):
+        return True
+    return evaluate_scope(device, device_groups, scope)
+
+
 # ==Gradual rollout==
 
 # Iteration backstop for the wave walk (covers years of hourly steps).
@@ -259,7 +282,7 @@ def _parse_start(value: Any) -> Optional[datetime]:
         dt = datetime.fromisoformat(str(value))
     except Exception:
         return None
-    return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+    return as_utc(dt)
 
 
 def rollout_coverage(rollout: Dict[str, Any], now: Optional[datetime] = None) -> int:

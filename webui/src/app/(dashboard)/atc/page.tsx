@@ -330,13 +330,11 @@ export default function ATCPage() {
     const handoffInFlight = useRef<{ liveId: string; patches: Partial<FlowDoc>[] } | null>(null);
 
     // A draft that took over the canvas from its live flow without a rebuild. The graph on screen was built under the
-    // live flow's id and is now the draft's content, so emits still carrying the old name belong to the draft.
+    // live flow's id but holds the draft's content, so emits still carrying that id belong to the draft.
     const inheritedCanvas = useRef<{ from: string; to: string } | null>(null);
 
-    /** Move the work on the canvas into a draft of live, and follow it.
-     *
-     * The server builds the draft from what is on disk, and the edit that triggered this is written into the draft
-     * rather than onto the live flow, so the live flow keeps running unchanged until somebody promotes. */
+    /** Move the work on the canvas into a draft of live, and follow it. The server builds the draft from what is on
+     * disk and the triggering edit goes into the draft, so the live flow runs unchanged until the draft is promoted. */
     const handOffToDraft = useCallback(
         async (live: FlowDoc, patch: Partial<FlowDoc>, note = "") => {
             if (!token) return;
@@ -851,7 +849,7 @@ export default function ATCPage() {
         }
     };
 
-    // Removing a flow removes its open draft with it: a draft of a flow that no longer exists can never be
+    // Removing a flow removes its open draft with it; a draft of a flow that no longer exists can never be
     // promoted, and leaving it would keep a tab open on nothing.
     const handleDeleteFlow = (flow: FlowDoc) => {
         const draft = flows.find((f) => f.draft_of === flow.id);

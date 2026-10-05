@@ -1,27 +1,17 @@
 """Standalone checks for controller/services/account_hash.py: escrow password generation and the Apple
 SALTED-SHA512-PBKDF2 passwordHash plist blob. Pure functions over strings and bytes, so no DB.
 
-Run (from repo root, with the project venv):
-
-    PYTHONPATH=. ./.venv/bin/python tests/verify_account_hash.py
-
-Section 1 covers generate_password: length, charset and style variants, floor clamping, the guaranteed digit, and that
-repeated calls differ. Section 2 covers password_hash_blob: the plist fields, a fresh salt per call, determinism given
-an injected salt, and agreement with a hand-rolled PBKDF2-HMAC-SHA512 derivation.
-
-Prints PASS/FAIL per case and exits non-zero on any failure.
+Run: PYTHONPATH=. ./.venv/bin/python tests/verify_account_hash.py
 """
 import hashlib
 import plistlib
 import sys
 
+from tests._verify_harness import make_check
+
 FAILURES: list = []
 
-
-def check(name: str, cond: bool) -> None:
-    print(f"  {'PASS' if cond else 'FAIL'}  {name}")
-    if not cond:
-        FAILURES.append(name)
+check = make_check(FAILURES)
 
 
 def main() -> None:

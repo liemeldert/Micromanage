@@ -1,7 +1,6 @@
 """Adaptive device polling and group refresh.
 
-Keeps observed device state fresh (info/security polls, inventory, group membership) on an adaptive cadence,
-independent of the scheduled sync that reconciles declared config.
+Keeps observed device state fresh, independent of the scheduled sync that reconciles declared config.
 """
 
 import logging
@@ -14,6 +13,7 @@ from controller.services.group_manager import GroupManager
 from controller.services.mdm_connector import MDMConnector
 from controller.services.task_manager import TaskManager
 from controller.services.tenant_config import load_groups
+from controller.utils.timeutil import as_utc, parse_iso_utc
 
 logger = logging.getLogger(__name__)
 
@@ -59,22 +59,12 @@ def _enqueue_backoff(device: Device) -> Dict[str, Any]:
     return state if isinstance(state, dict) else {}
 
 
-def _parse_time(value: Any) -> Optional[datetime]:
-    """An ISO timestamp out of the attributes blob, or None if it is not one."""
-    if not isinstance(value, str):
-        return None
-    try:
-        parsed = datetime.fromisoformat(value)
-    except ValueError:
-        return None
-    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+_parse_time = parse_iso_utc
 
 
 def _enqueue_backoff_holds(device: Device, now: datetime) -> bool:
-    """Whether this tick skips the device entirely: no command and no task row.
-
-    Any contact at all clears the backoff without waiting out the interval; the reset itself is left to the tick
-    that acts on it.
+    """Whether this tick skips the device entirely: no command and no task row. Any contact since the failure ends the
+    hold early; the stored backoff itself is cleared by poll_tenant.
     """
     state = _enqueue_backoff(device)
     if not state:
@@ -91,16 +81,12 @@ def _seen_since_failure(device: Device, state: Dict[str, Any]) -> bool:
     last_seen = device.last_seen
     if failed_at is None or last_seen is None:
         return False
-    if last_seen.tzinfo is None:
-        last_seen = last_seen.replace(tzinfo=timezone.utc)
-    return last_seen > failed_at
+    return as_utc(last_seen) > failed_at
 
 
 async def _record_enqueue_failure(device: Device, reason: str, now: datetime) -> None:
-    """Record that NanoMDM would not take a command for this device, and back off.
-
-    Re-reads the row rather than writing the tick's partial copy: attributes is a webhook-rewritten merged blob, and
-    a stale copy written back over it would drop whatever arrived in between.
+    """Record that NanoMDM would not take a command for this device, and back off. Re-reads the row first, since the
+    webhook rewrites attributes and writing back the tick's stale copy would drop what arrived in between.
     """
     fresh = await Device.get_or_none(id=device.id)
     if fresh is None:
@@ -119,8 +105,7 @@ async def _record_enqueue_failure(device: Device, reason: str, now: datetime) ->
     await fresh.save(update_fields=["attributes"])
     device.attributes = attributes
     logger.warning(
-        "poll: NanoMDM would not take a command for %s (%s); "
-        "skipping its scheduled queries for %dm (failure %d)",
+        "poll: NanoMDM would not take a command for %s (%s); skipping its scheduled queries for %dm (failure %d)",
         device.serial_number, reason, wait, failures,
     )
 
@@ -165,9 +150,8 @@ async def _enqueue_query(
 ) -> Optional[str]:
     """Enqueue one query command as a system task and record its CommandUUID.
 
-    A send that never reaches the device leaves a failed task and returns why rather than raising, so one
-    unreachable device does not end the tick for the rest of the fleet. Returns None on success, otherwise the
-    failure reason (the caller decides how to treat a first failure vs. a twentieth).
+    Returns None on success, otherwise the failure reason. A send that never reaches the device leaves a failed task
+    instead of raising, so one unreachable device does not end the tick for the rest of the fleet.
     """
     scheduled = reason == "Scheduled"
     task = await task_manager.create_task(
@@ -178,17 +162,10 @@ async def _enqueue_query(
     )
     try:
         result = await send(device.udid)
-        task.details["command_uuid"] = result.get("command_uuid")
-        task.status = "running"
-        await task.save()
+        await task.mark_sent(result.get("command_uuid"))
         return None
     except Exception as exc:
-        task.status = "failed"
-        task.error = str(exc)
-        # Terminal here rather than through update_progress, so stamp what retention keys on; without it the row is
-        # never eligible for deletion.
-        task.completed_at = datetime.now(timezone.utc)
-        await task.save()
+        await task.mark_push_failed(str(exc))
         logger.debug("scheduled %s for %s failed: %s", ttype, device.serial_number, exc)
         return str(exc) or exc.__class__.__name__
 
@@ -198,8 +175,8 @@ async def poll_device(
 ) -> Optional[str]:
     """Enqueue DeviceInformation + SecurityInfo as system tasks.
 
-    Returns the first reason a send did not reach NanoMDM, or None if they all did. Both are attempted either way:
-    the two commands are independent and one being refused says nothing about the other.
+    Returns the first reason a send did not reach NanoMDM, or None if both did. Both are attempted either way, since one
+    being refused says nothing about the other.
     """
     queries = (
         ("refresh_info", connector.get_device_info),
@@ -217,8 +194,8 @@ async def refresh_inventory(
 ) -> Optional[str]:
     """Ask a device what profiles and applications it holds.
 
-    types narrows it to one of the pair for a caller that only needs that half; reason is recorded on the task.
-    Returns the first reason a send did not reach NanoMDM, or None if they all did.
+    types narrows it to one of the pair, and reason is recorded on the task. Returns the first reason a send did not
+    reach NanoMDM, or None if they all did.
     """
     senders = {
         "profile_list": connector.get_profile_list,
@@ -235,10 +212,8 @@ async def refresh_inventory(
 
 
 async def _inventory_refreshed_recently(tenant: Tenant, now: datetime) -> set:
-    """The (device_id, query type) pairs asked for within the refresh window.
-
-    Derived from the tasks rather than kept on the device row, and counts only pairs whose
-    command actually reached NanoMDM.
+    """The (device_id, query type) pairs asked for within the refresh window, derived from tasks and counting only
+    commands that reached NanoMDM.
     """
     from tortoise.expressions import Q
 
@@ -255,8 +230,8 @@ async def _inventory_refreshed_recently(tenant: Tenant, now: datetime) -> set:
 async def _awaiting_app_confirmation(tenant: Tenant, now: datetime) -> set:
     """Devices that should be asked what they hold, to settle an app install.
 
-    A device qualifies when it has a deployment stuck at accepted and nothing has asked it lately. Costs two
-    queries, and only when something is outstanding.
+    A device qualifies when it has a deployment stuck at accepted and nothing has asked it lately. Costs one query,
+    plus a second when a deployment is waiting.
     """
     if APP_CONFIRM_POLL_MINUTES <= 0:
         return set()
@@ -334,10 +309,8 @@ async def on_device_enrolled(device: Device) -> None:
 
 
 async def _prune_scheduled_tasks(tenant: Tenant, now: datetime) -> None:
-    """Drop finished system query tasks once nothing needs them any more.
-
-    Two windows: info/posture polls are transport only and age out quickly; inventory tasks are also the record
-    _inventory_refreshed_recently reads, so they must outlive that window.
+    """Drop finished system query tasks. Info and posture polls are transport only and age out quickly; inventory tasks
+    are also what _inventory_refreshed_recently reads, so they are kept for twice the refresh window.
     """
     windows = ((_POLL_TYPES, POLL_TASK_RETENTION_HOURS),
                (_INVENTORY_TYPES, max(INVENTORY_REFRESH_HOURS, 1) * 2))

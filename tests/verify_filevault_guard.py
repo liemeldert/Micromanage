@@ -1,8 +1,6 @@
 """Tests for the FileVault recovery-key escrow guard in controller/utils/yaml_validator.py.
 
 Run: PYTHONPATH=. ./.venv/bin/python tests/verify_filevault_guard.py
-
-See docs/tests/verify_filevault_guard.md for detailed behavior notes.
 """
 import tempfile
 from pathlib import Path
@@ -10,13 +8,11 @@ from pathlib import Path
 import yaml
 
 from controller.utils.yaml_validator import YAMLValidator
+from tests._verify_harness import make_check
 
 PASS, FAIL = [], []
 
-
-def check(label, cond):
-    (PASS if cond else FAIL).append(label)
-    print(f"  [{'PASS' if cond else 'FAIL'}] {label}")
+check = make_check(FAIL, PASS)
 
 
 FV_ENFORCE = {

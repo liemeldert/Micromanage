@@ -7,10 +7,8 @@ import type {ReactNode} from "react";
 // edge of each and covers nothing that takes a click.
 const SHADOW_ROOM_X = 20;
 
-// Below the last card the room is padding inside the viewport rather than a wider box. The box must not reach
-// above its own top: whatever is up there is page content the column is pinned under, and a scrolling column
-// would draw its cards through that strip and collide with it. So the first card's top shadow is the one thing
-// that stays clipped, which is also the least of them: the shadow is offset downward, so little of it is up there.
+// Below the last card the room is padding inside the viewport, not a taller box. A box reaching above its own top would
+// draw its scrolling cards over the page content up there, so the first card's top shadow stays clipped.
 const SHADOW_ROOM_BOTTOM = 40;
 
 /** A column that scrolls on its own, with room left for the shadows of the cards inside it. */
@@ -65,9 +63,8 @@ export function SidebarLayout({
     /** Gap between the top of the viewport and the pinned sidebar. Ignored when filling. */
     top?: number;
     /**
-     * Fill the height the parent gives this layout and scroll each column inside it, instead of scrolling the
-     * page. What is above the layout then stays put, which is the point: a page header worth keeping in view
-     * while the detail under it is read. The parent has to have a height of its own for this to mean anything.
+     * Fill the height the parent gives this layout and scroll each column inside it instead of the page, so what is
+     * above the layout stays in view. The parent must have a height of its own.
      */
     fill?: boolean;
     /**

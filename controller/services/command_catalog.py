@@ -139,9 +139,8 @@ COMMAND_CATALOG: List[Dict[str, Any]] = [
         "params": [
             {"name": "queries", "label": "Properties", "type": "list", "required": True,
              "plist_key": "Queries", "options": list(DEVICE_INFORMATION_QUERIES),
-             "help": "One or more property names, comma-separated. A name Apple does "
-                     "not define is refused before the command is sent, since the "
-                     "device would answer with an error instead of the data."},
+             "help": "One or more property names, comma-separated. A name Apple does not define is refused before the "
+                     "command is sent, since the device would answer with an error instead of the data."},
         ],
     },
 
@@ -152,12 +151,10 @@ COMMAND_CATALOG: List[Dict[str, Any]] = [
     {
         "type": "available_os_updates",
         "label": "Available OS updates",
-        "description": "Ask the device which OS updates it can install; results appear in "
-                       "the task details. Apple deprecated this command in the 26 releases "
-                       "and drops it in the 27 ones, in favour of Declarative Device "
-                       "Management software update enforcement, and a device already "
-                       "ignores it for any update a declaration manages. On macOS the "
-                       "answer reflects the device's last update scan.",
+        "description": "Ask the device which OS updates it can install; results appear in the task details. Apple "
+                       "deprecated this command in the 26 releases and drops it in the 27 ones, in favour of "
+                       "Declarative Device Management software update enforcement, and a device already ignores it for "
+                       "any update a declaration manages. On macOS the answer reflects the device's last update scan.",
         "category": "Queries",
         "common": False,
         "request_type": "AvailableOSUpdates",
@@ -170,12 +167,10 @@ COMMAND_CATALOG: List[Dict[str, Any]] = [
     {
         "type": "os_update_status",
         "label": "OS update status",
-        "description": "Ask the device how its in-progress OS updates are going: what is "
-                       "downloading, how far along, and what is scheduled. An empty answer "
-                       "means nothing is in progress, and results appear in the task "
-                       "details. Apple deprecated this command in the 26 releases and "
-                       "drops it in the 27 ones, in favour of Declarative Device "
-                       "Management software update enforcement.",
+        "description": "Ask the device how its in-progress OS updates are going: what is downloading, how far along, "
+                       "and what is scheduled. An empty answer means nothing is in progress, and results appear in the "
+                       "task details. Apple deprecated this command in the 26 releases and drops it in the 27 ones, in "
+                       "favour of Declarative Device Management software update enforcement.",
         "category": "Queries",
         "common": False,
         "request_type": "OSUpdateStatus",
@@ -200,11 +195,9 @@ COMMAND_CATALOG: List[Dict[str, Any]] = [
     {
         "type": "restart",
         "label": "Restart",
-        "description": "Reboot the device immediately. Reversible: it comes back by itself, "
-                       "though anything the user had unsaved is gone. On iPhone and iPad, a "
-                       "device with a passcode set does not rejoin Wi-Fi until somebody "
-                       "unlocks it, so one that reaches us over Wi-Fi may be out of contact "
-                       "until then.",
+        "description": "Reboot the device immediately. Reversible: it comes back by itself, though anything the user "
+                       "had unsaved is gone. On iPhone and iPad, a device with a passcode set does not rejoin Wi-Fi "
+                       "until somebody unlocks it, so one that reaches us over Wi-Fi may be out of contact until then.",
         "category": "Power",
         "common": True,
         "reversible": True,
@@ -218,9 +211,8 @@ COMMAND_CATALOG: List[Dict[str, Any]] = [
     {
         "type": "shutdown",
         "label": "Shut down",
-        "description": "Power the device off. Nothing on it is lost, but it stays off, and out "
-                       "of reach of every other command, until somebody presses the power "
-                       "button.",
+        "description": "Power the device off. Nothing on it is lost, but it stays off, and out of reach of every other "
+                       "command, until somebody presses the power button.",
         "category": "Power",
         "common": False,
         "reversible": True,
@@ -254,13 +246,12 @@ COMMAND_CATALOG: List[Dict[str, Any]] = [
     {
         "type": "clear_passcode",
         "label": "Clear passcode",
-        "description": "Remove the passcode from an iPhone or iPad. Whoever is holding the "
-                       "device can then open it, and everything protected by the passcode "
-                       "(Apple Pay cards among them) is behind nothing until the user sets a "
-                       "new one, so treat this as handing the device back unlocked. It cannot "
-                       "be undone from here: the old passcode is gone, and only the user can "
-                       "set another. Needs the UnlockToken the device supplied at enrollment; "
-                       "a device that never sent one is refused before anything goes out.",
+        "description": "Remove the passcode from an iPhone or iPad. Whoever is holding the device can then open it, "
+                       "and everything protected by the passcode (Apple Pay cards among them) is behind nothing until "
+                       "the user sets a new one, so treat this as handing the device back unlocked. It cannot be "
+                       "undone from here: the old passcode is gone, and only the user can set another. Needs the "
+                       "UnlockToken the device supplied at enrollment; a device that never sent one is refused before "
+                       "anything goes out.",
         "category": "Security",
         "common": False,
         "reversible": False,
@@ -271,16 +262,26 @@ COMMAND_CATALOG: List[Dict[str, Any]] = [
         "params": [],
     },
     {
+        "type": "fetch_activation_lock_bypass_code",
+        "label": "Fetch Activation Lock bypass code",
+        "description": "Fetch and escrow the Activation Lock bypass code from a supervised device.",
+        "category": "Security",
+        "common": False,
+        "reversible": False,
+        "request_type": "ActivationLockBypassCode",
+        "platforms": IOS_FAMILY + ["Mac", "Apple Vision"],
+        "supervised": True,
+        "params": [],
+    },
+    {
         "type": "clear_restrictions_password",
         "label": "Clear Screen Time password",
-        "description": "Clear the Screen Time (restrictions) password on a supervised iPhone or "
-                       "iPad. What that leaves behind depends on how Screen Time is set up. If "
-                       "it shares its settings through iCloud, Screen Time is switched off "
-                       "entirely and its restrictions are cleared. If the user is a child in an "
-                       "iCloud family, the command fails and nothing changes. Otherwise only the "
-                       "password goes: the restrictions stay in force and Screen Time stays on. "
-                       "None of it can be undone from here, and a cleared password cannot be "
-                       "recovered.",
+        "description": "Clear the Screen Time (restrictions) password on a supervised iPhone or iPad. What that leaves "
+                       "behind depends on how Screen Time is set up. If it shares its settings through iCloud, Screen "
+                       "Time is switched off entirely and its restrictions are cleared. If the user is a child in an "
+                       "iCloud family, the command fails and nothing changes. Otherwise only the password goes: the "
+                       "restrictions stay in force and Screen Time stays on. None of it can be undone from here, and a "
+                       "cleared password cannot be recovered.",
         "category": "Security",
         "common": False,
         "reversible": False,
@@ -310,9 +311,8 @@ COMMAND_CATALOG: List[Dict[str, Any]] = [
     {
         "type": "set_recovery_lock",
         "label": "Set Recovery Lock",
-        "description": "Set the password recoveryOS asks for on an Apple silicon Mac. "
-                       "Micromanage escrows an encrypted copy against the device, so an "
-                       "admin can read it back by breaking the glass on the device's "
+        "description": "Set the password recoveryOS asks for on an Apple silicon Mac. Micromanage escrows an encrypted "
+                       "copy against the device, so an admin can read it back by breaking the glass on the device's "
                        "Summary or Security tab. macOS clears the lock when the device unenrolls.",
         "category": "Security",
         "common": False,
@@ -326,17 +326,15 @@ COMMAND_CATALOG: List[Dict[str, Any]] = [
                      "to use the password Micromanage escrowed."},
             {"name": "new_password", "label": "New password", "type": "string",
              "required": True, "secret": True, "plist_key": "NewPassword",
-             "help": "Escrowed against this device before the command is sent. On a change, "
-                     "the escrow keeps serving the old password until the Mac confirms the "
-                     "new one."},
+             "help": "Escrowed against this device before the command is sent. On a change, the escrow keeps serving "
+                     "the old password until the Mac confirms the new one."},
         ],
     },
     {
         "type": "verify_recovery_lock",
         "label": "Verify Recovery Lock",
-        "description": "Ask an Apple silicon Mac whether a Recovery Lock password still opens "
-                       "it. Leave the field blank to check the password Micromanage "
-                       "escrowed. The answer appears in the task details.",
+        "description": "Ask an Apple silicon Mac whether a Recovery Lock password still opens it. Leave the field "
+                       "blank to check the password Micromanage escrowed. The answer appears in the task details.",
         "category": "Security",
         "common": False,
         "request_type": "VerifyRecoveryLock",
@@ -351,13 +349,11 @@ COMMAND_CATALOG: List[Dict[str, Any]] = [
     {
         "type": "set_firmware_password",
         "label": "Set firmware password",
-        "description": "Set the EFI firmware password on an Intel Mac. The Mac restarts to "
-                       "apply it, and afterwards asks for the password before starting up "
-                       "from anything except its own disk. Only AppleCare can recover a Mac "
-                       "whose firmware password is lost, so Micromanage escrows an encrypted "
-                       "copy an admin can read back by breaking the glass on the device's "
-                       "Summary or Security tab. Apple allows one attempt every 30 seconds and refuses "
-                       "the command while a change is still pending.",
+        "description": "Set the EFI firmware password on an Intel Mac. The Mac restarts to apply it, and afterwards "
+                       "asks for the password before starting up from anything except its own disk. Only AppleCare can "
+                       "recover a Mac whose firmware password is lost, so Micromanage escrows an encrypted copy an "
+                       "admin can read back by breaking the glass on the device's Summary or Security tab. Apple "
+                       "allows one attempt every 30 seconds and refuses the command while a change is still pending.",
         "category": "Security",
         "common": False,
         "request_type": "SetFirmwarePassword",
@@ -370,17 +366,15 @@ COMMAND_CATALOG: List[Dict[str, Any]] = [
                      "Leave it blank to use the password Micromanage escrowed."},
             {"name": "new_password", "label": "New password", "type": "string",
              "required": True, "secret": True, "plist_key": "NewPassword",
-             "help": "Escrowed against this device before the command is sent. On a change, "
-                     "the escrow keeps serving the old password until the Mac confirms the "
-                     "new one."},
+             "help": "Escrowed against this device before the command is sent. On a change, the escrow keeps serving "
+                     "the old password until the Mac confirms the new one."},
         ],
     },
     {
         "type": "verify_firmware_password",
         "label": "Verify firmware password",
-        "description": "Ask an Intel Mac whether a firmware password still opens it. Leave "
-                       "the field blank to check the password Micromanage escrowed. The "
-                       "answer appears in the task details.",
+        "description": "Ask an Intel Mac whether a firmware password still opens it. Leave the field blank to check "
+                       "the password Micromanage escrowed. The answer appears in the task details.",
         "category": "Security",
         "common": False,
         "request_type": "VerifyFirmwarePassword",
@@ -395,17 +389,14 @@ COMMAND_CATALOG: List[Dict[str, Any]] = [
     {
         "type": "rotate_filevault_key",
         "label": "Rotate FileVault recovery key",
-        "description": "Mint a new FileVault personal recovery key on a Mac and escrow it. "
-                       "The old recovery key stops working the moment the Mac answers; the "
-                       "new one is encrypted to this tenant's escrow certificate, stored "
-                       "against the device, and readable through break-glass like the other "
-                       "escrowed credentials. Users notice nothing: their password still "
-                       "unlocks the disk. Unlocking the change takes the CURRENT recovery "
-                       "key (a user password does not work over MDM; the Mac answers "
-                       "NSTaskExitCode 11). A Mac that encrypted before escrow was set up "
-                       "and whose key nobody holds needs one local rotation to bootstrap: "
-                       "sudo fdesetup changerecovery -personal on the Mac itself, and the "
-                       "escrow profile reports the new key back here.",
+        "description": "Mint a new FileVault personal recovery key on a Mac and escrow it. The old recovery key stops "
+                       "working the moment the Mac answers; the new one is encrypted to this tenant's escrow "
+                       "certificate, stored against the device, and readable through break-glass like the other "
+                       "escrowed credentials. Users notice nothing: their password still unlocks the disk. Unlocking "
+                       "the change takes the CURRENT recovery key (a user password does not work over MDM; the Mac "
+                       "answers NSTaskExitCode 11). A Mac that encrypted before escrow was set up and whose key nobody "
+                       "holds needs one local rotation to bootstrap: sudo fdesetup changerecovery -personal on the Mac "
+                       "itself, and the escrow profile reports the new key back here.",
         "category": "Security",
         "common": False,
         # Apple's schema calls this a user password, but a passwordless fdesetup call reads it as the personal
@@ -415,15 +406,13 @@ COMMAND_CATALOG: List[Dict[str, Any]] = [
         "params": [
             {"name": "password", "label": "Current recovery key", "type": "string",
              "required": False, "secret": True,
-             "help": "The Mac's current personal recovery key. Leave it blank to use "
-                     "the one Micromanage escrowed."},
+             "help": "The Mac's current personal recovery key. Leave it blank to use the one Micromanage escrowed."},
         ],
     },
     {
         "type": "enable_remote_desktop",
         "label": "Enable Remote Desktop",
-        "description": "Turn on Remote Desktop / Remote Management (macOS). Reversible: use "
-                       "Disable Remote Desktop.",
+        "description": "Turn on Remote Desktop / Remote Management (macOS). Reversible: use Disable Remote Desktop.",
         "category": "Security",
         "common": False,
         "reversible": True,
@@ -437,8 +426,7 @@ COMMAND_CATALOG: List[Dict[str, Any]] = [
     {
         "type": "disable_remote_desktop",
         "label": "Disable Remote Desktop",
-        "description": "Turn off Remote Desktop / Remote Management (macOS). Reversible: use "
-                       "Enable Remote Desktop.",
+        "description": "Turn off Remote Desktop / Remote Management (macOS). Reversible: use Enable Remote Desktop.",
         "category": "Security",
         "common": False,
         "reversible": True,
@@ -464,10 +452,9 @@ COMMAND_CATALOG: List[Dict[str, Any]] = [
             # Return to Service: the device re-enrolls by itself after the wipe.
             {"name": "return_to_service", "label": "Re-enroll after wipe (Return to Service)",
              "type": "string", "required": False,
-             "help": "iOS and iPadOS 17 or later, tvOS 18 or later, visionOS 26 or later; not "
-                     "available on a Mac. The device wipes and rejoins management by itself. "
-                     "Activation Lock has to be off, or the wiped device stops at the "
-                     "activation screen instead."},
+             "help": "iOS and iPadOS 17 or later, tvOS 18 or later, visionOS 26 or later; not available on a Mac. The "
+                     "device wipes and rejoins management by itself. Activation Lock has to be off, or the wiped "
+                     "device stops at the activation screen instead."},
             {"name": "wifi_ssid", "label": "Wi-Fi network (SSID)", "type": "string", "required": False,
              "help": "Network the wiped device joins to reach the server. Apple requires one "
                      "when the device has no Ethernet or cellular connection to come back on."},
@@ -481,10 +468,9 @@ COMMAND_CATALOG: List[Dict[str, Any]] = [
     {
         "type": "enable_lost_mode",
         "label": "Enable Lost Mode",
-        "description": "Lock a supervised iPhone or iPad into Managed Lost Mode. The device "
-                       "shows your message and phone number on its lock screen and stays "
-                       "locked until you disable Lost Mode. Reversible: use Disable Lost Mode "
-                       "to give the device back.",
+        "description": "Lock a supervised iPhone or iPad into Managed Lost Mode. The device shows your message and "
+                       "phone number on its lock screen and stays locked until you disable Lost Mode. Reversible: use "
+                       "Disable Lost Mode to give the device back.",
         "category": "Lost Mode",
         "common": False,
         "reversible": True,
@@ -525,9 +511,8 @@ COMMAND_CATALOG: List[Dict[str, Any]] = [
     {
         "type": "disable_lost_mode",
         "label": "Disable Lost Mode",
-        "description": "Take the device out of Managed Lost Mode and give it back to its user. "
-                       "Reversible: you can turn Lost Mode back on at any time. Erasing a "
-                       "device clears Lost Mode too.",
+        "description": "Take the device out of Managed Lost Mode and give it back to its user. Reversible: you can "
+                       "turn Lost Mode back on at any time. Erasing a device clears Lost Mode too.",
         "category": "Lost Mode",
         "common": False,
         "reversible": True,
@@ -569,9 +554,8 @@ COMMAND_CATALOG: List[Dict[str, Any]] = [
     {
         "type": "delete_user",
         "label": "Delete user",
-        "description": "Delete a local user account (macOS / Shared iPad), including its home "
-                       "folder and all of its files. This cannot be undone. Other accounts and "
-                       "the rest of the device are left alone.",
+        "description": "Delete a local user account (macOS / Shared iPad), including its home folder and all of its "
+                       "files. This cannot be undone. Other accounts and the rest of the device are left alone.",
         "category": "Users",
         "common": False,
         "reversible": False,
@@ -607,6 +591,24 @@ def secret_param_names(entry: Dict[str, Any]) -> set:
     return {p["name"] for p in entry.get("params", []) if p.get("secret")}
 
 
+def public_params(entry: Dict[str, Any], params: Dict[str, Any]) -> Dict[str, Any]:
+    """A copy of params without the entry's secret params or a PIN."""
+    secret = secret_param_names(entry) | {"pin"}
+    return {k: v for k, v in params.items() if k not in secret}
+
+
+def missing_required_params(entry: Dict[str, Any], params: Any) -> List[str]:
+    """Labels of the entry's unconditionally required params that params leaves unset or blank."""
+    supplied = params if isinstance(params, dict) else {}
+    missing = []
+    for pd in entry.get("params", []):
+        if pd.get("required") is True:
+            val = supplied.get(pd["name"])
+            if val is None or (isinstance(val, str) and not val.strip()):
+                missing.append(pd.get("label", pd["name"]))
+    return missing
+
+
 def _reported_bool(value: Any) -> Optional[bool]:
     """A device-reported flag as a bool, or None when it is not one.
 
@@ -628,8 +630,7 @@ def unsupported_reason(entry: Dict[str, Any], platform: str,
     if platforms and platform != "Other" and platform not in platforms:
         named = "/".join(platforms)
         article = "an" if named[:1].lower() in "aeiou" else "a"
-        return (f"'{entry['label']}' is {article} {named} command. "
-                f"This device reports as {platform}.")
+        return f"'{entry['label']}' is {article} {named} command. This device reports as {platform}."
     if is_supervised is False:
         if entry.get("supervised"):
             return f"'{entry['label']}' only works on a supervised device."
@@ -640,9 +641,8 @@ def unsupported_reason(entry: Dict[str, Any], platform: str,
     wants_silicon = entry.get("apple_silicon")
     if wants_silicon is not None and is_apple_silicon is not None \
         and bool(wants_silicon) is not bool(is_apple_silicon):
-        return (f"'{entry['label']}' is an "
-                f"{'Apple silicon' if wants_silicon else 'Intel'} command. "
-                f"This Mac reports as {'Apple silicon' if is_apple_silicon else 'Intel'}.")
+        return (f"'{entry['label']}' is an {'Apple silicon' if wants_silicon else 'Intel'} command. This Mac reports "
+                f"as {'Apple silicon' if is_apple_silicon else 'Intel'}.")
     return None
 
 
@@ -675,8 +675,7 @@ def build_generic_fields(entry: Dict[str, Any], params: Dict[str, Any]) -> Dict[
                 if unknown:
                     raise ValueError(
                         f"'{p['label']}': {', '.join(unknown[:5])} "
-                        f"{'is not a value' if len(unknown) == 1 else 'are not values'} "
-                        f"this command accepts"
+                        f"{'is not a value' if len(unknown) == 1 else 'are not values'} this command accepts"
                     )
             empty = not value
         if p.get("required") is True and empty:

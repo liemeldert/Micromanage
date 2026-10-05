@@ -8,7 +8,7 @@ import yaml from "js-yaml";
 import {api, ApiError, configConflict, type Device} from "./api";
 import {useAuth} from "./auth-context";
 
-//  Schema types
+// == Schema types ==
 
 export type ConditionType =
     | "device_model"
@@ -104,10 +104,9 @@ export interface Profile extends ScopeOverrides {
     dep_profile?: boolean;
     payload?: Record<string, unknown>; // legacy single payload
     payloads?: Record<string, unknown>[]; // multiple payloads (preferred)
-    enrollment?: Record<string, unknown>; // DEP settings under their own key; dep_manager reads payload or enrollment
-    // Key names whose base64 values have to reach the device as plist data. The controller adds its own
-    // table of manifest-known data keys (controller/utils/payload_types.py), so only a key no manifest
-    // describes needs listing here.
+    enrollment?: Record<string, unknown>; // DEP settings under their own key; the server reads payload, then this
+    // Key names whose base64 values have to reach the device as plist data. The server adds the data keys its
+    // manifests already know, so only a key no manifest describes needs listing here.
     data_keys?: string[];
 }
 
@@ -135,7 +134,7 @@ export function profilePayloads(p: Profile): Record<string, unknown>[] {
     return [];
 }
 
-//  Condition metadata (drives the visual builder)
+// == Condition metadata (drives the visual builder) ==
 
 export type ValueKind =
     | "text" | "version" | "date" | "list" | "group" | "platform" | "tag" | "enrollment_source";
@@ -265,7 +264,7 @@ export function describeCondition(c: Condition): string {
     return `${conditionTypeMeta(c.type).label} ${pol} ${op} ${v}`;
 }
 
-//  Validation helpers (mirror the backend validators)
+// == Validation helpers (mirror the backend validators) ==
 
 export const GROUP_NAME_RE = /^[a-zA-Z0-9-_]+$/;
 export const BUNDLE_ID_RE = /^[a-zA-Z0-9.-]+$/;
@@ -284,7 +283,7 @@ export function slugifyConfigId(name: string): string {
         .slice(0, 60);
 }
 
-//  Client-side group evaluation (for the "matches N devices" preview)
+// == Client-side group evaluation (for the "matches N devices" preview) ==
 // Best-effort mirror of group_manager.py; labelled as an estimate in the UI.
 
 function compareVersions(a: string, b: string): number {
@@ -464,7 +463,7 @@ export function deviceGroupNames(device: Device, allGroups: Group[]): string[] {
     return allGroups.filter((g) => deviceInGroup(device, g, allGroups)).map((g) => g.name);
 }
 
-//  Naming templates
+// == Naming templates ==
 // Device-state variables usable in naming templates, mirroring GET /api/v1/naming/variables. Kept
 // inline so the editor's live preview needs no round trip, the same way CONDITION_TYPES is.
 
@@ -473,9 +472,8 @@ export interface NameVariable {
     description: string;
 }
 
-// Owner and directory variables are absent because there is no directory system yet and they would
-// resolve to empty. Keep in sync with the server registry (controller/services/variables.py
-// VARIABLE_SPECS).
+// Owner and directory variables are absent because there is no directory system yet and they would resolve to empty.
+// Keep in sync with the server registry (controller/services/variables.py VARIABLE_SPECS).
 export const NAME_VARIABLES: NameVariable[] = [
     {key: "serial", description: "Hardware serial number"},
     {key: "model", description: "Device model identifier"},
@@ -539,13 +537,10 @@ export function isSelfReferentialTemplate(template: string): boolean {
     return false;
 }
 
-//  Concurrent edits
+// == Concurrent edits ==
 
-// Config editors read a whole document, edit a local copy and PUT the whole thing back, so two admins
-// in one document at once meant the second save erased the first. Each read carries the document's
-// version, each save returns it, and the server answers 409 when it is stale. This is where that
-// refusal becomes a choice, and the only answer that proceeds is a reload, which discards the local
-// edits rather than the ones already saved.
+// Shown when a save gets a 409 because the document changed since it was read. The only way forward is a reload, which
+// discards the local edits rather than the saved ones.
 export function showConfigConflict(message: string, onReload: () => void) {
     modals.openConfirmModal({
         title: "Changed by someone else",
@@ -556,7 +551,7 @@ export function showConfigConflict(message: string, onReload: () => void) {
     });
 }
 
-//  Config resource hook (load / save a single config type)
+// == Config resource hook (load / save a single config type) ==
 
 type ConfigType = "groups" | "apps" | "profiles" | "tags" | "flows" | "dispatcher";
 
@@ -601,12 +596,8 @@ export function useConfigResource<T>(type: ConfigType, empty: T) {
         reload();
     }, [reload]);
 
-    // quiet drops the success and warning toasts for an unrequested save, such as the ATC editor's
-    // draft autosave. Failures are still shown.
-    // keepNewerEdits puts an identity check in front of the post-save setData, for an editor that keeps
-    // accepting edits while the PUT is unanswered (the ATC canvas), where a plain install would roll
-    // those edits back. Opt-in: the other editors build a fresh document per save and rely on save()
-    // installing it.
+    // quiet drops the success and warning toasts but still shows failures, for unrequested saves like the ATC autosave.
+    // keepNewerEdits leaves the data alone when it changed while the PUT was pending, as on the ATC canvas.
     const save = useCallback(
         async (next: T, opts: { quiet?: boolean; keepNewerEdits?: boolean } = {}): Promise<boolean> => {
             if (!token) return false;

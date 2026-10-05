@@ -2,11 +2,11 @@
 
 import logging
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 from controller.models.tenant import Alert, Device, DeviceSecret, Task, Tenant
 from controller.services import crypto_secrets
+from controller.utils.timeutil import utcnow
 
 logger = logging.getLogger(__name__)
 
@@ -17,9 +17,9 @@ _ALERT_SEVERITY = "yellow"
 # than any one retrieval.
 _ALERT_ESCALATED_SEVERITY = "red"
 
+KIND_ACTIVATION_LOCK_BYPASS_CODE = DeviceSecret.KIND_ACTIVATION_LOCK_BYPASS_CODE
 
-def _now() -> datetime:
-    return datetime.now(timezone.utc)
+_now = utcnow
 
 
 def binding(tenant_id: Any, device_id: Any, kind: str) -> str:
@@ -46,9 +46,8 @@ async def escrow(
     created_by: Optional[str] = None,
     meta: Optional[Dict[str, Any]] = None,
 ) -> DeviceSecret:
-    """Encrypt and store plaintext as the device's kind secret.
-
-    Clears the reveal ledger and closes the reveal alert. Raises crypto_secrets.SecretEncryptionUnavailable if encryption at rest isn't configured.
+    """Encrypt and store plaintext as the device's kind secret. Clears the reveal ledger and closes the reveal alert,
+    except for an unchanged activation lock bypass code. Raises SecretEncryptionUnavailable if no key is configured.
     """
     if kind not in DeviceSecret.KINDS:
         raise ValueError(f"unknown device-secret kind: {kind}")
@@ -57,17 +56,27 @@ async def escrow(
     # raises if no key configured; bound to this device so the row can't be moved
     value_enc = crypto_secrets.encrypt(plaintext, aad=_device_binding(device, kind))
     secret = await DeviceSecret.get_or_none(device_id=device.id, kind=kind)
+    is_rotation = True
+    if kind == KIND_ACTIVATION_LOCK_BYPASS_CODE and secret is not None:
+        try:
+            existing_pt, _ = crypto_secrets.decrypt_bound(secret.value_enc, aad=_secret_binding(secret))
+            if existing_pt == plaintext:
+                is_rotation = False
+        except Exception as exc:
+            logger.warning("escrow: failed to decrypt existing secret for comparison: %s", exc)
     if secret is None:
         secret = DeviceSecret(tenant_id=device.tenant_id, device_id=device.id, kind=kind)
     secret.value_enc = value_enc
     secret.label = (label or secret.label)
     secret.meta = meta if meta is not None else (secret.meta or {})
     secret.created_by = created_by or secret.created_by
-    secret.revealed_at = None
-    secret.revealed_by = None
-    secret.reveal_count = 0
+    if is_rotation:
+        secret.revealed_at = None
+        secret.revealed_by = None
+        secret.reveal_count = 0
     await secret.save()
-    await resolve_breakglass_alerts(device.id, kind, "the credential was rotated")
+    if is_rotation:
+        await resolve_breakglass_alerts(device.id, kind, "the credential was rotated")
     logger.info("escrow: stored %s for device %s", kind, device.serial_number)
     return secret
 
@@ -129,8 +138,7 @@ async def _raise_breakglass_alert(secret: DeviceSecret, actor: str, *,
         serial = device.serial_number or str(device.id)
         summary = f"{secret.kind_label} revealed for {serial}"[:255]
         if escalated:
-            summary = (f"{secret.kind_label} revealed for {serial} during a burst "
-                       f"of {reveals_in_window} reveals")[:255]
+            summary = f"{secret.kind_label} revealed for {serial} during a burst of {reveals_in_window} reveals"[:255]
         existing = await Alert.filter(
             device_id=device.id, rule_id=rule_id
         ).exclude(status="resolved").first()
@@ -209,7 +217,14 @@ async def resolve_breakglass_alerts(device_id: Any, kind: str, reason: str,
     return closed
 
 
-#  Escrow bookkeeping on DeviceSecret.meta
+async def on_device_wiped(device_id: Any) -> int:
+    """Close the reveal alert for activation lock bypass code when a device wipe is confirmed."""
+    return await resolve_breakglass_alerts(
+        device_id, KIND_ACTIVATION_LOCK_BYPASS_CODE, "device erased",
+    )
+
+
+# ==Escrow bookkeeping on DeviceSecret.meta==
 
 # A lock password that has been sent but not yet confirmed by the Mac. The live value_enc still holds the password the
 # Mac currently answers to.
@@ -223,7 +238,7 @@ UNCONFIRMED_META_KEYS = ("unconfirmed_task_id", "unconfirmed_since",
 def actor_label(user: Optional[str]) -> str:
     """Normalise a caller identity for DeviceSecret.created_by.
 
-    An automated caller already names itself with a scheme (atc:<flow>, dispatcher:<rule>); a bare identity gets admin: prefixed.
+    Automated callers already carry a scheme (atc:<flow>, dispatcher:<rule>); a bare identity becomes admin:<identity>.
     """
     text = (user or "").strip() or "unknown"
     if ":" in text.split(" ")[0]:
@@ -249,7 +264,7 @@ async def snapshot(device: Device, kind: str) -> Optional[Dict[str, Any]]:
 async def rollback(secret: DeviceSecret, prior: Optional[Dict[str, Any]]) -> None:
     """Undo an escrow write for a command that never left the server.
 
-    With no prior row the row is deleted; otherwise the prior value is restored, and a reveal alert it had closed is raised again.
+    With no prior row the row is deleted; otherwise the prior value comes back and any reveal alert it closed reopens.
     """
     try:
         if prior is None:
@@ -295,7 +310,7 @@ async def mark_confirmed(secret: DeviceSecret) -> None:
                          secret.kind, secret.id)
 
 
-#  Firmware / recovery lock changes
+# ==Firmware / recovery lock changes==
 
 # Apple's two commands and the escrow kind each one writes.
 LOCK_REQUEST_TYPES: Dict[str, Tuple[str, str]] = {
@@ -372,16 +387,16 @@ async def plan_lock_change(
 ) -> LockChange:
     """Work out whether this lock change is safe to send, and how to escrow it.
 
-    A first set escrows before sending; a rotation sends first and promotes the escrow on acknowledgement. Raises crypto_secrets.SecretEncryptionUnavailable before anything is sent, so we never set a lock we can't escrow.
+    A first set escrows before sending; a rotation sends first and promotes the escrow on acknowledgement. Raises
+    crypto_secrets.SecretEncryptionUnavailable before anything is sent, so we never set a lock we can't escrow.
     """
     change = LockChange(device=device, actor=actor_label(actor),
                         new_password=new_password or "")
 
     request_type = request_type or lock_request_type(device)
     if request_type not in LOCK_REQUEST_TYPES:
-        change.skip_reason = ("this Mac hasn't reported whether it is Apple silicon "
-                              "or Intel, so the lock command it takes is unknown "
-                              "(Apple answers that question from macOS 12 onwards)")
+        change.skip_reason = ("this Mac hasn't reported whether it is Apple silicon or Intel, so the lock command it "
+                              "takes is unknown (Apple answers that question from macOS 12 onwards)")
         return change
     change.kind, change.label = LOCK_REQUEST_TYPES[request_type]
     change.request_type = request_type
@@ -453,7 +468,8 @@ async def _lock_change_in_flight(secret: DeviceSecret) -> Optional[str]:
 async def begin_lock_change(change: LockChange, task_id: Any) -> None:
     """Write the escrow side of a lock change, just before the command goes out.
 
-    A rotation parks the new password as ciphertext; a first set escrows outright and marks the row unconfirmed, naming the task whose acknowledgement settles it.
+    A rotation parks the new password as ciphertext; a first set escrows outright and marks the row unconfirmed, naming
+    the task whose acknowledgement settles it.
     """
     if change.skipped:
         return
@@ -574,7 +590,8 @@ async def _reconcile_account_escrow(device: Device, task: Task) -> None:
 async def _reconcile_lock_escrow(device: Device, task: Task) -> None:
     """Settle a firmware / recovery lock escrow once the Mac has answered.
 
-    A failed or cancelled task never changed anything on the Mac, so promoting the parked password would destroy the only copy the Mac takes.
+    A failed or cancelled task never changed anything on the Mac, so promoting the parked password would destroy the
+    only copy the Mac takes.
     """
     task_id = str(task.id)
     secrets = await DeviceSecret.filter(device_id=device.id, kind__in=LOCK_KINDS).all()
@@ -583,8 +600,7 @@ async def _reconcile_lock_escrow(device: Device, task: Task) -> None:
         if str(meta.get("pending_task_id") or "") == task_id:
             if task.status in ("failed", "cancelled"):
                 await clear_pending(secret)
-                logger.error("escrow: %s rotation on %s came back %s; the escrow "
-                             "keeps the previous password",
+                logger.error("escrow: %s rotation on %s came back %s; the escrow keeps the previous password",
                              secret.kind, device.serial_number, task.status)
                 return
             if task.status != "completed":
@@ -596,8 +612,7 @@ async def _reconcile_lock_escrow(device: Device, task: Task) -> None:
                 await mark_unconfirmed(
                     secret, task.id,
                     reason=(task.error or f"{secret.kind} command {task.status}"))
-                logger.error("escrow: %s on %s came back %s; the escrowed password "
-                             "may open nothing",
+                logger.error("escrow: %s on %s came back %s; the escrowed password may open nothing",
                              secret.kind, device.serial_number, task.status)
                 return
             if task.status != "completed":
@@ -610,8 +625,7 @@ async def _reconcile_lock_escrow(device: Device, task: Task) -> None:
                     secret, task.id,
                     reason="the Mac answered PasswordChanged=false, so it kept the "
                            "password it already had and this one may open nothing")
-                logger.error("escrow: %s on %s answered PasswordChanged=false; the "
-                             "escrowed password may open nothing",
+                logger.error("escrow: %s on %s answered PasswordChanged=false; the escrowed password may open nothing",
                              secret.kind, device.serial_number)
             return
 
