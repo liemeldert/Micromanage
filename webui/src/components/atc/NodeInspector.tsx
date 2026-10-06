@@ -345,7 +345,7 @@ export function NodeInspector({
                     <Divider label="Managed admin" labelPosition="left" my={2}/>
                     <Switch
                         label="Create a hidden MDM-managed admin"
-                        description="Its password is escrowed for break-glass recovery."
+                        description="Its password is escrowed as a recovery credential."
                         checked={p.managed_admin === true}
                         onChange={(e) => patch({managed_admin: e.currentTarget.checked})}
                     />
@@ -422,7 +422,7 @@ export function NodeInspector({
                     )}
                     <Alert variant="light" color="gray" icon={<IconInfoCircle size={16}/>}>
                         Apple silicon → Recovery Lock; Intel → EFI firmware password. Requires
-                        supervision. The password is escrowed for break-glass recovery.
+                        supervision. The password is escrowed as a recovery credential.
                     </Alert>
                 </Stack>
             )}

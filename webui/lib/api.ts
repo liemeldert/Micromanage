@@ -20,7 +20,7 @@ export class ApiError extends Error {
 
 // A 401 on any authenticated call means the session is dead, expired or revoked. Clear it and force a fresh sign-in
 // rather than leave the page toasting errors.
-function handleUnauthorized(path: string) {
+function handleUnauthorized(path: string, method = "GET") {
     if (typeof window === "undefined") return;
     // login, discover, password-change and MFA-verify answer 401 for bad input; anywhere else it means a dead session.
     if (
@@ -28,7 +28,11 @@ function handleUnauthorized(path: string) {
         path.startsWith("/api/v1/auth/discover") ||
         path.startsWith("/api/v1/auth/password") ||
         // A wrong or expired code fails the login attempt; there is no session yet to lose.
-        path.startsWith("/api/v1/auth/mfa/verify")
+        path.startsWith("/api/v1/auth/mfa/verify") ||
+        // Starting or turning off two-factor auth re-checks the password and answers 401 when it is wrong; the
+        // session itself is still good.
+        path.startsWith("/api/v1/auth/mfa/enroll") ||
+        (path === "/api/v1/auth/mfa" && method === "DELETE")
     ) return;
     localStorage.removeItem("mm_auth");
     if (!window.location.pathname.startsWith("/login")) {
@@ -51,7 +55,7 @@ async function requestWithResponse<T>(
 
     const res = await fetch(proxyPath(path), {...options, headers});
 
-    if (res.status === 401) handleUnauthorized(path);
+    if (res.status === 401) handleUnauthorized(path, (options.method ?? "GET").toUpperCase());
 
     if (!res.ok) {
         let message = res.statusText;
@@ -206,11 +210,11 @@ export const api = {
     },
 
     // Start MFA enrollment (secret and provisioning URI; not active until confirmed).
-    enrollMfa(token: string) {
+    enrollMfa(token: string, password: string) {
         return request<{ secret: string; provisioning_uri: string }>(
             "/api/v1/auth/mfa/enroll",
             token,
-            {method: "POST"},
+            {method: "POST", body: JSON.stringify({password})},
         );
     },
 
@@ -717,7 +721,7 @@ export const api = {
     unacknowledgeAlert(token: string, id: string) {
         return request<DispatcherAlert>(`/api/v1/alerts/${id}/unacknowledge`, token, {method: "POST"});
     },
-    // Dismissing a break-glass alert takes an admin, and only that kind of alert reads the reason.
+    // Dismissing a credential reveal alert takes an admin, and only that kind of alert reads the reason.
     resolveAlert(token: string, id: string, reason?: string) {
         return request<DispatcherAlert>(`/api/v1/alerts/${id}/resolve`, token, {
             method: "POST",
@@ -1964,12 +1968,12 @@ export interface DispatcherAlert {
 
 /** Whether an alert is the record of somebody being handed a device password. Only an admin may close one of
  * these, and closing it is audited. */
-export function isBreakGlassAlert(alert: DispatcherAlert): boolean {
+export function isCredentialRevealAlert(alert: DispatcherAlert): boolean {
     return (alert.rule_id ?? "").startsWith("breakglass:");
 }
 
 /** Reveal record; burst set only when reveal happened inside a run (turns alert red). */
-export interface BreakGlassAlertDetail {
+export interface CredentialRevealAlertDetail {
     kind?: "break_glass";
     secret_kind?: string;
     secret_label?: string | null;

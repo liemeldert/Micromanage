@@ -1,6 +1,7 @@
 import {Badge, Button, Divider, Group, Modal, Stack, Text} from "@mantine/core";
 import {IconArrowBackUp, IconArrowRight, IconCheck, IconDeviceLaptop} from "@tabler/icons-react";
-import {type DispatcherAlert, isBreakGlassAlert} from "../../../lib/api";
+import {ALERT_BOARD_STRINGS, CREDENTIAL_REVEAL_STRINGS} from "../../../lib/strings/alerts";
+import {type DispatcherAlert, isCredentialRevealAlert} from "../../../lib/api";
 import {timeSince} from "../../../lib/time";
 
 export function AlertPeekModal({
@@ -25,7 +26,7 @@ export function AlertPeekModal({
     if (!alert) return null;
 
     const device = alert.device?.display_name || alert.device?.serial_number;
-    const needsFullPage = isBreakGlassAlert(alert);
+    const needsFullPage = isCredentialRevealAlert(alert);
     const acknowledged = alert.status === "acknowledged";
 
     return (
@@ -45,7 +46,7 @@ export function AlertPeekModal({
             <Stack gap="md">
                 <Stack gap={4}>
                     <Text fz="sm">
-                        {device ?? "No device on this alert"}
+                        {device ?? ALERT_BOARD_STRINGS.noDevice}
                     </Text>
                     <Text fz="xs" c="dimmed">
                         {[
@@ -78,7 +79,7 @@ export function AlertPeekModal({
                         rightSection={needsFullPage ? <IconArrowRight size={14}/> : undefined}
                         onClick={onResolve}
                     >
-                        {needsFullPage ? "Resolve on the alert" : "Resolve"}
+                        {needsFullPage ? CREDENTIAL_REVEAL_STRINGS.peekResolve : "Resolve"}
                     </Button>
                 </Group>
             </Stack>

@@ -33,11 +33,19 @@ import {
 import {
     api,
     type AtcRunFailedDetail,
-    type BreakGlassAlertDetail,
+    type CredentialRevealAlertDetail,
     type DispatcherAlert,
     type FlowGap,
-    isBreakGlassAlert,
+    isCredentialRevealAlert,
 } from "../../../lib/api";
+import {
+    ALERT_BOARD_STRINGS,
+    ATC_ALERT_STRINGS,
+    CREDENTIAL_REVEAL_STRINGS,
+    GAP_LEDGER_STRINGS,
+    gapHeadline,
+    REMEDIATION_STRINGS,
+} from "../../../lib/strings/alerts";
 import {useAuth} from "../../../lib/auth-context";
 import {GlassCard} from "../ui/GlassCard";
 
@@ -74,7 +82,7 @@ export function AlertBoard() {
         if (wantedSeverity) setSevFilter(wantedSeverity);
     }, [wantedSeverity]);
     const [busy, setBusy] = useState<string | null>(null);
-    // The break-glass alert waiting on a reason before it closes, so dismissing one is never a single click.
+    // The credential reveal alert waiting on a reason before it closes, so dismissing one is never a single click.
     const [dismissing, setDismissing] = useState<DispatcherAlert | null>(null);
     const [reason, setReason] = useState("");
     // The pending remediation waiting on a veto reason. The reason is optional and goes on the audit row.
@@ -132,7 +140,7 @@ export function AlertBoard() {
             const r = await api.dispatcherEvaluate(token!);
             notifications.show({
                 color: "teal",
-                message: `Evaluated ${r.devices_evaluated} device${r.devices_evaluated === 1 ? "" : "s"}`,
+                message: ALERT_BOARD_STRINGS.evaluated(r.devices_evaluated),
             });
         }, "__eval");
 
@@ -176,12 +184,12 @@ export function AlertBoard() {
                     color="red"
                     variant="light"
                     icon={<IconAlertTriangle size={16}/>}
-                    title="Couldn't load alerts"
+                    title={ALERT_BOARD_STRINGS.loadErrorTitle}
                 >
                     <Stack gap="xs" align="flex-start">
                         <Text fz="sm">
                             {loadError}
-                            {alerts.length > 0 ? " Anything below is from the last fetch that worked." : ""}
+                            {alerts.length > 0 ? ` ${ALERT_BOARD_STRINGS.staleData}` : ""}
                         </Text>
                         <Button
                             size="compact-sm"
@@ -200,12 +208,7 @@ export function AlertBoard() {
                 <Paper withBorder p="xl">
                     <Group justify="center" gap="xs">
                         <IconShieldCheck size={20} color="var(--mantine-color-teal-6)"/>
-                        {/* Name the severity: with a filter on, a bare "no active alerts" contradicts the chip
-                beside it still counting some. */}
-                        <Text c="dimmed">
-                            No {showResolved ? "" : "active "}
-                            {sevFilter ? `${sevFilter} ` : ""}alerts.
-                        </Text>
+                        <Text c="dimmed">{ALERT_BOARD_STRINGS.empty(showResolved, sevFilter)}</Text>
                     </Group>
                 </Paper>
             ) : (
@@ -223,8 +226,8 @@ export function AlertBoard() {
                             onOpenRun={(runId) => router.push(`/atc/runs/${runId}`)}
                             onAck={() => act(() => api.acknowledgeAlert(token!, a.id), a.id)}
                             onResolve={() => {
-                                // A break-glass alert asks for a reason first; everything else closes on the click.
-                                if (isBreakGlassAlert(a)) {
+                                // A credential reveal alert asks for a reason first; everything else closes on the click.
+                                if (isCredentialRevealAlert(a)) {
                                     setReason("");
                                     setDismissing(a);
                                     return;
@@ -250,19 +253,15 @@ export function AlertBoard() {
             <Modal
                 opened={dismissing !== null}
                 onClose={() => setDismissing(null)}
-                title="Dismiss this break-glass alert?"
+                title={CREDENTIAL_REVEAL_STRINGS.dismissTitle}
                 centered
             >
                 <Stack gap="sm">
-                    <Text fz="sm">
-                        This alert records that somebody was handed a device password. It closes on its own once
-                        that password is rotated, so dismissing it says you have decided no rotation is needed.
-                        Your name and your reason go into the audit log.
-                    </Text>
+                    <Text fz="sm">{CREDENTIAL_REVEAL_STRINGS.dismissBody}</Text>
                     <Textarea
-                        label="Reason"
-                        description="Optional. It is the only explanation the audit log will carry."
-                        placeholder="Recovered the cart after the power cut; passwords unchanged on purpose."
+                        label={ALERT_BOARD_STRINGS.reasonLabel}
+                        description={ALERT_BOARD_STRINGS.reasonDescription}
+                        placeholder={CREDENTIAL_REVEAL_STRINGS.dismissPlaceholder}
                         autosize
                         minRows={2}
                         value={reason}
@@ -282,7 +281,7 @@ export function AlertBoard() {
                                 act(() => api.resolveAlert(token!, target.id, reason.trim() || undefined), target.id);
                             }}
                         >
-                            Dismiss alert
+                            {CREDENTIAL_REVEAL_STRINGS.dismissConfirm}
                         </Button>
                     </Group>
                 </Stack>
@@ -291,18 +290,18 @@ export function AlertBoard() {
             <Modal
                 opened={rejecting !== null}
                 onClose={() => setRejecting(null)}
-                title="Reject this queued command?"
+                title={REMEDIATION_STRINGS.rejectTitle}
                 centered
             >
                 <Stack gap="sm">
                     <Text fz="sm">
-                        <Code>{rejecting?.command}</Code> never runs. It stops waiting for a decision, even if
-                        the alert is later resolved without anybody approving it.
+                        <Code>{rejecting?.command}</Code>
+                        {REMEDIATION_STRINGS.rejectBody}
                     </Text>
                     <Textarea
-                        label="Reason"
-                        description="Optional. It is the only explanation the audit log will carry."
-                        placeholder="Device came back into compliance on its own; no need to wipe it."
+                        label={ALERT_BOARD_STRINGS.reasonLabel}
+                        description={ALERT_BOARD_STRINGS.reasonDescription}
+                        placeholder={REMEDIATION_STRINGS.rejectPlaceholder}
                         autosize
                         minRows={2}
                         value={rejectReason}
@@ -327,7 +326,7 @@ export function AlertBoard() {
                                 }, target.alert.id);
                             }}
                         >
-                            Reject
+                            {REMEDIATION_STRINGS.reject}
                         </Button>
                     </Group>
                 </Stack>
@@ -338,62 +337,41 @@ export function AlertBoard() {
 
 const when = (iso?: string | null) => (iso ? new Date(iso).toLocaleString() : "");
 
-function BreakGlassDetail({detail}: { detail: BreakGlassAlertDetail }) {
+function CredentialRevealDetail({detail}: { detail: CredentialRevealAlertDetail }) {
     const revealed = detail.reveal_count ?? 0;
     return (
         <Stack gap={4}>
             {detail.burst && (
-                <Alert variant="light" color="red" p="xs" title="Revealed during a burst">
-                    <Text fz="xs">
-                        {detail.reveals_in_window
-                            ? `This was one of ${detail.reveals_in_window} passwords revealed in quick succession.`
-                            : "This was one of several passwords revealed in quick succession."}{" "}
-                        A burst looks the same whether one person is working through a cart or a session has been
-                        stolen, so confirm who did it before you close this.
-                    </Text>
+                <Alert variant="light" color="red" p="xs" title={CREDENTIAL_REVEAL_STRINGS.burstTitle}>
+                    <Text fz="xs">{CREDENTIAL_REVEAL_STRINGS.burstBody(detail.reveals_in_window)}</Text>
                 </Alert>
             )}
             <Text fz="xs">
                 {detail.last_revealed_by ? (
                     <>
-                        Last taken by <b>{detail.last_revealed_by}</b>
-                        {detail.last_revealed_at ? ` on ${when(detail.last_revealed_at)}` : ""}.
+                        {CREDENTIAL_REVEAL_STRINGS.lastRevealedBy} <b>{detail.last_revealed_by}</b>
+                        {detail.last_revealed_at ? CREDENTIAL_REVEAL_STRINGS.revealedOn(when(detail.last_revealed_at)) : ""}.
                     </>
                 ) : (
-                    "No record of who revealed it. This should not happen so something's wrong."
+                    CREDENTIAL_REVEAL_STRINGS.noRevealer
                 )}
             </Text>
             {detail.first_revealed_by && detail.first_revealed_by !== detail.last_revealed_by && (
                 <Text fz="xs" c="dimmed">
-                    First taken by {detail.first_revealed_by}.
+                    {CREDENTIAL_REVEAL_STRINGS.firstRevealedBy(detail.first_revealed_by)}
                 </Text>
             )}
             {revealed > 1 && (
                 <Text fz="xs" c="dimmed">
-                    Handed out {revealed} times in total.
+                    {CREDENTIAL_REVEAL_STRINGS.revealCount(revealed)}
                 </Text>
             )}
             <Text fz="xs" c="dimmed">
-                This closes by itself when the password is rotated.
+                {CREDENTIAL_REVEAL_STRINGS.closesOnRotation}
             </Text>
         </Stack>
     );
 }
-
-function gapHeadline(gap: FlowGap): string {
-    const node = gap.node || "an earlier step";
-    switch (gap.kind) {
-        case "not_queued":
-            return `${node} did not properly queue all blocks`;
-        case "barrier_empty":
-            return `the wait at ${node} had nothing to wait for`;
-        case "never_arrived":
-            return `${node} gave up waiting for these`;
-        default:
-            return `${node} recorded a ${gap.kind} gap`;
-    }
-}
-
 
 function GapLedger({gaps}: { gaps: FlowGap[] }) {
     const worst = gaps.some(
@@ -401,8 +379,9 @@ function GapLedger({gaps}: { gaps: FlowGap[] }) {
     )
         ? "broken"
         : "policy";
-    // A ledger of nothing but empty barriers has no ids to name, so the copy points at the flow instead.
+    // A ledger of nothing but empty barriers has no ids to name, so the text points at the flow instead.
     const named = gaps.some((g) => (g.items ?? []).length > 0);
+    const strings = GAP_LEDGER_STRINGS[worst];
 
     return (
         <Stack gap="xs">
@@ -410,25 +389,9 @@ function GapLedger({gaps}: { gaps: FlowGap[] }) {
                 variant="light"
                 color={worst === "broken" ? "red" : "yellow"}
                 p="xs"
-                title={
-                    worst === "broken"
-                        ? "The device exited setup early and is missing something defined by a flow"
-                        : "The device exited setup early, but nothing appears to be missing"
-                }
+                title={strings.title}
             >
-                <Text fz="xs">
-                    {worst === "broken" && named
-                        ? "The device left Setup Assistant. The following were defined in the flow but " +
-                        "did not appear to run:"
-                        : worst === "broken"
-                            ? "The device has left Setup Assistant, but we have detected some anomalies. The flow " +
-                            "appears to be holding for something indefinitely."
-                            : named
-                                ? "It left Setup Assistant before the wait step had anything to hold, " +
-                                "because this device was not entitled to the items below yet."
-                                : "It left Setup Assistant before the wait block and does not appear to " +
-                                "be missing anything."}
-                </Text>
+                <Text fz="xs">{named ? strings.named : strings.unnamed}</Text>
             </Alert>
 
             {gaps.map((gap, gi) => {
@@ -496,25 +459,25 @@ function AtcFailureDetail({
                     leftSection={<IconExternalLink size={14}/>}
                     onClick={() => onOpenRun(detail.flow_run_id)}
                 >
-                    Open the run that failed
+                    {ATC_ALERT_STRINGS.openRun}
                 </Button>
             )}
 
             <Box>
                 <Text fz="xs">
-                    Flow <Code>{detail.flow_id}</Code>
+                    {ATC_ALERT_STRINGS.flow} <Code>{detail.flow_id}</Code>
                     {detail.node_id ? (
                         <>
                             {" "}
-                            stopped at <Code>{detail.node_id}</Code>
+                            {ATC_ALERT_STRINGS.stoppedAt} <Code>{detail.node_id}</Code>
                         </>
                     ) : (
-                        " stopped before it reached a step"
+                        ` ${ATC_ALERT_STRINGS.stoppedBeforeStep}`
                     )}
                     {detail.event_kind ? (
                         <Text span c="dimmed">
                             {" "}
-                            (started by {detail.event_kind})
+                            {ATC_ALERT_STRINGS.startedBy(detail.event_kind)}
                         </Text>
                     ) : null}
                 </Text>
@@ -528,12 +491,8 @@ function AtcFailureDetail({
             </Box>
 
             {detail.held_in_setup && !detail.released_unverified && (
-                <Alert variant="light" color="red" p="xs" title="Still in Setup Assistant">
-                    <Text fz="xs">
-                        The run stopped before it could release this device, so it is sitting on the
-                        Remote Management screen and nobody can use it until you release it or fix the
-                        flow.
-                    </Text>
+                <Alert variant="light" color="red" p="xs" title={ATC_ALERT_STRINGS.heldTitle}>
+                    <Text fz="xs">{ATC_ALERT_STRINGS.heldBody}</Text>
                 </Alert>
             )}
 
@@ -541,10 +500,8 @@ function AtcFailureDetail({
 
             <Text fz={10} c="dimmed">
                 {count > 1
-                    ? `${count} failures, first ${when(detail.first_failed_at)}, most recent ${when(
-                        detail.last_failed_at,
-                    )}.`
-                    : `Failed ${when(detail.last_failed_at || detail.first_failed_at)}.`}
+                    ? ATC_ALERT_STRINGS.failures(count, when(detail.first_failed_at), when(detail.last_failed_at))
+                    : ATC_ALERT_STRINGS.failedOnce(when(detail.last_failed_at || detail.first_failed_at))}
             </Text>
         </Stack>
     );
@@ -597,11 +554,11 @@ function AlertRow({
     const kind = detail.kind as string | undefined;
     const gateOptions = (detail.options as { label: string; edge: string }[]) || [];
     const runFailure = kind === "atc_run_failed" ? (detail as unknown as AtcRunFailedDetail) : null;
-    // A break-glass alert records that a recovery credential was revealed. Only an admin may close one, and the
+    // A credential reveal alert records that a recovery credential was revealed. Only an admin may close one, and the
     // burst flag is what turns some of them red.
-    const breakGlass = isBreakGlassAlert(alert);
-    const bgDetail = breakGlass ? (detail as BreakGlassAlertDetail) : null;
-    const burstCount = bgDetail?.burst ? bgDetail.reveals_in_window : undefined;
+    const credentialReveal = isCredentialRevealAlert(alert);
+    const revealDetail = credentialReveal ? (detail as CredentialRevealAlertDetail) : null;
+    const burstCount = revealDetail?.burst ? revealDetail.reveals_in_window : undefined;
     // Namespaced ids (atc:*, breakglass:*) belong to no rule in the dispatcher config,
     // so only a real rule id is worth linking to the rule editor.
     const authoredRule = !!alert.rule_id && !alert.rule_id.includes(":");
@@ -658,24 +615,22 @@ function AlertRow({
                             </Badge>
                             {pending.length > 0 && (
                                 <Badge size="xs" variant="outline" color="orange">
-                                    approval required
+                                    {REMEDIATION_STRINGS.approvalBadge}
                                 </Badge>
                             )}
                             {runFailure?.released_unverified && (
                                 <Badge size="xs" variant="outline" color={color}>
-                                    released unverified
+                                    {ATC_ALERT_STRINGS.releasedBadge}
                                 </Badge>
                             )}
                             {runFailure && !runFailure.released_unverified && runFailure.held_in_setup && (
                                 <Badge size="xs" variant="outline" color={color}>
-                                    held in setup
+                                    {ATC_ALERT_STRINGS.heldBadge}
                                 </Badge>
                             )}
-                            {bgDetail?.burst && (
+                            {revealDetail?.burst && (
                                 <Badge size="xs" variant="outline" color="red">
-                                    {burstCount
-                                        ? `revealed during a burst of ${burstCount}`
-                                        : "revealed during a burst"}
+                                    {CREDENTIAL_REVEAL_STRINGS.burstBadge(burstCount)}
                                 </Badge>
                             )}
                         </Group>
@@ -686,7 +641,7 @@ function AlertRow({
                         {kind === "atc_in_setup" && (
                             <Button size="compact-xs" variant="light" color="green" loading={busy}
                                     onClick={() => onAction("release")}>
-                                Release from setup
+                                {ATC_ALERT_STRINGS.releaseFromSetup}
                             </Button>
                         )}
                         {kind === "atc_gate" &&
@@ -709,29 +664,28 @@ function AlertRow({
                                 </ActionIcon>
                             </Tooltip>
                         )}
-                        {/* The server returns 403 for a member closing a break-glass alert,
+                        {/* The server returns 403 for a member closing a credential reveal alert,
                 so the button says why instead of offering a click that fails. */}
-                        {breakGlass && !isAdmin ? (
+                        {credentialReveal && !isAdmin ? (
                             <Tooltip
-                                label={"Only an admin can dismiss this. It closes on its own once the "
-                                    + "password is rotated."}
+                                label={CREDENTIAL_REVEAL_STRINGS.adminOnlyTooltip}
                                 withinPortal
                                 multiline
                                 w={260}
                             >
                                 <Text fz="xs" c="dimmed">
-                                    admin only
+                                    {ALERT_BOARD_STRINGS.adminOnly}
                                 </Text>
                             </Tooltip>
                         ) : (
                             <Button
                                 size="compact-xs"
                                 variant="light"
-                                color={breakGlass ? "orange" : "teal"}
+                                color={credentialReveal ? "orange" : "teal"}
                                 loading={busy}
                                 onClick={onResolve}
                             >
-                                {breakGlass ? "Dismiss" : "Resolve"}
+                                {credentialReveal ? CREDENTIAL_REVEAL_STRINGS.dismissButton : "Resolve"}
                             </Button>
                         )}
                     </Group>
@@ -741,16 +695,17 @@ function AlertRow({
             <Collapse expanded={expanded}>
                 <Stack gap="xs" mt="sm" pl={40}>
                     {runFailure && <AtcFailureDetail detail={runFailure} onOpenRun={onOpenRun}/>}
-                    {bgDetail && <BreakGlassDetail detail={bgDetail}/>}
+                    {revealDetail && <CredentialRevealDetail detail={revealDetail}/>}
                     {pending.length > 0 && (
                         <Paper withBorder p="xs" radius="sm" bg="var(--mantine-color-orange-light)">
                             <Text fz="xs" fw={700} mb={4}>
-                                Pending admin approval (destructive)
+                                {REMEDIATION_STRINGS.pendingHeading}
                             </Text>
                             {pending.map((pa) => (
                                 <Group key={pa.action_key} justify="space-between" mb={4}>
                                     <Text fz="xs">
-                                        <Code>{pa.command}</Code>, which never runs until approved
+                                        <Code>{pa.command}</Code>
+                                        {REMEDIATION_STRINGS.untilApproved}
                                     </Text>
                                     {isAdmin ? (
                                         <Group gap={6}>
@@ -760,16 +715,16 @@ function AlertRow({
                                                 loading={busy}
                                                 onClick={() => onReject(pa.action_key, pa.command)}
                                             >
-                                                Reject
+                                                {REMEDIATION_STRINGS.reject}
                                             </Button>
                                             <Button size="compact-xs" color="red" loading={busy}
                                                     onClick={() => onApprove(pa.action_key)}>
-                                                Approve &amp; run
+                                                {REMEDIATION_STRINGS.approve}
                                             </Button>
                                         </Group>
                                     ) : (
                                         <Text fz="xs" c="dimmed">
-                                            admin only
+                                            {ALERT_BOARD_STRINGS.adminOnly}
                                         </Text>
                                     )}
                                 </Group>
@@ -779,13 +734,12 @@ function AlertRow({
                     {remediations.length > 0 && (
                         <Box>
                             <Text fz="xs" fw={700} mb={2}>
-                                Remediation ledger
+                                {REMEDIATION_STRINGS.ledgerHeading}
                             </Text>
                             <ScrollArea.Autosize mah={160}>
                                 {remediations.slice().reverse().map((r, i) => (
                                     <Text key={i} fz="xs" c="dimmed">
-                                        {r.at ? new Date(r.at).toLocaleString() : ""} · {r.action}
-                                        {r.dry_run ? " (dry-run)" : ""} → {r.outcome}
+                                        {REMEDIATION_STRINGS.ledgerLine(when(r.at), r.action, !!r.dry_run, r.outcome)}
                                     </Text>
                                 ))}
                             </ScrollArea.Autosize>
@@ -794,7 +748,7 @@ function AlertRow({
                     {hasCheckState ? (
                         <Box>
                             <Text fz="xs" fw={700} mb={2}>
-                                Failing state
+                                {ALERT_BOARD_STRINGS.failingState}
                             </Text>
                             <Code block fz={10}>
                                 {JSON.stringify(checkState, null, 2)}

@@ -18,7 +18,7 @@ import {IconActivityHeartbeat, IconCircleCheck, IconClock, IconDeviceLaptop, Ico
 import Link from "next/link";
 import {useRouter} from "next/navigation";
 import {BarChart} from "@mantine/charts";
-import {api, type DispatcherAlert, isBreakGlassAlert, type StatsOverview} from "../../../../lib/api";
+import {api, type DispatcherAlert, isCredentialRevealAlert, type StatsOverview} from "../../../../lib/api";
 import {useAuth} from "../../../../lib/auth-context";
 import {READINESS_POLL_MS, useReadiness} from "../../../../lib/readiness";
 import {notifications} from "@mantine/notifications";
@@ -359,11 +359,11 @@ export default function DashboardPage() {
             .catch((e) => notifications.show({color: "red", message: (e as Error).message}));
     }, [token, refreshAlerts]);
 
-    // Closing a break-glass record asks for a reason and is audited, so that one goes to the page that can
+    // Closing a credential reveal record asks for a reason and is audited, so that one goes to the page that can
     // ask rather than being settled from a dashboard tile.
     const resolveAlert = useCallback((alert: DispatcherAlert) => {
         if (!token) return;
-        if (isBreakGlassAlert(alert)) {
+        if (isCredentialRevealAlert(alert)) {
             router.push(`/compliance?alert=${encodeURIComponent(alert.id)}`);
             return;
         }

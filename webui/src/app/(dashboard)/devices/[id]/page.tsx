@@ -97,7 +97,7 @@ import {Value} from "@/components/ui/Value";
 import {DeviceTagsField} from "@/components/DeviceTagsField";
 import {PageSkeleton} from "@/components/layout/PageSkeleton";
 import {SidebarLayout} from "@/components/layout/SidebarLayout";
-import {BreakTheGlassCard} from "@/components/BreakTheGlassCard";
+import {RecoveryCredentialsCard} from "@/components/RecoveryCredentialsCard";
 import {type DeviceLocation, DeviceLocationMap} from "@/components/DeviceLocationMap";
 import {type AttrItem, flattenToDotPaths, organizeAttributes,} from "../../../../../lib/device-attributes";
 import {timeSince} from "../../../../../lib/time";
@@ -1884,7 +1884,7 @@ export default function DeviceDetailPage({params}: { params: Promise<{ id: strin
                             </SimpleGrid>
                         </GlassCard>
 
-                        {isAdmin && <BreakTheGlassCard deviceId={device.id}/>}
+                        {isAdmin && <RecoveryCredentialsCard deviceId={device.id}/>}
 
                         {(battery !== null || usedPct !== null) && (
                             <SimpleGrid cols={{base: 1, sm: 2}} spacing="md">
@@ -2037,7 +2037,7 @@ export default function DeviceDetailPage({params}: { params: Promise<{ id: strin
                 {groups.map((g) => section === g.category && (
                     <Stack key={g.category} gap="md">
                         {/* Recovery credentials belong under Security, and also render on Summary. */}
-                        {g.category === "Security" && isAdmin && <BreakTheGlassCard deviceId={device.id}/>}
+                        {g.category === "Security" && isAdmin && <RecoveryCredentialsCard deviceId={device.id}/>}
                         <GlassCard withBorder p="md">
                             <Text fz="sm" fw={600} mb="xs">{g.category}</Text>
                             <PropertyGrid items={g.items}/>

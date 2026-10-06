@@ -64,7 +64,7 @@ function stateBadge(secret: DeviceSecret) {
     return null;
 }
 
-export function BreakTheGlassCard({deviceId}: { deviceId: string }) {
+export function RecoveryCredentialsCard({deviceId}: { deviceId: string }) {
     const {token} = useAuth();
     const [secrets, setSecrets] = useState<DeviceSecret[] | null>(null);
     const [loadError, setLoadError] = useState<string | null>(null);

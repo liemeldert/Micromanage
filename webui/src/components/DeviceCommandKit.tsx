@@ -252,8 +252,8 @@ function EscrowNote({entry, secret}: { entry: CatalogCommand; secret: DeviceSecr
                 <Text fz="xs">
                     {rotating
                         ? "No FileVault recovery key is escrowed for this Mac yet. Enter its current " +
-                        "recovery key below if somebody holds it; the new key is escrowed and read " +
-                        "back through break-glass. If nobody holds the current key, rotate once on " +
+                        "recovery key below if somebody holds it; the new key is escrowed and can be revealed " +
+                        "from the recovery credentials card. If nobody holds the current key, rotate once on " +
                         "the Mac itself (sudo fdesetup changerecovery -personal) and the escrow " +
                         "profile reports the new key here on the next security refresh."
                         : setting
