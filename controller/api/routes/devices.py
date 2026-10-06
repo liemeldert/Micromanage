@@ -287,11 +287,15 @@ async def get_device_details(device_id: str, principal: Principal = Depends(get_
     except Exception:
         logger.exception("suggested_name computation failed for device %s", device_id)
 
+    attributes = dict(device.attributes or {})
+    if not principal.is_admin:
+        attributes.pop("DeviceLocation", None)
+
     return {
         "device": {
             **_device_summary(device),
             "suggested_name": suggested_name,
-            "attributes": device.attributes or {},
+            "attributes": attributes,
             "last_task_error": last_task_error,
         },
         "device_profiles": device.installed_profiles or [],

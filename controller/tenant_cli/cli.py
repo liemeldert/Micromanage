@@ -72,6 +72,45 @@ async def tenant_list():
     console.print(table)
 
 
+@tenant_app.command("set-s3-prefix")
+@with_db
+async def tenant_set_s3_prefix(
+    tenant_id: str,
+    prefix: str = typer.Argument(..., help='Key prefix inside the shared bucket, e.g. "tenants/acme/"; "" clears it'),
+):
+    """Where a tenant's packages live inside the server's shared AWS_S3_BUCKET. The prefix is all that separates
+    tenants sharing that bucket, so only the operator sets it, and one that another shared-bucket tenant already uses or
+    nests inside is refused.
+    """
+    tenant = await _get_tenant(tenant_id)
+    from controller.services.app_manager import TENANT_S3_KEYS, _is_set
+    value = prefix.strip().lstrip("/")
+    if value and not value.endswith("/"):
+        value += "/"
+    for other in await Tenant.all():
+        if other.id == tenant.id:
+            continue
+        cfg = other.s3_config or {}
+        if not isinstance(cfg, dict) or any(_is_set(cfg.get(k)) for k in TENANT_S3_KEYS):
+            continue  # its own bucket, no overlap possible
+        theirs = str(cfg.get("prefix") or "")
+        if theirs and not theirs.endswith("/"):
+            theirs += "/"
+        # An empty prefix is the bucket root, which holds every other tenant's keys.
+        if value == theirs or not value or not theirs \
+                or value.startswith(theirs) or theirs.startswith(value):
+            console.print(f"[red]prefix {value!r} overlaps tenant {other.id!r} ({theirs!r}) in the shared bucket[/red]")
+            raise typer.Exit(1)
+    cfg = dict(tenant.s3_config or {}) if isinstance(tenant.s3_config, dict) else {}
+    if value:
+        cfg["prefix"] = value
+    else:
+        cfg.pop("prefix", None)
+    tenant.s3_config = cfg
+    await tenant.save(update_fields=["s3_config", "updated_at"])
+    console.print(f"[green]tenant {tenant.id}: s3 prefix set to {value!r}[/green]")
+
+
 @tenant_app.command("set-quota")
 @with_db
 async def tenant_set_quota(

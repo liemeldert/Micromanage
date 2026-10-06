@@ -171,6 +171,9 @@ export default function SettingsPage() {
     // Recovery codes are shown once, right after confirmation, and cannot be fetched again, so this is the only copy.
     const [recoveryCodes, setRecoveryCodes] = useState<string[] | null>(null);
     const [disableModalOpen, setDisableModalOpen] = useState(false);
+    // Starting MFA setup asks for the password again; the API refuses the enrollment without it.
+    const [enrollModalOpen, setEnrollModalOpen] = useState(false);
+    const [enrollPassword, setEnrollPassword] = useState("");
     const [disablePassword, setDisablePassword] = useState("");
     const [disableError, setDisableError] = useState<string | null>(null);
     const [disabling, setDisabling] = useState(false);
@@ -419,13 +422,20 @@ export default function SettingsPage() {
     }
 
     async function handleStartMfaEnroll() {
-        if (!token) return;
+        if (!token || !enrollPassword) return;
         setEnrolling(true);
         setEnrollError(null);
         try {
-            setEnrollData(await api.enrollMfa(token));
+            setEnrollData(await api.enrollMfa(token, enrollPassword));
+            setEnrollModalOpen(false);
+            setEnrollPassword("");
         } catch (e: unknown) {
-            notifications.show({color: "red", title: "Could not start setup", message: (e as Error).message});
+            const message = (e as Error).message;
+            if (e instanceof ApiError && e.status === 401) {
+                setEnrollError("Wrong password.");
+            } else {
+                notifications.show({color: "red", title: "Could not start setup", message});
+            }
         } finally {
             setEnrolling(false);
         }
@@ -674,8 +684,10 @@ export default function SettingsPage() {
                         <Group justify="flex-end">
                             <Button
                                 leftSection={<IconShieldLock size={14}/>}
-                                onClick={handleStartMfaEnroll}
-                                loading={enrolling}
+                                onClick={() => {
+                                    setEnrollError(null);
+                                    setEnrollModalOpen(true);
+                                }}
                             >
                                 Set up two-factor auth
                             </Button>
@@ -683,6 +695,49 @@ export default function SettingsPage() {
                     </Stack>
                 )}
             </GlassCard>
+
+            <Modal
+                opened={enrollModalOpen}
+                onClose={() => {
+                    setEnrollModalOpen(false);
+                    setEnrollPassword("");
+                    setEnrollError(null);
+                }}
+                title="Set up two-factor authentication"
+                size="sm"
+            >
+                <Stack gap="sm">
+                    <Text fz="sm" c="dimmed">
+                        Enter your password to confirm it is you before adding an authenticator to this account.
+                    </Text>
+                    <PasswordInput
+                        label="Password"
+                        autoFocus
+                        data-autofocus
+                        value={enrollPassword}
+                        onChange={(e) => {
+                            setEnrollPassword(e.currentTarget.value);
+                            setEnrollError(null);
+                        }}
+                        onKeyDown={(e) => {
+                            if (e.key === "Enter" && enrollPassword) void handleStartMfaEnroll();
+                        }}
+                        error={enrollError}
+                    />
+                    <Group justify="flex-end">
+                        <Button variant="default" onClick={() => setEnrollModalOpen(false)}>
+                            Cancel
+                        </Button>
+                        <Button
+                            onClick={handleStartMfaEnroll}
+                            loading={enrolling}
+                            disabled={!enrollPassword}
+                        >
+                            Continue
+                        </Button>
+                    </Group>
+                </Stack>
+            </Modal>
 
             <Modal
                 opened={disableModalOpen}

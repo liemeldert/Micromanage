@@ -46,6 +46,12 @@ class MFAVerifyRequest(BaseModel):
     code: str
 
 
+class MFAEnrollRequest(BaseModel):
+    # Confirming a new authenticator ends every other session, so starting one asks for the password again. Optional
+    # only for externally authenticated tenants, which hold no local password.
+    password: Optional[str] = None
+
+
 class MFAConfirmRequest(BaseModel):
     code: str
 
@@ -139,7 +145,12 @@ async def verify_mfa_login(request: MFAVerifyRequest, http_request: Request):
 
 
 @router.post("/api/v1/auth/mfa/enroll")
-async def enroll_mfa(principal: Principal = Depends(get_current_principal)):
+async def enroll_mfa(request: Optional[MFAEnrollRequest] = None,
+                     principal: Principal = Depends(get_current_principal)):
+    if principal.tenant.auth_provider == "local":
+        password = (request.password if request else None) or ""
+        if not principal.user.password_hash or not verify_password(password, principal.user.password_hash):
+            raise HTTPException(status_code=401, detail="Invalid password")
     try:
         secret, uri = await mfa.begin_enrollment(principal.user)
         return {"secret": secret, "provisioning_uri": uri}

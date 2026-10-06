@@ -47,7 +47,8 @@ async def main():
     import controller.api.routes.auth as api_auth
     from controller.models.tenant import Tenant, User, AuditLog
     from controller.auth.dependencies import Principal
-    from controller.api.routes.auth import LoginRequest, MFAVerifyRequest, MFAConfirmRequest, MFADisableRequest
+    from controller.api.routes.auth import (LoginRequest, MFAVerifyRequest, MFAConfirmRequest, MFADisableRequest,
+                                            MFAEnrollRequest)
 
     tenant = await Tenant.create(id="t1", name="Test Tenant")
     u1 = await User.create(tenant=tenant, email="user@t1", role="admin")
@@ -64,14 +65,20 @@ async def main():
     check("mfa_required is False", res1.mfa_required is False)
     check("mfa_token is None", res1.mfa_token is None)
 
-    print("2) GET returns enabled false before enrolment")
+    print("2) GET returns enabled false before enrollment")
     status = await api_auth.get_mfa_status(admin_principal)
     check("enabled is False", status["enabled"] is False)
     check("confirmed_at is None", status["confirmed_at"] is None)
     check("no secret is returned", "secret" not in status)
 
-    print("3) enroll returns secret and uri")
-    enroll_res = await api_auth.enroll_mfa(admin_principal)
+    print("3) enroll re-authenticates, then returns secret and uri")
+    for label, req in (("no body", None), ("wrong password", MFAEnrollRequest(password="nope"))):
+        try:
+            await api_auth.enroll_mfa(req, admin_principal)
+            check(f"enroll with {label} is refused", False)
+        except HTTPException as e:
+            check(f"enroll with {label} is refused", e.status_code == 401)
+    enroll_res = await api_auth.enroll_mfa(MFAEnrollRequest(password="Password123!"), admin_principal)
     secret = enroll_res["secret"]
     check("returns secret", bool(secret))
     check("returns provisioning_uri", bool(enroll_res["provisioning_uri"]))
@@ -104,7 +111,7 @@ async def main():
 
     print("7) enroll refuses with 409 when already confirmed")
     try:
-        await api_auth.enroll_mfa(admin_principal)
+        await api_auth.enroll_mfa(MFAEnrollRequest(password="Password123!"), admin_principal)
         check("enroll refuses if confirmed", False)
     except HTTPException as e:
         check("enroll refuses with 409", e.status_code == 409)

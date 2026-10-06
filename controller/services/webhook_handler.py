@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import os
+import re
 import time
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional, Tuple
@@ -229,6 +230,15 @@ async def _dispatcher_eval(device_id: Any) -> None:
         logger.exception("Dispatcher: evaluate_device failed for device %s", device_id)
 
 
+# Apple UDIDs are 40 hex digits, the dashed 25-character iPhone and iPad form, or a UUID on a Mac. NanoMDM splits its
+# /v1/enqueue/{id} path on commas, so anything else is refused before a row exists.
+_UDID_RE = re.compile(r"^[A-Za-z0-9-]{1,40}$")
+
+
+def valid_udid(udid: Any) -> bool:
+    return isinstance(udid, str) and bool(_UDID_RE.match(udid))
+
+
 class WebhookHandler:
     """Handle MDM webhook callbacks from NanoMDM (MicroMDM-compatible schema).
 
@@ -240,6 +250,10 @@ class WebhookHandler:
         topic = payload.get("topic", "")
         checkin = payload.get("checkin_event")
         ack = payload.get("acknowledge_event")
+        event = checkin if checkin is not None else ack
+        if isinstance(event, dict) and event.get("udid") and not valid_udid(event.get("udid")):
+            logger.warning("webhook: refusing topic=%r for a malformed udid %r", topic, str(event.get("udid"))[:80])
+            return
         if checkin is not None:
             await self._handle_checkin(topic, checkin)
         elif ack is not None:

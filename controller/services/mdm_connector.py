@@ -1,11 +1,15 @@
 import logging
 import os
 import plistlib
+import re
 import uuid
 from typing import Any, Dict, List, Optional, Tuple
 
 import httpx
 from controller.services import readiness
+
+# only characters an Apple UDID (hex, dashed iOS form, or Mac UUID) contains.
+_SINGLE_ENROLLMENT_ID = re.compile(r'^[A-Za-z0-9-]{1,40}$')
 
 logger = logging.getLogger(__name__)
 
@@ -143,6 +147,9 @@ class MDMConnector:
 
         Every command method below goes through here rather than calling enqueue_command directly.
         """
+        # One device per call. NanoMDM reads the path segment as a comma-separated list.
+        if not _SINGLE_ENROLLMENT_ID.match(enrollment_id or ''):
+            raise ValueError(f'refusing to enqueue for a malformed enrollment id {str(enrollment_id)[:80]!r}')
         self._require_api_key(f'/v1/enqueue/{enrollment_id}')
         return await self.enqueue_command(
             enrollment_id, command_plist, command_uuid=command_uuid,

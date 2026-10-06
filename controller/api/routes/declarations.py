@@ -61,6 +61,7 @@ async def get_device_ddm(
 ):
     """DDM state for a device: the desired declaration set, computed now, joined with what the device last reported,
     plus the raw status-item tree. Payloads are omitted unless include_payloads=1, which keeps the response small."""
+    include_payloads = include_payloads and principal.is_admin # payloads may contain secrets, i.e. wifi credentials
     tenant = principal.tenant
     device = await get_owned_or_404(Device, device_id, tenant, "Device not found")
 
