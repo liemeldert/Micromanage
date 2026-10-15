@@ -1,17 +1,16 @@
 """Task management endpoints."""
 from datetime import datetime, timezone
-from typing import Any, Dict, Optional
-
 from fastapi import APIRouter, Depends, HTTPException
+from typing import Any, Dict, Optional
 
 from controller.api import paging, runtime
 from controller.api.ids import (
     filter_device_id as _filter_device_id,
     get_owned_or_404,
 )
-from controller.auth.dependencies import Principal, get_current_principal
+from controller.auth.dependencies import get_current_principal, Principal
 from controller.models.tenant import Task
-    from controller.services import identity
+from controller.services import identity
 from controller.services.app_manager import AppManager
 from controller.services.audit import record_device_command
 
