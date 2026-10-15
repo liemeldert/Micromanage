@@ -5,6 +5,8 @@ Admin-only management endpoints plus the unauthenticated endpoint that Setup Ass
 
 import base64
 import logging
+import time
+from collections import OrderedDict
 from typing import Any, Dict, List, Optional, Tuple
 
 import yaml
@@ -12,9 +14,10 @@ from controller.api.anonymous import enrollment_tenant_or_error
 from controller.api.config_io import _atomic_write_yaml, _config_document_text
 from controller.api.ids import require_uuid
 from controller.auth.dependencies import Principal, require_admin
+from controller.auth.ratelimit import SlidingWindowLimiter
 from controller.models.tenant import DepProfile, DepServer, Device, Tenant
 from controller.services import (
-    dep_manager, enrollment as enrollment_svc, readiness, skip_keys, tenant_config,
+    dep_manager, enrollment as enrollment_svc, enrollment_links, identity, readiness, skip_keys, tenant_config,
 )
 from controller.services.audit import record_audit
 from controller.services.dep_client import DepError
@@ -32,6 +35,13 @@ _TOKEN_MAX_BYTES = 256 * 1024  # a .p7m is a few KB; cap to reject junk uploads.
 _MACHINE_INFO_MAX_BYTES = 64 * 1024
 # Long enough to be nonsense: Device.serial_number holds 20 characters, so a longer one cannot match a row anyway.
 _SERIAL_MAX = 20
+_SIGNATURE_REFUSED = "Device signature verification failed"
+# Verified MachineInfo digests with the monotonic time of creatuib, retained for ADE_LIFETIME
+_SEEN_MACHINE_INFO: "OrderedDict[str, float]" = OrderedDict()
+_SEEN_MACHINE_INFO_MAX = 10_000
+# DEP runs without a verified MachineInfo: one per serial and ten per source address per minute.
+_unverified_serial_limiter = SlidingWindowLimiter(max_attempts=1, window_seconds=60)
+_unverified_address_limiter = SlidingWindowLimiter(max_attempts=10, window_seconds=60)
 
 
 def _require_ade_ready() -> None:
@@ -329,25 +339,24 @@ async def get_skip_keys(admin: Principal = Depends(require_admin)) -> Dict[str, 
 
 @router.post("/enroll/{tenant_id}/{token}")
 async def ade_enroll(tenant_id: str, token: str, request: Request) -> Response:
-    """The URL an ADE device's Setup Assistant POSTs to during enrollment.
-
-    No JWT: the request carries the same per-tenant enrollment token baked into the DEP profile url Apple delivers.
-    Returns the tenant's enrollment .mobileconfig. Unknown tenant and bad token both answer 404, so an anonymous caller
-    cannot learn which tenant ids exist.
-    """
+    """Returns the enrollment profile for an ADE device. The enrollment token in the URL is the credential."""
     remote = request.client.host if request.client else None
+    await readiness.warm_enroll_state()
     tenant = await enrollment_tenant_or_error(tenant_id, token, "ADE enroll", remote, enrollment_svc)
 
-    # Parse and verify the signed MachineInfo, proving the request came from a real Apple device. Enforcement is
-    # opt-in (see _require_apple_signature).
+    # Parse and verify the signed MachineInfo, proving the request came from a real Apple device. Enforcement is on
+    # unless DEP_ADE_REQUIRE_APPLE_SIGNATURE is set to a false word.
     body = await _read_capped_body(request, _MACHINE_INFO_MAX_BYTES)
     header = request.headers.get("x-apple-aspen-deviceinfo")
     verified = False
     serial = ""
+    udid = ""
     source = "nothing"
+    digest: Optional[str] = None
     try:
-        info, verified, source = _machine_info(body, header)
+        info, verified, digest, source = _machine_info(body, header)
         serial = _clean_serial(info.get("SERIAL"))
+        udid = _clean_udid(info.get("UDID"))
     except Exception:
         logger.exception("ADE: machine-info handling failed for tenant %s", tenant_id)
 
@@ -356,13 +365,22 @@ async def ade_enroll(tenant_id: str, token: str, request: Request) -> Response:
             missing = ("no MachineInfo in the request: the POST body was empty and "
                        "no x-apple-aspen-deviceinfo header was sent")
         else:
-            missing = (f"the MachineInfo from the {source} did not verify: its CMS signature or its chain to an Apple "
-                       f"anchor failed (see the preceding machine-info verification log line)")
+            missing = (f"the MachineInfo from the {source} did not verify: its CMS signature, its chain to an Apple "
+                       f"anchor or its issuer failed (see the preceding machine-info verification log line)")
         logger.warning("ADE: rejecting enrollment for tenant %s (serial=%s): %s "
                        "[body=%d bytes, header=%s, DEP_ADE_REQUIRE_APPLE_SIGNATURE=on]",
                        tenant_id, serial or "?", missing, len(body),
                        "present" if header else "absent")
-        raise HTTPException(status_code=403, detail="Device signature verification failed")
+        raise HTTPException(status_code=403, detail=_SIGNATURE_REFUSED)
+
+    if verified:
+        if not serial or not udid or not digest:
+            logger.warning("ADE: refusing a verified MachineInfo with no usable serial or UDID for tenant %s "
+                           "(serial=%s)", tenant_id, serial or "?")
+            raise HTTPException(status_code=403, detail=_SIGNATURE_REFUSED)
+        await _refuse_replay(tenant, digest, serial, udid)
+    else:
+        await _require_unverified_mint_allowed(tenant, serial, remote)
 
     if serial:
         try:
@@ -370,8 +388,65 @@ async def ade_enroll(tenant_id: str, token: str, request: Request) -> Response:
         except Exception:
             logger.exception("ADE: pre-stamp failed for tenant %s serial %s", tenant_id, serial)
 
-    data = enrollment_svc.build_enrollment_mobileconfig(tenant)
+    data = await enrollment_svc.issue_profile(
+        tenant, serial=serial or None, expected_udid=(udid or None) if verified else None, remote_addr=remote,
+        lifetime=enrollment_links.ADE_LIFETIME)
+    if verified:
+        _remember_machine_info(digest)
     return Response(content=data, media_type="application/x-apple-aspen-config")
+
+
+def _prune_seen_machine_info(now: float) -> None:
+    cutoff = now - enrollment_links.ADE_LIFETIME.total_seconds()
+    while _SEEN_MACHINE_INFO and next(iter(_SEEN_MACHINE_INFO.values())) <= cutoff:
+        _SEEN_MACHINE_INFO.popitem(last=False)
+
+
+def _remember_machine_info(digest: str) -> None:
+    """Remember a MachineInfo digest after its profile is issued."""
+    now = time.monotonic()
+    _SEEN_MACHINE_INFO.pop(digest, None)
+    _SEEN_MACHINE_INFO[digest] = now
+    _prune_seen_machine_info(now)
+    while len(_SEEN_MACHINE_INFO) > _SEEN_MACHINE_INFO_MAX:
+        _SEEN_MACHINE_INFO.popitem(last=False)
+
+
+async def _refuse_replay(tenant: Tenant, digest: str, serial: str, udid: str) -> None:
+    """403 for a verified MachineInfo already used within ADE_LIFETIME, recorded as an enrollment attempt."""
+    now = time.monotonic()
+    _prune_seen_machine_info(now)
+    seen = _SEEN_MACHINE_INFO.get(digest)
+    if seen is None or seen <= now - enrollment_links.ADE_LIFETIME.total_seconds():
+        return
+    from controller.services.webhook_tenant import log_attempt
+
+    logger.warning("ADE: refusing a replayed MachineInfo for tenant %s (serial=%s)", tenant.id, serial or "?")
+    await log_attempt("machineinfo_replay", tenant=tenant, udid=udid or None, serial_number=serial or None,
+                      detail={"machineinfo_sha256": digest})
+    raise HTTPException(status_code=403, detail=_SIGNATURE_REFUSED)
+
+
+async def _require_unverified_mint_allowed(tenant: Tenant, serial: str, remote: Optional[str]) -> None:
+    """403 unless an unverified request names a serial DEP lists in this tenant that is not enrolled or carries a live
+    re-enrollment allowance, within the per-serial and per-address limits."""
+    reason = None
+    if not _unverified_address_limiter.check(remote or "unknown"):
+        reason = "too many unverified requests from this address"
+    elif not serial:
+        reason = "no serial in the MachineInfo"
+    else:
+        device = await Device.filter(tenant=tenant, serial_number=serial, dep_server_id__isnull=False).first()
+        if device is None:
+            reason = "no DEP device in this tenant has that serial"
+        elif device.enrollment_state == "enrolled" and not identity.reenrollment_allowed(device):
+            reason = "the device is enrolled and has no re-enrollment allowance"
+        elif not _unverified_serial_limiter.check(f"{tenant.id}/{serial}"):
+            reason = "a profile was issued for this serial in the last minute"
+    if reason:
+        enrollment_svc.log_token_refusal(
+            "ADE enroll", str(tenant.id), f"unverified MachineInfo refused, {reason} (serial={serial or '?'})", remote)
+        raise HTTPException(status_code=403, detail=_SIGNATURE_REFUSED)
 
 
 async def _read_capped_body(request: Request, limit: int) -> bytes:
@@ -412,28 +487,36 @@ def _clean_serial(value: Any) -> str:
     return text
 
 
+def _clean_udid(value: Any) -> str:
+    """A UDID from the MachineInfo, or empty when it is not a plausible one."""
+    from controller.services.webhook_handler import valid_udid
+
+    text = str(value or "").strip()
+    return text if valid_udid(text) else ""
+
+
 def _machine_info(body: bytes,
-                  header: Optional[str]) -> Tuple[Dict[str, Any], bool, str]:
-    """The device's MachineInfo for this request, as (info, verified, source).
+                  header: Optional[str]) -> Tuple[Dict[str, Any], bool, Optional[str], str]:
+    """The device's MachineInfo for this request, as (info, verified, replay digest, source).
 
     The body wins over the x-apple-aspen-deviceinfo header (web-view flow), and a body that fails to verify is
     never retried against the header, or a request with an unsigned body could verify through a replayed header. See
     https://developer.apple.com/documentation/devicemanagement/authenticating-through-web-views
     """
     if body:
-        info, verified = enrollment_svc.parse_machine_info(
+        info, verified, digest = enrollment_svc.parse_machine_info(
             base64.b64encode(body).decode())
-        return info, verified, "body"
+        return info, verified, digest, "body"
     if header:
-        info, verified = enrollment_svc.parse_machine_info(header)
-        return info, verified, "header"
-    return {}, False, "nothing"
+        info, verified, digest = enrollment_svc.parse_machine_info(header)
+        return info, verified, digest, "header"
+    return {}, False, None, "nothing"
 
 
 def _require_apple_signature() -> bool:
     """Whether the ADE endpoint rejects a MachineInfo signature that does not verify against an Apple anchor.
 
-    Off by default, so advisory; see dep_verify.
+    On by default; see dep_verify.
     """
     return readiness.dep_ade_require_apple_signature()
 

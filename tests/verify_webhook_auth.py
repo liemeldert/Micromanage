@@ -1,10 +1,11 @@
-"""Verify NanoMDM webhook authentication: both HMAC and legacy query-secret schemes.
+"""Verify webhook authentication: NanoMDM's body HMAC, the refused query secret, and step-ca's SCEP challenge webhook.
 
 Run: PYTHONPATH=. .venv/bin/python tests/verify_webhook_auth.py
 https://github.com/micromdm/nanomdm/blob/v0.9.0/service/webhook/service.go
 https://github.com/micromdm/nanomdm/blob/v0.9.0/http/hashbody/hashbody.go
 https://github.com/micromdm/nanomdm/blob/v0.9.0/cmd/nanomdm/main.go
 """
+import asyncio
 import base64
 import hashlib
 import hmac
@@ -93,28 +94,30 @@ def main():
     check("...and stops being the HMAC key once WEBHOOK_HMAC_KEY is set",
           wh._authorized(req, BODY) is None)
 
-    print("\n== 2. The legacy query secret is still accepted ==")
+    print("\n== 2. The query secret is refused ==")
     env(WEBHOOK_SECRET="query-only-secret", WEBHOOK_HMAC_KEY="hmac-key")
     req = make_request(query={"secret": "query-only-secret"})
-    check("a valid query secret with no HMAC header is accepted",
-          wh._authorized(req, BODY) == "query-secret")
+    check("a valid query secret with no HMAC header is refused",
+          wh._authorized(req, BODY) is None)
 
     req = make_request(headers={"X-Webhook-Secret": "query-only-secret"})
-    check("the header form of the same secret still works",
-          wh._authorized(req, BODY) == "query-secret")
+    check("the header form of the same secret is refused",
+          wh._authorized(req, BODY) is None)
 
-    # Dual accept means either credential, not both: a caller with a wrong HMAC and the right query secret is NanoMDM
-    # mid-rollout, and refusing it is the fleet-wide outage this window avoids.
     req = make_request(query={"secret": "query-only-secret"},
                        headers={"X-Hmac-Signature": sign("wrong-key", BODY)})
-    check("a wrong HMAC does not veto a valid query secret",
-          wh._authorized(req, BODY) == "query-secret")
+    check("a valid query secret does not rescue a wrong HMAC",
+          wh._authorized(req, BODY) is None)
 
-    # The reverse, which also settles which mode gets logged when only one of the two is right.
     req = make_request(query={"secret": "not-the-secret"},
                        headers={"X-Hmac-Signature": sign("hmac-key", BODY)})
     check("a valid HMAC is accepted alongside a wrong query secret",
           wh._authorized(req, BODY) == "body-hmac")
+
+    env(WEBHOOK_SECRET="query-only-secret")
+    req = make_request(query={"secret": "query-only-secret"})
+    check("...and the query secret is refused when WEBHOOK_SECRET is also the HMAC key",
+          wh._authorized(req, BODY) is None)
 
     print("\n== 3. Neither, and each one wrong ==")
     env(WEBHOOK_SECRET="query-only-secret", WEBHOOK_HMAC_KEY="hmac-key")
@@ -123,10 +126,6 @@ def main():
 
     req = make_request(headers={"X-Hmac-Signature": sign("wrong-key", BODY)})
     check("a wrong HMAC with no query secret is refused",
-          wh._authorized(req, BODY) is None)
-
-    req = make_request(query={"secret": "not-the-secret"})
-    check("a wrong query secret is refused",
           wh._authorized(req, BODY) is None)
 
     # The signature is over the body, so it cannot be lifted off one call and replayed onto another with different
@@ -152,31 +151,26 @@ def main():
               wh._authorized(
                   make_request(headers={"X-Hmac-Signature": value}), BODY)
               is None)
-    for label, value in (("a non-ASCII character", "é"),
-                         ("an emoji", "\U0001f600"),
-                         ("a replacement character", "�")):
-        check(f"a query secret carrying {label} is refused, not raised",
-              wh._authorized(make_request(query={"secret": value}), BODY)
-              is None)
 
     # Straight at the comparator with a lone surrogate, which no decode path produces but must not raise either.
     check("the comparator survives a lone surrogate on either side",
           wh.constant_time_eq("\udce9", "abc") is False
           and wh.constant_time_eq("abc", "\udce9") is False)
 
-    # The configured side reaches the same comparison and nothing validates what an operator puts in .env, so a
-    # non-ASCII secret has to work rather than merely not raise.
+    # A non-ASCII HMAC key from .env must verify a signature, not only avoid raising.
     env(WEBHOOK_SECRET="sécret", WEBHOOK_HMAC_KEY="kéy")
-    check("a non-ASCII configured secret still matches itself",
+    check("a non-ASCII configured secret is refused as a query secret",
           wh._authorized(make_request(query={"secret": "sécret"}), BODY)
-          == "query-secret")
+          is None)
     check("...and a non-ASCII configured HMAC key still verifies",
           wh._authorized(
               make_request(headers={"X-Hmac-Signature": sign("kéy", BODY)}),
               BODY) == "body-hmac")
-    check("...while a neighbouring non-ASCII value is refused",
-          wh._authorized(make_request(query={"secret": "sècret"}), BODY)
-          is None)
+    env(WEBHOOK_SECRET="sécret")
+    check("...and a non-ASCII WEBHOOK_SECRET verifies as the fallback HMAC key",
+          wh._authorized(
+              make_request(headers={"X-Hmac-Signature": sign("sécret", BODY)}),
+              BODY) == "body-hmac")
 
     print("\n== 4. No key configured fails closed ==")
     env()
@@ -184,12 +178,10 @@ def main():
           wh._authorized(
               make_request(headers={"X-Hmac-Signature": sign("", BODY)}),
               BODY) is None)
-    check("...and so is an empty query secret matching an empty setting",
-          wh._authorized(make_request(query={"secret": ""}), BODY) is None)
     check("verify_body_hmac itself refuses on an empty key",
           wh.verify_body_hmac(BODY, sign("", BODY)) is False)
 
-    # Only the HMAC key set: the HMAC works and the query path has nothing to compare against.
+    # With only the HMAC key set, the HMAC works and a query secret equal to it is refused.
     env(WEBHOOK_HMAC_KEY="hmac-key")
     check("with only WEBHOOK_HMAC_KEY set, the HMAC is accepted",
           wh._authorized(
@@ -202,14 +194,17 @@ def main():
     print("\n== 5. Read per call, not snapshotted at import ==")
     # controller.api.webhook was imported at the top of this file, before any of these variables existed. If either key
     # were captured then, every check above would be reading a value from module-import time.
+    def signed(key):
+        return make_request(headers={"X-Hmac-Signature": sign(key, BODY)})
+
     env(WEBHOOK_SECRET="first-secret")
-    before = wh._authorized(make_request(query={"secret": "first-secret"}), BODY)
+    before = wh._authorized(signed("first-secret"), BODY)
     env(WEBHOOK_SECRET="second-secret")
-    after_old = wh._authorized(make_request(query={"secret": "first-secret"}), BODY)
-    after_new = wh._authorized(make_request(query={"secret": "second-secret"}), BODY)
-    check("a secret set after import is honoured", before == "query-secret")
+    after_old = wh._authorized(signed("first-secret"), BODY)
+    after_new = wh._authorized(signed("second-secret"), BODY)
+    check("a secret set after import is honoured", before == "body-hmac")
     check("a rotated secret takes effect without a re-import",
-          after_old is None and after_new == "query-secret")
+          after_old is None and after_new == "body-hmac")
 
     env(WEBHOOK_SECRET="second-secret", WEBHOOK_HMAC_KEY="rotated-hmac-key")
     check("the HMAC key is read per call too",
@@ -240,8 +235,8 @@ def main():
         env(WEBHOOK_SECRET="s", WEBHOOK_HMAC_KEY="k")
         wh.log_auth_modes()
         both = handler.records[-1].getMessage()
-        check("with both set, the boot line names both",
-              "body HMAC" in both and "query secret" in both
+        check("with both set, the boot line names the HMAC key and no query secret",
+              "body HMAC" in both and "query secret" not in both
               and "WEBHOOK_HMAC_KEY" in both)
 
         env(WEBHOOK_SECRET="s")
@@ -259,10 +254,144 @@ def main():
         wh.logger.removeHandler(handler)
         env(WEBHOOK_SECRET="s")
 
+    asyncio.run(scep_challenge_section())
+
     print(f"\nRESULT: {'PASS' if not FAIL else 'FAIL'} "
           f"({len(PASS)} passed, {len(FAIL)} failed)")
     if FAIL:
         raise SystemExit(1)
+
+
+def scep_request(body: bytes, headers: dict) -> Request:
+    """A POST to the step-ca webhook route whose receive hands over body."""
+    async def receive():
+        return {"type": "http.request", "body": body, "more_body": False}
+
+    return Request({
+        "type": "http",
+        "http_version": "1.1",
+        "method": "POST",
+        "scheme": "http",
+        "path": "/webhook/scep-challenge",
+        "raw_path": b"/webhook/scep-challenge",
+        "query_string": b"",
+        "headers": [(k.lower().encode(), v.encode("latin-1")) for k, v in headers.items()],
+        "client": ("172.18.0.9", 40000),
+        "server": ("controller", 8000),
+    }, receive)
+
+
+def scep_sign(secret_b64: str, body: bytes) -> str:
+    """step-ca's X-Smallstep-Signature: hex HMAC-SHA256 keyed with the decoded secret."""
+    return hmac.new(base64.b64decode(secret_b64), body, hashlib.sha256).hexdigest()
+
+
+async def scep_challenge_section():
+    print("\n== 7. step-ca's SCEP challenge webhook ==")
+    import inspect
+    import json
+    import tempfile
+
+    from controller.services import enrollment_links
+
+    secret = base64.b64encode(b"k" * 32).decode()
+    workdir = Path(tempfile.mkdtemp())
+    secret_file, id_file = workdir / "scep_webhook_secret", workdir / "scep_webhook_id"
+    secret_file.write_text(secret + "\n")
+    id_file.write_text("webhook-id-1\n")
+    os.environ["SCEP_WEBHOOK_SECRET_FILE"] = str(secret_file)
+    os.environ["SCEP_WEBHOOK_ID_FILE"] = str(id_file)
+
+    csr_der = b"\x30\x82csr-bytes"
+    body = json.dumps({
+        "scepChallenge": "the-challenge",
+        "scepTransactionID": "txn-1",
+        "provisionerName": "mdm_device_scep",
+        "x509CertificateRequest": {"subject": {"commonName": "mm 1234"},
+                                   "raw": base64.b64encode(csr_der).decode()},
+    }).encode()
+
+    seen = []
+    verdict = {"allow": True}
+
+    async def fake_validate(challenge_plaintext, provisioner_name, transaction_id, csr_cn, csr_der):
+        seen.append((challenge_plaintext, provisioner_name, transaction_id, csr_cn, csr_der))
+        if verdict.get("raise"):
+            raise RuntimeError("database down")
+        return verdict["allow"], None if verdict["allow"] else "expired", None
+
+    original = enrollment_links.validate_and_consume
+    check("the fake takes the real signature",
+          list(inspect.signature(original).parameters) == list(inspect.signature(fake_validate).parameters))
+    enrollment_links.validate_and_consume = fake_validate
+
+    async def call(payload: bytes, headers: dict):
+        response = await wh.scep_challenge_webhook(scep_request(payload, headers))
+        return response.status_code, json.loads(response.body)
+
+    def good_headers(payload=body):
+        return {"X-Smallstep-Signature": scep_sign(secret, payload), "X-Smallstep-Webhook-ID": "webhook-id-1"}
+
+    try:
+        status, answer = await call(body, good_headers())
+        check("a valid signature and id is allowed", (status, answer) == (200, {"allow": True}))
+        check("...with the body's fields handed to validate_and_consume",
+              seen == [("the-challenge", "mdm_device_scep", "txn-1", "mm 1234", csr_der)], str(seen))
+
+        seen.clear()
+        status, answer = await call(body, {**good_headers(), "X-Smallstep-Signature": scep_sign(secret, b"x")})
+        check("a bad signature is denied with 200", (status, answer) == (200, {"allow": False}))
+        check("...before anything is validated", not seen)
+
+        status, answer = await call(body, {**good_headers(), "X-Smallstep-Webhook-ID": "webhook-id-2"})
+        check("a wrong webhook id is denied with 200", (status, answer) == (200, {"allow": False}))
+        headers = good_headers()
+        headers.pop("X-Smallstep-Webhook-ID")
+        status, answer = await call(body, headers)
+        check("a missing webhook id is denied with 200", (status, answer) == (200, {"allow": False}))
+
+        secret_file.unlink()
+        status, answer = await call(body, good_headers())
+        check("a missing secret file denies everything", (status, answer) == (200, {"allow": False}))
+        secret_file.write_text("")
+        status, answer = await call(body, good_headers())
+        check("an empty secret file denies everything", (status, answer) == (200, {"allow": False}))
+        secret_file.write_text("not base64 at all!")
+        status, answer = await call(body, good_headers())
+        check("a secret that is not base64 denies everything", (status, answer) == (200, {"allow": False}))
+        secret_file.write_text(secret)
+        check("no call reached validation while the secret was unusable", not seen)
+
+        for label, payload in (("malformed JSON", b"{not json"),
+                               ("a JSON array", b"[]"),
+                               ("a body without the CSR", json.dumps({"scepChallenge": "c"}).encode()),
+                               ("a CSR that is not base64",
+                                json.dumps({"scepChallenge": "c", "scepTransactionID": "t",
+                                            "provisionerName": "p",
+                                            "x509CertificateRequest": {"subject": {}, "raw": "!!"}}).encode())):
+            status, answer = await call(payload, good_headers(payload))
+            check(f"{label} is denied with 200", (status, answer) == (200, {"allow": False}))
+        check("...and none of them reached validation", not seen)
+
+        verdict["allow"] = False
+        status, answer = await call(body, good_headers())
+        check("a refused challenge is denied with 200", (status, answer) == (200, {"allow": False}))
+        verdict["raise"] = True
+        status, answer = await call(body, good_headers())
+        check("an exception while validating is denied with 200, not raised",
+              (status, answer) == (200, {"allow": False}))
+
+        os.environ["SCEP_WEBHOOK_ID_FILE"] = str(workdir / "absent")
+        verdict.update({"allow": True, "raise": False})
+        status, answer = await call(body, good_headers())
+        check("a missing id file denies everything", (status, answer) == (200, {"allow": False}))
+    finally:
+        enrollment_links.validate_and_consume = original
+        os.environ.pop("SCEP_WEBHOOK_SECRET_FILE", None)
+        os.environ.pop("SCEP_WEBHOOK_ID_FILE", None)
+
+    check("the webhook app serves no docs or OpenAPI schema",
+          wh.app.docs_url is None and wh.app.redoc_url is None and wh.app.openapi_url is None)
 
 
 from tests._verify_harness import run  # noqa: E402

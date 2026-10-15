@@ -14,9 +14,10 @@ from controller.services import readiness
 from controller.services.webhook_handler import WebhookHandler
 from controller.utils import compare
 from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import JSONResponse
 from tortoise.contrib.fastapi import register_tortoise
 
-app = FastAPI()
+app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
 # Needed so INFO lines on this path are not dropped by python's WARNING-only fallback; safe because uvicorn's
 # own loggers propagate=False and never touch the root.
 logging.basicConfig(level=logging.INFO)
@@ -43,8 +44,7 @@ from controller.api.ddm import router as ddm_router  # noqa: E402
 
 app.include_router(ddm_router)
 
-# Two auth schemes accepted at once: the body HMAC (X-Hmac-Signature, preferred) and the deprecated query
-# secret. Both are accepted during migration. Keys are read per call, never snapshotted, so
+# NanoMDM calls are authenticated by the body HMAC in X-Hmac-Signature. The key is read per call, never snapshotted, so
 # an environment change is picked up immediately.
 #   https://github.com/micromdm/nanomdm/blob/v0.9.0/service/webhook/service.go
 #   https://github.com/micromdm/nanomdm/blob/v0.9.0/http/hashbody/hashbody.go
@@ -58,10 +58,6 @@ def _hmac_key() -> str:
     """Key for the body HMAC. Falls back to WEBHOOK_SECRET, which is the same fallback docker-compose.prod.yml passes to
     -webhook-hmac-key, so an installation that sets neither still has both sides agreeing."""
     return os.getenv("WEBHOOK_HMAC_KEY") or os.getenv("WEBHOOK_SECRET") or ""
-
-
-def _query_secret() -> str:
-    return os.getenv("WEBHOOK_SECRET") or ""
 
 
 def constant_time_eq(provided: str, expected: str) -> bool:
@@ -80,27 +76,18 @@ def verify_body_hmac(body: bytes, signature: str) -> bool:
     return constant_time_eq(signature, expected)
 
 
-# Logged once per mode, so a running deployment shows which of the two schemes its NanoMDM uses without a line per
-# check-in.
+# Logged once per mode, so a running deployment shows the scheme its NanoMDM uses without a line per check-in.
 _MODES_SEEN: set = set()
 
 
 def _authorized(request: Request, body: bytes) -> Optional[str]:
-    """Return the name of the scheme that accepted this call, or None.
-
-    The caller logs it, which is how an operator sees the fleet move onto the body HMAC before the query secret goes.
-    """
+    """Return "body-hmac" when the body HMAC verifies, or None."""
     signature = request.headers.get(HMAC_HEADER, "")
     if signature and verify_body_hmac(body, signature):
         return "body-hmac"
 
-    secret = _query_secret()
-    provided = request.query_params.get("secret") or request.headers.get("X-Webhook-Secret", "")
-    if secret and provided and constant_time_eq(provided, secret):
-        return "query-secret"
-
-    if not _hmac_key() and not secret:
-        # With neither key set nothing can be authenticated, and this line is why every call is being refused.
+    if not _hmac_key():
+        # No HMAC key is set, so every call is refused.
         logger.error(
             "neither WEBHOOK_HMAC_KEY nor WEBHOOK_SECRET is configured; rejecting webhook call"
         )
@@ -110,17 +97,12 @@ def _authorized(request: Request, body: bytes) -> Optional[str]:
 
 
 def log_auth_modes() -> None:
-    """One line at boot saying which of the two schemes can accept a call."""
-    modes = []
+    """One line at boot saying whether a call can be accepted, and with which key."""
     if _hmac_key():
-        modes.append(
-            "body HMAC (%s)"
-            % ("WEBHOOK_HMAC_KEY" if os.getenv("WEBHOOK_HMAC_KEY") else "WEBHOOK_SECRET")
+        logger.info(
+            "webhook auth accepts: body HMAC (%s)",
+            "WEBHOOK_HMAC_KEY" if os.getenv("WEBHOOK_HMAC_KEY") else "WEBHOOK_SECRET",
         )
-    if _query_secret():
-        modes.append("query secret (deprecated)")
-    if modes:
-        logger.info("webhook auth accepts: %s", ", ".join(modes))
     else:
         logger.error(
             "webhook auth has no key configured; every NanoMDM call will be refused. Set WEBHOOK_SECRET (and "
@@ -164,6 +146,72 @@ async def mdm_webhook(request: Request):
         # event being recorded. Keep the full traceback here instead.
         logger.exception(f"Error processing webhook (topic={payload.get('topic')})")
         return {"status": "error", "detail": "logged"}
+
+
+# step-ca's SCEPCHALLENGE webhook. Its secret and id are files written by the step-ca init job, read per call.
+#   https://github.com/smallstep/certificates/blob/v0.30.2/authority/provisioner/webhook.go
+SCEP_SIGNATURE_HEADER = "X-Smallstep-Signature"
+SCEP_WEBHOOK_ID_HEADER = "X-Smallstep-Webhook-ID"
+
+
+def _scep_request_verified(headers, body: bytes) -> bool:
+    """Whether the signature and webhook id on a step-ca call match the configured secret and id."""
+    key = readiness.scep_webhook_key()
+    if key is None:
+        logger.error("scep webhook: no usable secret in SCEP_WEBHOOK_SECRET_FILE; refusing every challenge")
+        return False
+    expected = hmac.new(key, body or b"", hashlib.sha256).hexdigest()
+    if not constant_time_eq(headers.get(SCEP_SIGNATURE_HEADER, "").strip().lower(), expected):
+        logger.warning("scep webhook: signature did not verify")
+        return False
+    webhook_id = readiness.scep_webhook_id()
+    if not webhook_id or not constant_time_eq(headers.get(SCEP_WEBHOOK_ID_HEADER, "").strip(), webhook_id):
+        logger.warning("scep webhook: webhook id does not match SCEP_WEBHOOK_ID_FILE")
+        return False
+    return True
+
+
+def _scep_fields(body: bytes):
+    """The validate_and_consume keyword arguments from a step-ca body, or None."""
+    payload = json.loads(body)
+    if not isinstance(payload, dict):
+        return None
+    csr = payload.get("x509CertificateRequest")
+    if not isinstance(csr, dict):
+        return None
+    subject = csr.get("subject") if isinstance(csr.get("subject"), dict) else {}
+    raw = csr.get("raw")
+    values = (payload.get("scepChallenge"), payload.get("scepTransactionID"), payload.get("provisionerName"),
+              subject.get("commonName", ""), raw)
+    if not all(isinstance(v, str) for v in values):
+        return None
+    challenge, transaction_id, provisioner, common_name, raw = values
+    return {"challenge_plaintext": challenge, "provisioner_name": provisioner, "transaction_id": transaction_id,
+            "csr_cn": common_name, "csr_der": base64.b64decode(raw, validate=True)}
+
+
+@app.post("/webhook/scep-challenge")
+async def scep_challenge_webhook(request: Request):
+    """step-ca's SCEPCHALLENGE webhook. Returns HTTP 200 in every case, with allow true only when the challenge is
+    consumed."""
+    allowed = False
+    try:
+        body = await request.body()
+        if _scep_request_verified(request.headers, body):
+            fields = None
+            try:
+                fields = _scep_fields(body)
+            except ValueError:
+                pass
+            if fields is None:
+                logger.warning("scep webhook: malformed body (%d bytes); refused", len(body))
+            else:
+                from controller.services import enrollment_links
+                allowed, _reason, _row = await enrollment_links.validate_and_consume(**fields)
+    except Exception:
+        logger.exception("scep webhook: deciding a challenge failed; refused")
+        allowed = False
+    return JSONResponse({"allow": bool(allowed)}, status_code=200)
 
 
 @app.get("/health")
@@ -214,9 +262,8 @@ register_tortoise(
 )
 
 
-# generate_schemas stays False; schema creation happens inside models.database.init_schema under an advisory
-# lock instead, since all three supervisord processes race on a fresh database otherwise. Do not flip this
-# flag back on. Runs after register_tortoise so the connection already exists.
+# generate_schemas stays False; models.database.init_schema creates the schema under an advisory lock, since all
+# three supervisord processes race on a fresh database otherwise. Runs after register_tortoise so the connection exists.
 @app.on_event("startup")
 async def _init_schema():
     from controller.models.database import init_schema

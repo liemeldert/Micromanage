@@ -58,6 +58,7 @@ import {
     IconPencil,
     IconRefresh,
     IconRobot,
+    IconRotateClockwise,
     IconServer,
     IconShieldLock,
     IconSitemap,
@@ -1098,6 +1099,10 @@ const SECRET_KIND_LABELS: Record<string, string> = {
     activation_lock_bypass_code: "Activation Lock bypass code",
 };
 
+function isFuture(iso: string | null | undefined): iso is string {
+    return !!iso && new Date(iso).getTime() > Date.now();
+}
+
 function bootstrapAuthLabel(val: unknown): string {
     if (val === "allowed") return "Allowed";
     if (val === "disallowed") return "Not allowed";
@@ -1117,9 +1122,8 @@ function isUnrevealedSecrets409(e: ApiError): boolean {
     return /escrowed secret/i.test(e.message);
 }
 
-// The page fills the window and scrolls its two columns rather than itself, so the device's name, its state and
-// whatever it is complaining about stay in view while the detail under them is read. The subtraction is the
-// dashboard layout's own padding (spacing lg, top and bottom).
+// The page fills the window and scrolls its two columns rather than itself, keeping the header and banners in view.
+// The subtraction is the dashboard layout's own padding (spacing lg, top and bottom).
 const PAGE_HEIGHT = "calc(100vh - var(--mantine-spacing-lg) * 2)";
 
 // Space between the floating banners and the first card under them.
@@ -1140,6 +1144,7 @@ export default function DeviceDetailPage({params}: { params: Promise<{ id: strin
     const [nameDraft, setNameDraft] = useState("");
     const [savingName, setSavingName] = useState(false);
     const [forgetting, setForgetting] = useState(false);
+    const [allowingReenroll, setAllowingReenroll] = useState(false);
 
     // Scope-explain is fetched only once the Scope section is opened, since most visits never open it.
     const [scope, setScope] = useState<ScopeExplain | null>(null);
@@ -1178,9 +1183,8 @@ export default function DeviceDetailPage({params}: { params: Promise<{ id: strin
         });
     }, [token]);
 
-    // Deployment rows carry only the config id, while the install tasks that produced them are described by name.
-    // apps.yaml and profiles.yaml give the names, which both label a row and match it to a task whose details were
-    // never stamped.
+    // Deployment rows carry only the config id, while install tasks are described by name. The names from apps.yaml and
+    // profiles.yaml label a row and match it to a task whose details were never stamped.
     const [nameMaps, setNameMaps] = useState<{ apps: Record<string, string>; profiles: Record<string, string> }>({
         apps: {},
         profiles: {},
@@ -1208,13 +1212,11 @@ export default function DeviceDetailPage({params}: { params: Promise<{ id: strin
     // Both are re-fetched alongside the device, so a flow run a just-sent command started still appears.
     const [deviceAlerts, setDeviceAlerts] = useState<DispatcherAlert[]>([]);
     const [deviceRuns, setDeviceRuns] = useState<FlowRunSummary[]>([]);
-    // recent_tasks on the device payload is capped at 10 with no total, so counting it would read as this device's
-    // entire history. /api/v1/tasks carries a real total for the same device_id, and a limit of 1 reads it cheaply.
-    // Null while loading or after a failed fetch, so the tab shows no count rather than a wrong one.
+    // recent_tasks is capped at 10 with no total, so the real count comes from /api/v1/tasks with a limit of 1.
+    // Null while loading or after a failed fetch.
     const [taskTotal, setTaskTotal] = useState<number | null>(null);
-    // Every recorded tag change on this device, whoever made it. Null means the log could not be read, the normal
-    // case for a member since /api/v1/audit-log is admin-only, and the Automation tab then falls back to inferring
-    // provenance from alerts, flow timelines and tasks.
+    // Every recorded tag change on this device. Null when the log could not be read (it is admin-only), and the
+    // Automation tab then infers provenance from alerts, flow timelines and tasks.
     const [tagAudit, setTagAudit] = useState<TagAuditRow[] | null>(null);
     const loadActivity = useCallback(async () => {
         if (!token) return;
@@ -1301,8 +1303,8 @@ export default function DeviceDetailPage({params}: { params: Promise<{ id: strin
         }
     };
 
-    // The device the lazy fetches below are allowed to write their result for: a response
-    // for the previous device must not land on this one after a fast switch.
+    // The device the lazy fetches below may write results for; a response for the previous device is dropped after a
+    // fast switch.
     const shownIdRef = useRef(id);
 
     // Loaded on the first visit to the Scope section and not refetched on later visits in the same session.
@@ -1340,9 +1342,8 @@ export default function DeviceDetailPage({params}: { params: Promise<{ id: strin
         }
     };
 
-    // Next keeps this page mounted when only the [id] segment changes, as it does when jumping straight from one
-    // device to another, so every piece of per-device state would otherwise stay on screen under the wrong device.
-    // The lazy sections are the worst of it: their loaders return early once state is set.
+    // Next keeps this page mounted when only the [id] segment changes, so per-device state would otherwise stay on
+    // screen under the wrong device. The lazy loaders return early once state is set.
     useEffect(() => {
         shownIdRef.current = id;
         setScope(null);
@@ -1368,6 +1369,7 @@ export default function DeviceDetailPage({params}: { params: Promise<{ id: strin
     // The banners can be put away. A different failure arriving brings the banner back, since dismissing one
     // says nothing about the next.
     const errorKey = detail?.device?.last_task_error?.task_id ?? null;
+    const reenrollUntil = detail?.device?.reenrollment_allowed_until ?? null;
     useEffect(() => {
         setErrorDismissed(false);
     }, [errorKey]);
@@ -1387,7 +1389,7 @@ export default function DeviceDetailPage({params}: { params: Promise<{ id: strin
         const observer = new ResizeObserver(measure);
         observer.observe(el);
         return () => observer.disconnect();
-    }, [errorKey, errorDismissed, stateDismissed]);
+    }, [errorKey, errorDismissed, stateDismissed, reenrollUntil]);
 
     useEffect(() => {
         if (section === "scope" && !scope && !scopeError && !scopeLoading) loadScope();
@@ -1530,6 +1532,43 @@ export default function DeviceDetailPage({params}: { params: Promise<{ id: strin
         });
     };
 
+    const handleAllowReenrollment = async () => {
+        if (!token) return;
+        setAllowingReenroll(true);
+        try {
+            const res = await api.allowReenrollment(token, id);
+            setDetail((cur) => cur
+                ? {...cur, device: {...cur.device, reenrollment_allowed_until: res.reenrollment_allowed_until}}
+                : cur);
+            notifications.show({
+                color: "teal",
+                message: `Re-enrollment allowed until ${new Date(res.reenrollment_allowed_until).toLocaleString()}`,
+            });
+        } catch (e: unknown) {
+            notifications.show({
+                color: "red",
+                title: "Couldn't allow re-enrollment",
+                message: e instanceof ApiError ? e.message : (e as Error).message,
+            });
+        } finally {
+            setAllowingReenroll(false);
+        }
+    };
+
+    const confirmAllowReenrollment = () => {
+        modals.openConfirmModal({
+            title: "Allow re-enrollment",
+            children: (
+                <Text size="sm">
+                    Allow this device to re-enroll with a new profile for 24 hours? This is intended for a local erase
+                    or a logic board swap.
+                </Text>
+            ),
+            labels: {confirm: "Allow re-enrollment", cancel: "Cancel"},
+            onConfirm: () => handleAllowReenrollment(),
+        });
+    };
+
     const confirmForget = () => {
         modals.openConfirmModal({
             title: "Forget device",
@@ -1545,9 +1584,6 @@ export default function DeviceDetailPage({params}: { params: Promise<{ id: strin
         });
     };
 
-    // Gauges
-    // -1 is Apple's sentinel for hardware with no battery, and a reported HasBattery of false says the same thing.
-    // Either one hides the Charge card rather than show a negative percentage.
     const battery =
         typeof attrs.BatteryLevel === "number" && attrs.BatteryLevel >= 0 && attrs.HasBattery !== false
             ? attrs.BatteryLevel
@@ -1693,6 +1729,17 @@ export default function DeviceDetailPage({params}: { params: Promise<{ id: strin
                             onDispatched={handleDispatched}
                         />
                     )}
+                    {isAdmin && (
+                        <Button
+                            variant="default"
+                            size="sm"
+                            leftSection={<IconRotateClockwise size={16}/>}
+                            loading={allowingReenroll}
+                            onClick={confirmAllowReenrollment}
+                        >
+                            Allow re-enrollment
+                        </Button>
+                    )}
                     {/* Destructive and admin-only. The server also refuses it while the device is enrolled. */}
                     {isAdmin && (
                         <Tooltip
@@ -1716,9 +1763,8 @@ export default function DeviceDetailPage({params}: { params: Promise<{ id: strin
                 </Group>
             </Group>
 
-            {/* The banners float over the columns rather than pushing them down the page, and the columns start
-                below them so nothing opens covered. Scrolling then runs the content up behind the glass, which
-                is the point of putting them on it. */}
+            {/* The banners float over the columns, which start below them so nothing opens covered. Scrolling runs
+                the content up behind the banners. */}
             <Box style={{position: "relative", flex: 1, minHeight: 0}}>
                 <Stack
                     ref={bannerRef}
@@ -1750,6 +1796,18 @@ export default function DeviceDetailPage({params}: { params: Promise<{ id: strin
                             ) : (
                                 <Text fz="sm">No reason was recorded.</Text>
                             )}
+                        </GlassAlert>
+                    )}
+
+                    {isFuture(device.reenrollment_allowed_until) && (
+                        <GlassAlert
+                            color="blue"
+                            variant="light"
+                            icon={<IconRotateClockwise size={16}/>}
+                            style={{pointerEvents: "auto"}}
+                        >
+                            Re-enrollment allowed until{" "}
+                            {new Date(device.reenrollment_allowed_until).toLocaleString()}
                         </GlassAlert>
                     )}
 
@@ -1858,8 +1916,8 @@ export default function DeviceDetailPage({params}: { params: Promise<{ id: strin
                                         <Text span fz="xs" c="dimmed"> ({attrs.BuildVersion})</Text> : null}
                                 </FactRow>
                                 <FactRow label="UDID" value={device.udid || "--"} mono/>
-                                {/* A pre-provisioned device has never enrolled, so this column holds the date
-                      its record was created. A date is not something anyone retypes. */}
+                                {/* A pre-provisioned device has never enrolled, so this holds the date its record was
+                      created. */}
                                 <FactRow
                                     label={device.enrollment_state === "pending" ? "Added" : "Enrolled"}
                                     value={new Date(device.enrollment_date).toLocaleDateString()}

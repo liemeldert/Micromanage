@@ -11,15 +11,19 @@ from controller.api.ids import (
 )
 from controller.auth.dependencies import Principal, get_current_principal
 from controller.models.tenant import Task
+    from controller.services import identity
 from controller.services.app_manager import AppManager
 from controller.services.audit import record_device_command
 
 router = APIRouter()
 
 
-def _task_with_device(task: Task) -> Dict[str, Any]:
+def _task_with_device(task: Task, is_admin: bool) -> Dict[str, Any]:
     """Task dict enriched with device identity (device is prefetched)."""
     d = task.to_dict()
+    if task.type == "device_location" and not is_admin and isinstance(d.get("details"), dict):
+        # The webhook keeps no location answer on the task, but an older row can still carry the coordinates.
+        d["details"] = {k: v for k, v in d["details"].items() if k != "response"}
     if task.device:
         d["device"] = {
             "serial_number": task.device.serial_number,
@@ -65,7 +69,7 @@ async def list_tasks(
         .all()
     )
 
-    return {"total": total, "tasks": [_task_with_device(task) for task in tasks]}
+    return {"total": total, "tasks": [_task_with_device(task, principal.is_admin) for task in tasks]}
 
 
 @router.get("/api/v1/tasks/{task_id}")
@@ -74,7 +78,7 @@ async def get_task_details(task_id: str, principal: Principal = Depends(get_curr
     tenant = principal.tenant
     task = await get_owned_or_404(Task, task_id, tenant, "Task not found", prefetch=("device",))
 
-    return _task_with_device(task)
+    return _task_with_device(task, principal.is_admin)
 
 
 @router.post("/api/v1/tasks/{task_id}/cancel")
@@ -95,6 +99,7 @@ async def cancel_task(task_id: str, principal: Principal = Depends(get_current_p
     task.status = "cancelled"
     task.completed_at = datetime.now(timezone.utc)
     await task.save(update_fields=["status", "completed_at"])
+    await identity.fail_renewal_tasks([task.id])
 
     return {"message": "Task cancelled"}
 

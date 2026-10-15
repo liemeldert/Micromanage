@@ -7,8 +7,10 @@ import ast
 import base64
 import logging
 import os
+import re
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
@@ -21,7 +23,7 @@ from tortoise import Tortoise  # noqa: E402
 
 from controller.auth.tokens import AuthConfigError, _secret, issue_session_token  # noqa: E402
 from controller.models.tenant import Tenant, User  # noqa: E402
-from controller.services import readiness  # noqa: E402
+from controller.services import identity, readiness  # noqa: E402
 from tests._verify_harness import make_check
 
 PASS, FAIL = [], []
@@ -57,10 +59,19 @@ class _Env:
         return False
 
 
+# The step-ca webhook secret a working deployment has on disk.
+_SECRET_DIR = Path(tempfile.mkdtemp())
+WEBHOOK_SECRET_FILE = _SECRET_DIR / "scep_webhook_secret"
+WEBHOOK_SECRET_FILE.write_text("dmVyaWZ5LXJlYWRpbmVzcy1zY2VwLXNlY3JldA==")
+EMPTY_SECRET_FILE = _SECRET_DIR / "empty"
+EMPTY_SECRET_FILE.write_text("  \n")
+GARBLED_SECRET_FILE = _SECRET_DIR / "garbled"
+GARBLED_SECRET_FILE.write_text("not*base64!\n")
+
 # A working deployment, for the checks that want one capability broken and everything else fine.
 CONFIGURED = {
     "MDM_TOPIC": "com.apple.mgmt.External.verify",
-    "SCEP_CHALLENGE": "verify-challenge",
+    "SCEP_WEBHOOK_SECRET_FILE": str(WEBHOOK_SECRET_FILE),
     "PUBLIC_API_URL": "https://mdm.example.test",
     "MDM_HOSTNAME": "mdm.example.test",
     "MDM_SERVER_URL": None,
@@ -74,9 +85,46 @@ CONFIGURED = {
     "AWS_S3_BUCKET": "verify-packages",
     "AWS_ACCESS_KEY_ID": "AKIA-VERIFY",
     "AWS_SECRET_ACCESS_KEY": "VERIFY-SECRET",
-    "MDM_ALLOW_UNSIGNED_TENANT_CLAIM": None,
     "DEP_ADE_REQUIRE_APPLE_SIGNATURE": "true",
 }
+
+
+class _Probe:
+    """Set one of readiness's cached probe results for a block, as if a probe had run age seconds ago."""
+
+    def __init__(self, cache, age=0, **values):
+        self._cache = cache
+        self._age = age
+        self._values = values
+
+    def __enter__(self):
+        import time
+
+        self._saved = dict(self._cache)
+        self._cache.clear()
+        self._cache.update(self._values, checked_at=time.monotonic() - self._age)
+        return self
+
+    def __exit__(self, *exc):
+        self._cache.clear()
+        self._cache.update(self._saved)
+        return False
+
+
+class _Cutover:
+    """Set the identity cutover state readiness reads for a block."""
+
+    def __init__(self, done):
+        self._done = done
+
+    def __enter__(self):
+        self._saved = identity.cutover_done_cached()
+        identity.set_cutover_cache(self._done)
+        return self
+
+    def __exit__(self, *exc):
+        identity.set_cutover_cache(self._saved)
+        return False
 
 
 def configured(**overrides):
@@ -91,7 +139,7 @@ def test_predicates_both_ways(tenant):
     with configured():
         check("enroll is ready on a configured deployment",
               readiness.check("enroll").ready)
-    for setting in ("MDM_TOPIC", "SCEP_CHALLENGE", "PUBLIC_API_URL"):
+    for setting in ("MDM_TOPIC", "PUBLIC_API_URL"):
         with configured(**{setting: None}):
             status = readiness.check("enroll")
             check(f"enroll is blocked with no {setting}",
@@ -131,6 +179,51 @@ def test_predicates_both_ways(tenant):
     with configured(JWT_SECRET="changeme_long_random_secret"):
         check("...and by a JWT_SECRET still set to the value the template ships",
               "JWT_SECRET" in readiness.check("enroll").missing)
+
+    # Per-enrollment challenges: no shared SCEP challenge, and step-ca has to call the controller about each one.
+    with configured(SCEP_CHALLENGE=None):
+        check("enroll no longer needs SCEP_CHALLENGE", readiness.check("enroll").ready)
+    with configured(SCEP_CHALLENGE="changeme_scep_challenge"):
+        status = readiness.check("enroll")
+        check("...and says nothing about one left at the template value",
+              status.ready and not any("SCEP_CHALLENGE" in w for w in status.warnings))
+    for label, path in (("missing", str(_SECRET_DIR / "absent")), ("empty", str(EMPTY_SECRET_FILE)),
+                        ("not base64", str(GARBLED_SECRET_FILE))):
+        with configured(SCEP_WEBHOOK_SECRET_FILE=path):
+            status = readiness.check("enroll")
+            check(f"enroll is broken with the webhook secret file {label}",
+                  not status.ready and status.broken == ("SCEP_WEBHOOK_SECRET_FILE",)
+                  and "SCEP_WEBHOOK_SECRET_FILE" not in status.missing)
+            check(f"...and the reason names the {label} file's path", path in status.reason)
+    with configured(), _Cutover(False):
+        status = readiness.check("enroll")
+        check("enroll is not ready until the identity cutover has run, with a sentence and no setting named",
+              not status.ready and not status.broken and not status.missing and "cutover" in status.reason)
+        check("...so the list of settings to check is empty", readiness.settings_to_check(status) == "")
+    with configured(), _Probe(readiness._SCEP_WEBHOOK_PROBE, state="detached"):
+        status = readiness.check("enroll")
+        check("enroll is not ready when step-ca's provisioner has no matching webhook, naming no setting",
+              not status.ready and not status.broken and "mdm_device_scep" in status.reason)
+    with configured(), _Probe(readiness._SCEP_WEBHOOK_PROBE, state="unreachable"):
+        status = readiness.check("enroll")
+        check("an unreachable step-ca only warns, naming step-ca",
+              status.ready and any("step-ca" in w for w in status.warnings))
+    with configured(), _Probe(readiness._SCEP_WEBHOOK_PROBE, state="attached"):
+        status = readiness.check("enroll")
+        check("an attached webhook neither blocks nor warns",
+              status.ready and not any("step-ca" in w for w in status.warnings))
+    check("the provisioner list matches on the provisioner name, the kind and the id",
+          readiness._webhook_attached(
+              [{"name": "other", "options": {"webhooks": [{"id": "w1", "kind": "SCEPCHALLENGE"}]}},
+               {"name": "mdm_device_scep", "options": {"webhooks": [{"id": "w1", "kind": "SCEPCHALLENGE"}]}}],
+              "mdm_device_scep", "w1")
+          and not readiness._webhook_attached(
+              [{"name": "mdm_device_scep", "options": {"webhooks": [{"id": "w2", "kind": "SCEPCHALLENGE"}]}}],
+              "mdm_device_scep", "w1")
+          and not readiness._webhook_attached(
+              [{"name": "mdm_device_scep", "options": {"webhooks": [{"id": "w1", "kind": "ENRICHING"}]}}],
+              "mdm_device_scep", "w1")
+          and not readiness._webhook_attached([], "mdm_device_scep", ""))
 
     # ade
     with configured():
@@ -316,7 +409,7 @@ def test_warnings(tenant):
         check("...and says nothing once the two are separate",
               readiness.check("ddm_sync").warnings == ())
 
-    with configured(DEP_ADE_REQUIRE_APPLE_SIGNATURE=None):
+    with configured(DEP_ADE_REQUIRE_APPLE_SIGNATURE="false"):
         status = readiness.check("ade")
         check("an ADE endpoint that does not check Apple's signature warns",
               status.ready
@@ -325,6 +418,10 @@ def test_warnings(tenant):
         check("...and says nothing with the check on",
               not any("DEP_ADE_REQUIRE_APPLE_SIGNATURE" in w
                       for w in readiness.check("ade").warnings))
+    with configured(DEP_ADE_REQUIRE_APPLE_SIGNATURE=None):
+        check("the signature check is on while DEP_ADE_REQUIRE_APPLE_SIGNATURE is unset",
+              readiness.dep_ade_require_apple_signature()
+              and not any("DEP_ADE_REQUIRE_APPLE_SIGNATURE" in w for w in readiness.check("ade").warnings))
 
     with configured(PUBLIC_API_URL="http://mdm.example.test"):
         check("a clear-text public address warns on enrollment",
@@ -333,27 +430,16 @@ def test_warnings(tenant):
         check("...and not on an https one",
               not any("clear text" in w for w in readiness.check("enroll").warnings))
 
-    with configured(MDM_ALLOW_UNSIGNED_TENANT_CLAIM="true"):
-        one_tenant = readiness.check("enroll", active_tenants=1)
-        many = readiness.check("enroll", active_tenants=4)
-        check("an unsigned tenant claim warns where there is a fleet to cross into",
-              any("MDM_ALLOW_UNSIGNED_TENANT_CLAIM" in w for w in many.warnings))
-        check("...and stays quiet on a single-tenant deployment, where the setting it describes can reach nobody else",
-              not any("MDM_ALLOW_UNSIGNED_TENANT_CLAIM" in w
-                      for w in one_tenant.warnings))
-        check("...and never makes enrollment unready",
-              many.ready)
-
-    with configured():
-        check("a configured SCEP challenge still warns that nothing can compare it with step-ca",
-              any("step-ca" in w for w in readiness.check("enroll").warnings))
-    with configured(SCEP_CHALLENGE="changeme_scep_challenge"):
-        check("a SCEP challenge still set to the template value warns as well",
-              any("env template" in w for w in readiness.check("enroll").warnings))
-    with configured(SCEP_CHALLENGE="changeme-scep-challenge"):
-        check("...and one that merely resembles it does not, since only the "
-              "exact shipped strings are known to be public",
-              not any("env template" in w for w in readiness.check("enroll").warnings))
+    with configured(), _Probe(readiness._LEGACY_PROBE, counts={str(tenant.id): 3, "other-tenant": 5}):
+        status = readiness.check("enroll", tenant=tenant)
+        check("enrolled devices on a pre-cutover certificate warn with this tenant's count",
+              status.ready and any(w.startswith("3 enrolled device(s)") for w in status.warnings)
+              and not any(w.startswith("5 ") for w in status.warnings))
+        check("...and say nothing without a tenant",
+              not any("enrolled device(s)" in w for w in readiness.check("enroll").warnings))
+    with configured(), _Probe(readiness._LEGACY_PROBE, counts={"other-tenant": 5}):
+        check("...nor when only another tenant has them",
+              not any("enrolled device(s)" in w for w in readiness.check("enroll", tenant=tenant).warnings))
 
 
 async def test_bootstrap_admin():
@@ -398,7 +484,7 @@ async def test_migrated_call_sites(tenant):
               and details["hostname"] == "mdm.example.test")
     with configured(MDM_TOPIC=None):
         details = enroll.enrollment_details(tenant)
-        check("enrollment_details keeps its shape when something is missing",
+        check("enrollment_details still returns its fields when something is missing",
               details["configured"] is False and "MDM_TOPIC" in details["missing"])
     with configured(MDM_HOSTNAME=None):
         details = enroll.enrollment_details(tenant)
@@ -602,7 +688,7 @@ async def test_endpoint(tenant, admin, member):
             _Req(), HTTPAuthorizationCredentials(scheme="Bearer",
                                                  credentials=admin_token))
     serialized = repr(blocked)
-    secrets = [CONFIGURED["SCEP_CHALLENGE"], CONFIGURED["NANOMDM_API_KEY"],
+    secrets = [WEBHOOK_SECRET_FILE.read_text(), CONFIGURED["NANOMDM_API_KEY"],
                CONFIGURED["DDM_HMAC_SECRET"], os.environ["JWT_SECRET"]]
     check("no setting value appears anywhere in the body",
           not any(secret in serialized for secret in secrets))
@@ -634,12 +720,17 @@ async def test_endpoint(tenant, admin, member):
 
 async def test_uniform_404(tenant):
     print("\n6) the unauthenticated device endpoints answer one 404")
+    from datetime import timedelta
+
     from fastapi import HTTPException
     from starlette.datastructures import Headers
 
-    from controller.api.routes.enrollment import download_enrollment_profile
+    from controller.api.dep import ade_enroll
+    from controller.api.routes.enrollment import download_enrollment_profile, enrollment_link_page
     from controller.api.ddm import download_bridged_profile
-    from controller.services import enrollment as enroll
+    from controller.models.tenant import EnrollmentLink, ScepChallenge
+    from controller.services import enrollment as enroll, enrollment_links
+    from controller.utils.timeutil import utcnow
 
     class _Peer:
         host = "198.51.100.9"
@@ -657,12 +748,14 @@ async def test_uniform_404(tenant):
 
     with configured():
         good = enroll.enrollment_token(tenant.id)
-        check("an unknown tenant gets 404",
-              await status_of(download_enrollment_profile(
-                  "no-such-tenant", good, _Req())) == 404)
-        check("a bad token on a real tenant gets the same 404, so the two cannot be told apart",
-              await status_of(download_enrollment_profile(
-                  tenant.id, "wrong-token", _Req())) == 404)
+        check("an unknown enrollment link gets 404 on the page",
+              await status_of(enrollment_link_page("no-such-token", _Req())) == 404)
+        check("...and on the download",
+              await status_of(download_enrollment_profile("no-such-token", _Req())) == 404)
+        check("an unknown tenant on the ADE route gets 404",
+              await status_of(ade_enroll("no-such-tenant", good, _Req())) == 404)
+        check("a bad ADE token on a real tenant gets the same 404, so the two cannot be told apart",
+              await status_of(ade_enroll(tenant.id, "wrong-token", _Req())) == 404)
         check("a bad bridge signature gets 404 rather than 403",
               await status_of(download_bridged_profile(
                   tenant.id, "wifi", _Req(), sig="wrong")) == 404)
@@ -670,22 +763,80 @@ async def test_uniform_404(tenant):
               await status_of(download_bridged_profile(
                   "no-such-tenant", "wifi", _Req(), sig="wrong")) == 404)
 
-        # The wire says one thing and the server records the other, so a broken enrollment link leaves something to
-        # read.
+        # A live link: the page counts nothing, the download counts one and serves a profile with its own challenge.
+        link, token = await enrollment_links.create_link(
+            tenant, "admin@example.test", "Lobby", utcnow() + timedelta(days=1), 1)
+        page = await enrollment_link_page(token, _Req())
+        text = page.body.decode()
+        check("a live link's page names the organization and links to the download",
+              page.status_code == 200 and "Readiness Inc" in text
+              and f'href="/api/v1/enroll/{token}/profile"' in text)
+        check("...and is never cached", page.headers.get("cache-control") == "no-store")
+        check("...and counts no download", (await EnrollmentLink.get(id=link.id)).downloads == 0)
+        served = await download_enrollment_profile(token, _Req())
+        check("the download serves a profile, uncached",
+              served.media_type == "application/x-apple-aspen-config"
+              and served.headers.get("cache-control") == "no-store")
+        minted = await ScepChallenge.filter(link_id=link.id).first()
+        check("...with a challenge minted for this link from the caller's address",
+              minted is not None and minted.remote_addr == "198.51.100.9" and minted.origin == "manual")
         with _Capture("controller.services.enrollment") as cap:
-            await status_of(download_enrollment_profile(
-                tenant.id, "wrong-token", _Req()))
+            used_up = await status_of(download_enrollment_profile(token, _Req()))
+        check("a link past its download limit gets the same 404", used_up == 404)
         recorded = " ".join(cap.messages)
-        check("the real reason is recorded server-side",
-              "token" in recorded and tenant.id in recorded)
-        check("...along with where it came from",
-              "198.51.100.9" in recorded)
+        check("the real reason is recorded server-side, with the tenant and the address",
+              "no downloads left" in recorded and tenant.id in recorded and "198.51.100.9" in recorded)
+        check("...and never the link's token", token not in recorded)
+
+        revoked, revoked_token = await enrollment_links.create_link(
+            tenant, "admin@example.test", None, utcnow() + timedelta(days=1), None)
+        revoked.revoked_at = utcnow()
+        await revoked.save(update_fields=["revoked_at"])
+        check("a revoked link gets 404 on the page and the download",
+              await status_of(enrollment_link_page(revoked_token, _Req())) == 404
+              and await status_of(download_enrollment_profile(revoked_token, _Req())) == 404)
+        expired, expired_token = await enrollment_links.create_link(
+            tenant, "admin@example.test", None, utcnow() - timedelta(minutes=1), None)
+        check("an expired link gets 404 too",
+              await status_of(enrollment_link_page(expired_token, _Req())) == 404)
+        check("...on the download as well, counting nothing",
+              await status_of(download_enrollment_profile(expired_token, _Req())) == 404
+              and (await EnrollmentLink.get(id=expired.id)).downloads == 0)
+        check("the page carries a content security policy that allows inline style only",
+              page.headers.get("content-security-policy") == "default-src 'none'; style-src 'unsafe-inline'")
+
+        hostile_org = await Tenant.create(id="readiness-xss", name='<script>alert("x")</script> & Co')
+        _xss_link, xss_token = await enrollment_links.create_link(
+            hostile_org, "admin@example.test", None, utcnow() + timedelta(days=1), None)
+        xss_text = (await enrollment_link_page(xss_token, _Req())).body.decode()
+        check("an organization name with markup is escaped on the page",
+              "<script>" not in xss_text and "&lt;script&gt;alert(&quot;x&quot;)&lt;/script&gt; &amp; Co" in xss_text)
+
+        dormant = await Tenant.create(id="readiness-inactive", name="Dormant", is_active=False)
+        dormant_link, dormant_token = await enrollment_links.create_link(
+            dormant, "admin@example.test", None, utcnow() + timedelta(days=1), None)
+        with _Capture("controller.services.enrollment") as cap:
+            dormant_page = await status_of(enrollment_link_page(dormant_token, _Req()))
+            dormant_download = await status_of(download_enrollment_profile(dormant_token, _Req()))
+        check("a link whose tenant is inactive gets 404 on the page and the download",
+              dormant_page == 404 and dormant_download == 404)
+        check("...counting no download", (await EnrollmentLink.get(id=dormant_link.id)).downloads == 0)
+        check("...with the reason recorded", "not active" in " ".join(cap.messages))
+
+        from controller.api.anonymous import require_enrollment_configured
+        with _Cutover(False):
+            check("the anonymous 503 names no setting when nothing is unset or broken",
+                  await _detail_of(require_enrollment_configured, tenant, enroll)
+                  == "Enrollment is not fully configured.")
+        with configured(MDM_TOPIC=None):
+            check("...and names only real settings otherwise",
+                  await _detail_of(require_enrollment_configured, tenant, enroll)
+                  == "Enrollment is not fully configured; check: MDM_TOPIC")
 
         # The tenant id and the profile id are unauthenticated path segments going into that log, and a newline in one
         # would forge a second record.
         with _Capture("controller.services.enrollment") as cap:
-            await status_of(download_enrollment_profile(
-                "evil\nWARNING:root:all is well", "token", _Req()))
+            await status_of(ade_enroll("evil\nWARNING:root:all is well", "token", _Req()))
         check("a control character in the tenant id cannot forge a log record",
               len(cap.records) == 1
               and "\n" not in cap.records[0].getMessage())
@@ -702,12 +853,282 @@ async def test_uniform_404(tenant):
                                ("a paragraph separator", "evil root: fine"),
                                ("a bidi override", "evil‮elbisiv")):
             with _Capture("controller.services.enrollment") as cap:
-                await status_of(download_enrollment_profile(hostile, "t", _Req()))
+                await status_of(ade_enroll(hostile, "t", _Req()))
             message = cap.records[0].getMessage() if cap.records else ""
             check(f"{label} in the tenant id is stripped from the log line",
                   len(cap.records) == 1
                   and not any(ch in message
                               for ch in (" ", " ", "‮")))
+
+
+async def _detail_of(fn, *args):
+    from fastapi import HTTPException
+
+    try:
+        fn(*args)
+    except HTTPException as exc:
+        return exc.detail
+    return None
+
+
+async def test_probes(tenant):
+    print("\n6b) the step-ca webhook probe and the legacy identity count")
+    import json
+    import ssl
+    from types import SimpleNamespace
+
+    import httpx
+
+    from controller.models.tenant import Device
+    from controller.services import nanomdm_store
+
+    id_file = _SECRET_DIR / "scep_webhook_id"
+    id_file.write_text("hook-1\n")
+    calls = []
+    answer = {}
+
+    def handler(request):
+        calls.append(request.url.path)
+        if answer.get("refuse"):
+            raise httpx.ConnectError("connection refused", request=request)
+        return httpx.Response(200, content=answer["body"], headers={"content-type": "application/json"})
+
+    def provisioners(hook_id):
+        return json.dumps({"provisioners": [
+            {"name": "other", "options": {"webhooks": [{"id": "hook-1", "kind": "SCEPCHALLENGE"}]}},
+            {"name": "mdm_device_scep", "options": {"webhooks": [{"id": hook_id, "kind": "SCEPCHALLENGE"}]}},
+        ]}).encode()
+
+    real_client, real_context = httpx.AsyncClient, ssl.create_default_context
+
+    class _Client(real_client):
+        def __init__(self, *args, **kwargs):
+            kwargs.pop("verify", None)
+            super().__init__(*args, transport=httpx.MockTransport(handler), **kwargs)
+
+    async def probe(**values):
+        answer.clear()
+        answer.update(values)
+        readiness._SCEP_WEBHOOK_PROBE.clear()
+        return await readiness.probe_scep_webhook()
+
+    saved = dict(readiness._SCEP_WEBHOOK_PROBE)
+    httpx.AsyncClient = _Client
+    ssl.create_default_context = lambda *args, **kwargs: None
+    try:
+        with configured(SCEP_WEBHOOK_ID_FILE=str(id_file), STEPCA_URL="https://step-ca.test:9000/"):
+            check("a provisioner carrying the webhook id reads as attached",
+                  await probe(body=provisioners("hook-1")) == "attached")
+            check("...asked at step-ca's provisioners endpoint", calls[-1:] == ["/provisioners"])
+            check("one carrying another id reads as detached", await probe(body=provisioners("hook-2")) == "detached")
+            check("a body that is not JSON reads as detached", await probe(body=b"<html>oops</html>") == "detached")
+            check("a JSON list reads as detached", await probe(body=b"[]") == "detached")
+            check("a refused connection reads as unreachable", await probe(refuse=True) == "unreachable")
+
+            await probe(body=provisioners("hook-1"))
+            asked = len(calls)
+            answer.update(body=provisioners("hook-2"))
+            check("a second probe within 60 s answers from the cache",
+                  await readiness.probe_scep_webhook() == "attached" and len(calls) == asked)
+            readiness._SCEP_WEBHOOK_PROBE["checked_at"] -= readiness._PROBE_TTL_SECONDS + 1
+            check("...and asks step-ca again once 60 s have passed",
+                  await readiness.probe_scep_webhook() == "detached" and len(calls) == asked + 1)
+
+            answer.clear()
+            answer.update(body=provisioners("hook-1"))
+            with configured(SCEP_WEBHOOK_ID_FILE=str(id_file)), _Cutover(True), \
+                    _Probe(readiness._SCEP_WEBHOOK_PROBE, state="detached"):
+                asked = len(calls)
+                await readiness.warm_enroll_state()
+                check("warming the enroll state answers a fresh detached reading from the cache",
+                      len(calls) == asked and not readiness.check("enroll").ready)
+            with configured(SCEP_WEBHOOK_ID_FILE=str(id_file)), _Cutover(True), \
+                    _Probe(readiness._SCEP_WEBHOOK_PROBE, age=readiness._PROBE_TTL_SECONDS + 1, state="detached"):
+                asked = len(calls)
+                await readiness.warm_enroll_state()
+                check("...and asks step-ca again for a stale one, so a reattached webhook unblocks enrollment",
+                      len(calls) == asked + 1 and readiness.check("enroll").ready)
+    finally:
+        httpx.AsyncClient = real_client
+        ssl.create_default_context = real_context
+        readiness._SCEP_WEBHOOK_PROBE.clear()
+        readiness._SCEP_WEBHOOK_PROBE.update(saved)
+
+    other = await Tenant.create(id="readiness-legacy-other", name="Other")
+    legacy_cn = "Acme MDM Device " + "0" * 32
+    for owner, udid, cn in ((tenant, "LEGACY-A", legacy_cn), (tenant, "LEGACY-B", "mm " + "1" * 36),
+                            (other, "LEGACY-C", legacy_cn), (other, "LEGACY-D", legacy_cn)):
+        await Device.create(tenant=owner, udid=udid, serial_number=udid, device_model="Mac", os_version="15.0",
+                            enrollment_state="enrolled", attributes={"cn": cn}, groups=[], tags=[])
+
+    async def fake_identities(udids):
+        rows = await Device.filter(udid__in=list(udids)).values_list("udid", "attributes")
+        return {udid: SimpleNamespace(subject_cn=attrs["cn"]) for udid, attrs in rows}
+
+    real_list, saved_legacy = nanomdm_store.list_identities, dict(readiness._LEGACY_PROBE)
+    nanomdm_store.list_identities = fake_identities
+    readiness._LEGACY_PROBE.clear()
+    try:
+        counts = await readiness.probe_legacy_identities()
+    finally:
+        nanomdm_store.list_identities = real_list
+        readiness._LEGACY_PROBE.clear()
+        readiness._LEGACY_PROBE.update(saved_legacy)
+    check(f"the legacy identity count is kept per tenant ({counts})",
+          counts == {str(tenant.id): 1, str(other.id): 2})
+
+
+async def test_nanomdm_schema():
+    print("\n6d) NanoMDM's database has the columns nanomdm_store reads and writes")
+    every = [(table, column) for table, columns in readiness.NANOMDM_COLUMNS.items() for column in columns]
+
+    class _Conn:
+        def __init__(self, present, broken=False):
+            self.present, self.broken, self.closed, self.asked = present, broken, False, None
+
+        async def fetch(self, query, tables):
+            if self.broken:
+                raise RuntimeError("relation information_schema.columns is unreadable")
+            self.asked = list(tables)
+            return [{"table_name": t, "column_name": c} for t, c in self.present if t in tables]
+
+        async def close(self):
+            self.closed = True
+
+    class _Asyncpg:
+        def __init__(self, conn=None):
+            self.conn = conn
+
+        async def connect(self, dsn, **kwargs):
+            if self.conn is None:
+                raise OSError("connection refused")
+            return self.conn
+
+    async def probe(fake):
+        real = sys.modules.get("asyncpg")
+        sys.modules["asyncpg"] = fake
+        readiness._NANOMDM_SCHEMA_PROBE.clear()
+        try:
+            return await readiness.probe_nanomdm_schema()
+        finally:
+            if real is not None:
+                sys.modules["asyncpg"] = real
+            else:
+                del sys.modules["asyncpg"]
+
+    saved = dict(readiness._NANOMDM_SCHEMA_PROBE)
+    try:
+        with configured(NANOMDM_DATABASE_URL="postgres://fake:fake@localhost:5432/nanomdm"):
+            complete = _Conn(every + [("devices", "authenticate"), ("enrollments", "topic")])
+            check("a database with every column produces no warning", await probe(_Asyncpg(complete)) is None)
+            check("...asks about the three tables, and closes the connection",
+                  sorted(complete.asked or []) == sorted(readiness.NANOMDM_COLUMNS) and complete.closed)
+            check("...and enrollment carries no warning about NanoMDM's columns",
+                  not any("NanoMDM" in w for w in readiness.check("enroll").warnings))
+
+            short = _Conn([pair for pair in every if pair != ("enrollments", "push_magic")])
+            warning = await probe(_Asyncpg(short)) or ""
+            check("a missing column is named with its table", "enrollments.push_magic" in warning)
+            check("...and no column that is there is named", "devices.identity_cert" not in warning)
+            status = readiness.check("enroll")
+            check("...and it is an enrollment warning, never a block",
+                  status.ready and warning in status.warnings and not status.missing and not status.broken)
+
+            no_table = _Conn([pair for pair in every if pair[0] != "cert_auth_associations"])
+            warning = await probe(_Asyncpg(no_table)) or ""
+            check("a missing table names each of its columns",
+                  all(f"cert_auth_associations.{c}" in warning
+                      for c in readiness.NANOMDM_COLUMNS["cert_auth_associations"]))
+
+            with _Capture("controller.services.readiness") as cap:
+                unreachable = await probe(_Asyncpg())
+            check("an unreachable database produces no warning and does not raise", unreachable is None)
+            check("...logs the connection failure it always logged",
+                  any("cannot connect to NanoMDM database" in m for m in cap.messages))
+            check("...and adds nothing to enrollment's warnings",
+                  not any("NanoMDM" in w for w in readiness.check("enroll").warnings))
+
+            failing = _Conn(every, broken=True)
+            check("a query that fails produces no warning either",
+                  await probe(_Asyncpg(failing)) is None and failing.closed)
+
+            await probe(_Asyncpg(short))
+            short.asked = None
+            check("a second probe within 60 s answers from the cache without connecting",
+                  "enrollments.push_magic" in (await readiness.probe_nanomdm_schema() or "") and short.asked is None)
+    finally:
+        readiness._NANOMDM_SCHEMA_PROBE.clear()
+        readiness._NANOMDM_SCHEMA_PROBE.update(saved)
+
+    from controller.main import MDMController
+
+    async def storage():
+        return "storage warning for the hourly job"
+
+    async def schema():
+        return "schema warning for the hourly job"
+
+    real_checks = readiness.check_nanomdm_storage, readiness.check_nanomdm_schema
+    readiness.check_nanomdm_storage, readiness.check_nanomdm_schema = storage, schema
+    try:
+        with _Capture("controller.main") as cap:
+            await MDMController.warn_nanomdm_storage()
+    finally:
+        readiness.check_nanomdm_storage, readiness.check_nanomdm_schema = real_checks
+    check("the hourly NanoMDM job logs the storage and the column warnings",
+          any("storage warning" in m for m in cap.messages) and any("schema warning" in m for m in cap.messages))
+
+    # Derived from nanomdm_store's own statements, so a column it starts to read cannot be missed by the probe.
+    tree = ast.parse((REPO / "controller/services/nanomdm_store.py").read_text())
+    noise = {"a", "k", "now", "interval", "minutes", "text", "refused", "unnest"}
+    used = set()
+    for fn in (n for n in tree.body if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))):
+        docstring = ast.get_docstring(fn, clean=False)
+        sql = [n.value for n in ast.walk(fn) if isinstance(n, ast.Constant) and isinstance(n.value, str)
+               and n.value != docstring and re.search(r"\b(SELECT|UPDATE|INSERT|DELETE|WHERE|AND|SET)\b", n.value)]
+        tables = {m for text in sql for m in re.findall(r"\b(?:FROM|UPDATE|INTO)\s+([a-z_]+)\b(?!\()", text)}
+        words = {m for text in sql for m in re.findall(r"\b[a-z_][a-z0-9_]*\b", text)} - noise - tables
+        used |= {(table, word) for table in tables for word in words}
+    # _fetch_device_column builds its SELECT from the column its callers name.
+    used |= {("devices", call.args[1].value) for call in ast.walk(tree)
+             if isinstance(call, ast.Call) and getattr(call.func, "id", None) == "_fetch_device_column"
+             and len(call.args) > 1 and isinstance(call.args[1], ast.Constant)}
+    check(f"the statements name the expected tables ({sorted({t for t, _ in used})})",
+          {t for t, _ in used} == set(readiness.NANOMDM_COLUMNS))
+    check(f"NANOMDM_COLUMNS covers every column nanomdm_store's SQL names (missing {sorted(used - set(every))})",
+          used <= set(every))
+    check(f"...and names none it does not (extra {sorted(set(every) - used)})", set(every) <= used)
+
+    schema_sql = (REPO / "tests/_nanomdm_schema_0_9_0.sql").read_text()
+    schema = {(table, column) for table, body in re.findall(r"CREATE TABLE (\w+)\s*\((.*?)\n\);", schema_sql, re.S)
+              for column in re.findall(r"^\s+([a-z_0-9]+)\s+[A-Z]", body, re.M)}
+    check("every column in NANOMDM_COLUMNS is in NanoMDM 0.9.0's schema",
+          bool(schema) and not set(every) - schema)
+
+
+def test_access_log_filter():
+    print("\n6c) the access log leaves enrollment credentials out")
+    from controller.api import main as api_main
+
+    def logged(path):
+        record = logging.LogRecord("uvicorn.access", logging.INFO, __file__, 1, '%s - "%s %s HTTP/%s" %d',
+                                   ("203.0.113.5:5000", "GET", path, "1.1", 200), None)
+        api_main.EnrollPathFilter().filter(record)
+        return record.getMessage()
+
+    check("an enrollment link's token is redacted on the page",
+          logged("/api/v1/enroll/secret-token") == '203.0.113.5:5000 - "GET /api/v1/enroll/[redacted] HTTP/1.1" 200')
+    check("...and on the download", "/api/v1/enroll/[redacted]/profile" in logged("/api/v1/enroll/secret-token/profile")
+          and "secret-token" not in logged("/api/v1/enroll/secret-token/profile"))
+    ade = logged("/api/v1/dep/enroll/tenant-1/ade-token")
+    check("the ADE URL keeps its tenant and loses its token",
+          "/api/v1/dep/enroll/tenant-1/[redacted]" in ade and "ade-token" not in ade)
+    check("other paths are left alone", "/api/v1/enrollment/links" in logged("/api/v1/enrollment/links"))
+    api_main.install_access_log_filter()
+    api_main.install_access_log_filter()
+    access = logging.getLogger("uvicorn.access")
+    check("the filter is installed once on uvicorn's access logger",
+          sum(isinstance(f, api_main.EnrollPathFilter) for f in access.filters) == 1)
 
 
 class _Capture:
@@ -882,7 +1303,7 @@ def test_boot():
               "since refusing a working secret has no visible cause",
               _secret() == "changeme-scep-challenge")
     for name in ("changeme_webhook_secret", "changeme_random_api_key",
-                 "changeme_scep_challenge", "changeme_strong_password"):
+                 "changeme_strong_password"):
         check(f"the shared list knows {name!r}", readiness.is_placeholder(name))
 
 
@@ -900,7 +1321,8 @@ def test_source_guards():
     # Settings readiness.py is the only reader of. Asserted on the parsed module rather than its text, so any spelling
     # of an os.getenv call is caught.
     single_reader = ("PUBLIC_API_URL", "DDM_HMAC_SECRET",
-                     "DEP_ADE_REQUIRE_APPLE_SIGNATURE")
+                     "DEP_ADE_REQUIRE_APPLE_SIGNATURE", "SCEP_WEBHOOK_SECRET_FILE",
+                     "SCEP_WEBHOOK_ID_FILE", "STEPCA_URL", "STEPCA_ROOT_FILE")
     for path in migrated + ["controller/services/mdm_connector.py",
                             "controller/main.py"]:
         tree = ast.parse((REPO / path).read_text())
@@ -979,6 +1401,11 @@ async def main():
     await Tortoise.init(db_url="sqlite://:memory:",
                         modules={"models": ["controller.models.tenant"]})
     await Tortoise.generate_schemas()
+    from controller.models.tenant import IdentityCutover
+    from controller.utils.timeutil import utcnow
+
+    await IdentityCutover.create(id=1, cutover_at=utcnow(), snapshot_done=True)
+    await identity.cutover_done()
 
     tenant = await Tenant.create(id="readiness", name="Readiness Inc",
                                  auth_config={"provider": "local"})
@@ -992,8 +1419,12 @@ async def main():
     test_warnings(tenant)
     await test_bootstrap_admin()
     await test_migrated_call_sites(tenant)
-    await test_endpoint(tenant, admin, member)
+    with _Probe(readiness._NANOMDM_SCHEMA_PROBE, warning=None):
+        await test_endpoint(tenant, admin, member)
     await test_uniform_404(tenant)
+    await test_probes(tenant)
+    test_access_log_filter()
+    await test_nanomdm_schema()
     test_boot()
     test_source_guards()
 

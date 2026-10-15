@@ -47,9 +47,8 @@ class MFAVerifyRequest(BaseModel):
 
 
 class MFAEnrollRequest(BaseModel):
-    # Confirming a new authenticator ends every other session, so starting one asks for the password again. Optional
-    # only for externally authenticated tenants, which hold no local password.
-    password: Optional[str] = None
+    # Confirming a new authenticator ends every session, so starting one asks for the password again.
+    password: str
 
 
 class MFAConfirmRequest(BaseModel):
@@ -144,13 +143,19 @@ async def verify_mfa_login(request: MFAVerifyRequest, http_request: Request):
     return TokenResponse(access_token=token, expires_in=JWT_TTL_SECONDS)
 
 
+def _throttle_password_check(principal: Principal) -> None:
+    """Applies the sign-in limiter, keyed as password change is, because these routes check a password."""
+    if not login_limiter.check(f"{principal.tenant.id}:{principal.user.email}"):
+        raise HTTPException(status_code=429, detail="Too many attempts; try again later")
+
+
 @router.post("/api/v1/auth/mfa/enroll")
-async def enroll_mfa(request: Optional[MFAEnrollRequest] = None,
-                     principal: Principal = Depends(get_current_principal)):
-    if principal.tenant.auth_provider == "local":
-        password = (request.password if request else None) or ""
-        if not principal.user.password_hash or not verify_password(password, principal.user.password_hash):
-            raise HTTPException(status_code=401, detail="Invalid password")
+async def enroll_mfa(request: MFAEnrollRequest, principal: Principal = Depends(get_current_principal)):
+    if principal.tenant.auth_provider != "local":
+        raise HTTPException(status_code=400, detail="Cannot enroll MFA for external provider")
+    _throttle_password_check(principal)
+    if not principal.user.password_hash or not verify_password(request.password, principal.user.password_hash):
+        raise HTTPException(status_code=401, detail="Invalid password")
     try:
         secret, uri = await mfa.begin_enrollment(principal.user)
         return {"secret": secret, "provisioning_uri": uri}
@@ -177,7 +182,7 @@ async def confirm_mfa(request: MFAConfirmRequest, principal: Principal = Depends
 async def disable_mfa(request: MFADisableRequest, principal: Principal = Depends(get_current_principal)):
     if principal.tenant.auth_provider != "local":
         raise HTTPException(status_code=400, detail="Cannot disable MFA for external provider")
-
+    _throttle_password_check(principal)
     if not principal.user.password_hash or not verify_password(request.password, principal.user.password_hash):
         raise HTTPException(status_code=401, detail="Invalid password")
 

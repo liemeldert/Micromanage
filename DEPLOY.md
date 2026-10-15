@@ -15,10 +15,21 @@ and you should modify it as needed, especially regarding SCEP.
 
 - A DNS record for `MDM_HOSTNAME` pointing at the server.
 - These ports reachable by your devices: `443` (MDM), `8001` (app manifests and the enrollment download), `9443`
-  (step-ca SCEP). The web UI is on `3000` by default, but does not *need* to be client-device-accessible.
+  (SCEP, through `scep-front`). The web UI is on `3000` by default, but does not *need* to be client-device-accessible.
+
+SCEP is served by `scep-front` on port 9443, not on 443. Set `SCEP_URL=https://MDM_HOSTNAME:9443/scep/SCEP_NAME` in
+`.env` (with your values for both names), or have your proxy route `/scep/SCEP_NAME` to `scep-front` and keep the
+default. `scep-front` presents a certificate from the stack's private CA, so also set
+`MDM_EMBED_CA_CERT_PATH=/stepca-certs/root_ca.crt`, which puts that root in every enrollment profile for devices to
+trust. Only a proxy that presents a publicly trusted certificate for SCEP makes this unnecessary.
 - APN certificate (Be it through Apple or another means)
 - Devices to enroll (of course)
 - Patience (A virtue, I hear)
+
+If a TLS proxy sits in front of port `8001`, set `FORWARDED_ALLOW_IPS` to the proxy's address as the controller sees it
+(its address on the compose network, for a proxy container). The controller then takes the client address from
+`X-Forwarded-For`, so the enrollment rate limits and logs see each device instead of the proxy. Without it every request
+appears to come from the proxy and shares one rate limit.
 
 ## 2. Generate secrets
 
@@ -75,6 +86,16 @@ devices without that certificate. It's also something I haven't tested.
 - Then, deploy docker-compose.prod.yml
 - On first boot, step-ca initialises its CA, the controller creates a bootstrap admin account, and `apns-init`
   uploads the push cert if you gave it one.
+- On every boot, step-ca attaches the controller's challenge webhook to the SCEP provisioner, so each enrollment
+  profile carries its own one-time challenge. There is no shared SCEP challenge to set.
+- step-ca itself publishes no port. `scep-front` serves its TLS on `STEPCA_PORT` (9443) and passes on only
+  `/scep/<SCEP_NAME>`; everything else returns 404. Its certificate is issued by step-ca for 397 days. step-ca checks
+  it at boot and once a day, and re-issues it when under 30 days remain, when `MDM_HOSTNAME` changes or when it no
+  longer chains to the CA's root. `scep-front` reloads nginx every 6 hours to pick up a new certificate; to load it at
+  once, run `docker compose -f docker-compose.prod.yml restart scep-front`.
+- If the `step_ca_data` volume is lost, step-ca initialises a new CA and enrolled devices no longer chain to it;
+  restoring that volume from a backup is how existing devices keep working. After a new CA is initialized, run
+  `docker compose -f docker-compose.prod.yml restart scep-front nanomdm` so both load its certificates.
 
 ```sh
 docker compose -f docker-compose.prod.yml exec controller \
@@ -142,3 +163,82 @@ For automated fleet tooling such as Ansible:
   the device hostname or its Tailscale IP. Groups are prefixed `platform_`, `tag_` and `group_`.
 - Dynamic inventory can be queried directly via HTTP or by using the CLI plugin `micromanage-cli/inventory_plugin.py`.
 
+## 8. Upgrading to per-enrollment SCEP challenges
+
+This release replaces the shared `SCEP_CHALLENGE` with a one-time challenge per enrollment profile, checked by the
+controller through a step-ca webhook.
+
+Back up first. The step-ca and controller changes below cannot be undone without these backups.
+
+```sh
+docker compose -f docker-compose.prod.yml exec -T postgres pg_dumpall -U postgres --clean --if-exists \
+  > micromanage-postgres.sql
+docker compose -f docker-compose.prod.yml stop step-ca
+docker run --rm --volumes-from "$(docker compose -f docker-compose.prod.yml ps -aq step-ca)" -v "$PWD":/backup \
+  alpine tar czf /backup/step_ca_data.tgz -C /home/step .
+```
+
+Update the checkout (`git pull`), so the new `docker-compose.prod.yml` and `deploy/scep-front.conf.template` are on
+disk. Without the template, `scep-front` starts with nothing on 9443 and its healthcheck reports it unhealthy. Then
+upgrade:
+
+```sh
+docker compose -f docker-compose.prod.yml pull
+docker compose -f docker-compose.prod.yml up -d
+docker compose -f docker-compose.prod.yml logs -f step-ca | grep 'step-ca:'
+```
+
+The admin setup waits for the CA to answer, so give it up to three minutes. Stop following the log once it prints
+"webhook verified on <SCEP_NAME>".
+
+What the first boot does:
+
+- Before the CA starts, step-ca mints the `scep-front` certificate and copies the CA certificates into the new
+  `stepca_certs` volume, which NanoMDM reads instead of step-ca's own volume.
+- step-ca turns on its admin API. This moves the provisioners from `ca.json` into step-ca's database, once, keeping
+  `ca.json.pre-admin.bak` next to it, and replaces the SCEP challenge in `ca.json` with a random value. The admin API
+  must stay enabled from then on, because `ca.json` no longer holds the CA's provisioners. The controller's first boot
+  changes its database one way as well, so going back to an older release means restoring both backups,
+  `step_ca_data` and Postgres, as shown below.
+- It rotates the old static challenge to a random discarded value, removes every ACME provisioner, installs a
+  client-only certificate template on the SCEP provisioner and attaches the webhook. Each step logs a line; a line
+  containing `ERROR` names the step that failed. With ACME removed from the CA, any ACME client pointed at step-ca
+  stops working.
+
+From then on, anything built before the upgrade fails at SCEP and has to be redone:
+
+- Enrollment profiles downloaded or printed before the upgrade. Download a new one from **Enrollment**.
+- Return to Service erases queued before the upgrade. Send them again.
+- ADE enrollments that were partway through Setup Assistant. Start them again.
+
+Enrolled devices keep working. The controller moves their identity certificates onto the new scheme in daily batches,
+and readiness shows how many are left; after that, each certificate is renewed `IDENTITY_RENEW_DAYS` (30) days before
+it expires. ADE profiles need no re-push.
+
+In `.env`:
+
+- Delete `SCEP_CHALLENGE`, `MDM_ALLOW_UNSIGNED_TENANT_CLAIM` and `MDM_REQUIRE_SIGNED_TENANT_CLAIM`. Nothing reads
+  them any more.
+- Leave `DEP_ADE_REQUIRE_APPLE_SIGNATURE` unset; it defaults to `true`. With it on, a device wiped without checking
+  out can re-enroll through ADE; with it off, an admin has to allow that device's re-enrollment first.
+- If the check refuses a genuine device over its signer's issuer, which the controller log names, add that issuer to
+  `DEP_APPLE_DEVICE_CA_NAMES` rather than turning the check off.
+
+If your own proxy sits in front of port 9443, it now reaches `scep-front` instead of step-ca, and only the SCEP path
+answers.
+
+To roll back, check out the previous release, then restore both backups into fresh volumes. `PROJECT` is the compose
+project name, which `docker volume ls` shows as the prefix of the volume names.
+
+```sh
+docker compose -f docker-compose.prod.yml down
+docker volume rm PROJECT_postgres_data PROJECT_step_ca_data
+docker compose -f docker-compose.prod.yml create step-ca
+docker run --rm --volumes-from "$(docker compose -f docker-compose.prod.yml ps -aq step-ca)" -v "$PWD":/backup \
+  alpine tar xzf /backup/step_ca_data.tgz -C /home/step
+docker compose -f docker-compose.prod.yml up -d postgres
+docker compose -f docker-compose.prod.yml exec -T postgres psql -U postgres -d postgres < micromanage-postgres.sql
+docker compose -f docker-compose.prod.yml up -d
+```
+
+Wait for `postgres` to report healthy before loading the dump.

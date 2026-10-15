@@ -547,12 +547,37 @@ async def main():
             return {"configured": True, "missing": []}
 
         @staticmethod
-        def build_enrollment_mobileconfig(tenant):
+        async def mint_profile(tenant, **mint):
+            return object(), b"<enrollment>"
+
+        @staticmethod
+        async def issue_profile(tenant, **mint):
             return b"<enrollment>"
 
         @staticmethod
-        def build_wifi_mobileconfig(ssid, password=None, hidden=False, org=None):
+        async def activate_rts_challenge(row, task_id):
+            return None
+
+        @staticmethod
+        async def discard_challenge(row, task_id=None):
+            return None
+
+        @staticmethod
+        def build_wifi_mobileconfig(ssid, password=None, hidden=False, encryption=None, org=None):
             return b"<wifi>"
+
+    import inspect
+
+    from controller.services import enrollment as real_enrollment
+
+    def parameter_shape(fn):
+        return [(p.name, p.kind, p.default is inspect.Parameter.empty)
+                for p in inspect.signature(fn).parameters.values()]
+
+    for name in ("enrollment_details", "mint_profile", "issue_profile", "activate_rts_challenge",
+                 "discard_challenge", "build_wifi_mobileconfig"):
+        check(f"the enrollment stand-in's {name} takes the real function's parameters",
+              parameter_shape(getattr(FakeEnrollment, name)) == parameter_shape(getattr(real_enrollment, name)))
 
     real_enrollment = api_services.enrollment_svc
     api_services.enrollment_svc = FakeEnrollment

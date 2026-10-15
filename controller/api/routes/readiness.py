@@ -37,8 +37,9 @@ async def get_readiness(
         raise not_found
     if not principal.is_admin:
         raise HTTPException(status_code=403, detail="Admin role required")
-    # One warning reads this, so it stays quiet about cross-tenant enrollment on a deployment with only one tenant.
     active_tenants = await Tenant.filter(is_active=True).count()
+    # The sync enroll predicate reads what these probes cached.
+    await readiness.probe_enrollment()
     body = readiness.report(tenant=principal.tenant, active_tenants=active_tenants)
     # Which build this is and whether the database is at its schema. Admin only, like the rest of this body; /health
     # says only that the process is up.

@@ -487,8 +487,7 @@ COMMAND_CATALOG: List[Dict[str, Any]] = [
     {
         "type": "device_location",
         "label": "Request location",
-        "description": "Ask a lost device where it is. The device answers only while Managed "
-                       "Lost Mode is on, and the coordinates appear in the task details.",
+        "description": "Attempts to retrieve location from a device in lost mode.",
         "category": "Lost Mode",
         "common": False,
         "request_type": "DeviceLocation",

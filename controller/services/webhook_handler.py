@@ -1,12 +1,14 @@
 import asyncio
+import base64
 import logging
 import os
-import re
 import time
-from datetime import datetime, timezone
-from typing import Any, Dict, Optional, Tuple
+from datetime import datetime
+from contextlib import AsyncExitStack
+from typing import Any, Dict, NamedTuple, Optional, Tuple
 
-from controller.models.tenant import (AppDeployment, Device, ProfileDeployment, Task, Tenant)
+from controller.models.tenant import (AppDeployment, Device, ProfileDeployment, ScepChallenge, Task, Tenant)
+from controller.services import enrollment_links, identity, mdm_connector, nanomdm_store
 
 from controller.services.webhook_parsing import (
     _ENROLLMENT_STATE_TOPICS, _PROFILE_INVENTORY_TASK_TYPES, _app_install_refusal, _app_install_state, _decode_plist,
@@ -14,10 +16,10 @@ from controller.services.webhook_parsing import (
     _reconciled_enrollment_source, _reported_hostname, _summarize_certificates, _version_fingerprint,
 )
 from controller.services.webhook_tenant import (
-    _audit_rekey, _first_param, _log_attempt, _refuse_conflicting_claim, _rekey_serial, _require_known_serial,
-    _resolve_tenant, _serial_from_nanomdm,
+    _audit_rekey, _first_param, _refuse_conflicting_claim, _rekey_serial, _require_known_serial, _resolve_tenant,
+    _serial_from_nanomdm, log_attempt,
 )
-from controller.utils.per_loop import KeyedLocks
+from controller.utils.timeutil import utcnow
 
 logger = logging.getLogger(__name__)
 
@@ -158,11 +160,8 @@ def _naming_cfg_fingerprint(tenant_id: str) -> Optional[Tuple[int, int, int]]:
 # ==Deferred fan-out==
 # Row writes stay inline; dispatcher/ATC fan-out runs after the response, off the NanoMDM connect path.
 
-_deferred_locks = KeyedLocks()
-
-
-def _device_lock(device_id: str) -> asyncio.Lock:
-    return _deferred_locks.get(device_id)
+# The per-device lock the check-in path and the deferred fan-out share.
+_device_lock = identity.device_lock
 
 
 def _spawn_deferred(coro) -> None:
@@ -230,13 +229,128 @@ async def _dispatcher_eval(device_id: Any) -> None:
         logger.exception("Dispatcher: evaluate_device failed for device %s", device_id)
 
 
-# Apple UDIDs are 40 hex digits, the dashed 25-character iPhone and iPad form, or a UUID on a Mac. NanoMDM splits its
-# /v1/enqueue/{id} path on commas, so anything else is refused before a row exists.
-_UDID_RE = re.compile(r"^[A-Za-z0-9-]{1,40}$")
+# A malformed udid is refused before a row exists.
+valid_udid = mdm_connector.valid_udid
 
 
-def valid_udid(udid: Any) -> bool:
-    return isinstance(udid, str) and bool(_UDID_RE.match(udid))
+REENROLL_ERROR = "re-enrollment cleared the command queue"
+
+_OPEN_TASK_STATUSES = ("pending", "running")
+
+# Topics that run Judge on an enrolled row too. Every other topic runs it only when it would create or reactivate one.
+_JUDGED_TOPICS = ("mdm.Authenticate", "mdm.TokenUpdate")
+
+
+
+class _Bound(NamedTuple):
+    """What _judge_and_bind settled: the device row, whether it was created, matched by udid or freshly re-enrolled,
+    the enrollment source of a fresh bind, whether this check-in bound a challenge row, and the judged row."""
+    device: Device
+    created: bool
+    matched_by_udid: bool
+    reenrolled: bool
+    source: Optional[str]
+    fresh_bind: bool
+    row: Optional[ScepChallenge] = None
+
+
+async def _clear_managed_state(device: Device, error: str, now: datetime) -> None:
+    """Cancel the device's pending and running tasks and delete its deployment rows. Uses a bulk update, which skips
+    Task.save() and its command_uuid mirror."""
+    await Task.filter(device=device, status__in=_OPEN_TASK_STATUSES).update(
+        status="cancelled",
+        error=error,
+        completed_at=now,
+    )
+    # The device no longer holds the managed profiles and apps, so the deployment records stop being true. Task history
+    # stays, and the reconciler rebuilds them on enrollment.
+    await AppDeployment.filter(device=device).delete()
+    await ProfileDeployment.filter(device=device).delete()
+
+
+async def _fail_open_renewal(device: Device, now: datetime) -> None:
+    """Expire the device's renewal when its enrollment_renew task is still pending or running. The caller holds
+    identity.udid_lock."""
+    open_ids = await Task.filter(device_id=device.id, type=identity.RENEW_TASK_TYPE,
+                                 status__in=_OPEN_TASK_STATUSES).values_list("id", flat=True)
+    await identity.fail_renewal_tasks(open_ids, now=now, locked=True)
+
+
+
+async def _finish_renewal_on_token_update(device: Device, row: ScepChallenge) -> None:
+    """After a TokenUpdate on the renewed certificate, prune the previous identity when the renewal's enrollment_renew
+    task is no longer pending or running. An open task is left to the device's answer, which finishes the renewal or
+    rolls it back. Does nothing without a task, or while a later renewal of the device is open."""
+    task = await Task.get_or_none(id=row.task_id) if row.task_id is not None else None
+    if task is None or task.status in _OPEN_TASK_STATUSES:
+        return
+    if await ScepChallenge.filter(device_id=device.id, origin="renewal", created_at__gt=row.created_at,
+                                  task__status__in=_OPEN_TASK_STATUSES).exists():
+        return
+    await identity.finish_renewal(device, task_id=row.task_id, locked=True)
+
+
+async def _park_dropped(decision: identity.Decision, reason: str, udid: str) -> None:
+    """Park the certificate of a check-in dropped without a row. The caller has recorded the attempt. An accepted legacy
+    certificate is in the snapshot and has nothing to park."""
+    if decision.reason not in identity.NO_OP_REASONS and decision.origin != "legacy":
+        await identity.apply_refusal(decision, udid, None, record=False, reason=reason)
+
+
+def _store_push_token(device: Device, info: Dict[str, Any]) -> bool:
+    """Seal an accepted TokenUpdate's Token and PushMagic into push_token_enc. Returns whether the column was set."""
+    token, magic = info.get("Token"), info.get("PushMagic")
+    if not isinstance(token, bytes) or not token or not isinstance(magic, str) or not magic:
+        return False
+    try:
+        device.push_token_enc = identity.seal_push_token(device, token.hex(), magic)
+    except Exception as exc:
+        logger.error("webhook: could not seal the push token for device %s: %s", device.id, type(exc).__name__)
+        return False
+    return True
+
+
+async def _keep_push_token(device: Device, udid: str) -> None:
+    """Write the sealed push token back to NanoMDM in place of the one a TokenUpdate just stored, and count the ignored
+    push token on the device's refusal alert."""
+    logger.warning("webhook: ignored the push token of a TokenUpdate for %s, a certificate for it was refused in the "
+                   "last %d minutes", udid, identity.REFUSAL_WINDOW.seconds // 60)
+    try:
+        push = identity.open_push_token(device) if device.push_token_enc else None
+        if push is not None:
+            async with identity.udid_lock(udid):
+                await nanomdm_store.restore_push(udid, push[0], push[1], True)
+    except Exception as exc:
+        logger.error("webhook: restoring the push token for %s failed: %s", udid, exc)
+    await identity.record_ignored(device, "push_token")
+
+
+async def _capture_bootstrap_token(device: Device, udid: str, *, locked: bool) -> None:
+    """Best-effort identity.capture_bootstrap_token. Unless locked, takes the device lock and identity.udid_lock and
+    refreshes the row first."""
+    try:
+        if locked:
+            await identity.capture_bootstrap_token(device, udid)
+            return
+        async with identity.device_locks(device.id, udid):
+            await device.refresh_from_db()
+            await identity.capture_bootstrap_token(device, udid)
+    except Exception:
+        logger.exception("webhook: sealing the bootstrap token NanoMDM holds failed for udid=%s", udid)
+
+
+async def _bootstrap_token_judged(device: Device, udid: str, token_b64: Optional[str]) -> bool:
+    """Whether a SetBootstrapToken came from the device's own identity: the row is enrolled, NanoMDM's identity
+    certificate and associations are allowed for it, and NanoMDM holds the token the check-in carried (or none for an
+    empty one). The caller holds the device lock and identity.udid_lock."""
+    if device.enrollment_state != "enrolled" or not await identity.identity_settled(device, udid):
+        return False
+    try:
+        held = await nanomdm_store.get_bootstrap_token(udid)
+    except Exception as exc:
+        logger.error("webhook: reading the bootstrap token of %s failed: %s", udid, exc)
+        return False
+    return (held or None) == token_b64
 
 
 class WebhookHandler:
@@ -269,6 +383,11 @@ class WebhookHandler:
             return
         url_params = event.get("url_params") or {}
 
+        # A per-user channel check-in carries no device enrollment state, whatever the topic.
+        if not _is_device_channel(event):
+            await self._note_liveness(udid, url_params, topic=topic)
+            return
+
         if topic == "mdm.CheckOut":
             await self._handle_checkout(udid, url_params, topic=topic)
             return
@@ -277,9 +396,9 @@ class WebhookHandler:
             await self._handle_set_bootstrap_token(udid, url_params, event)
             return
 
-        # Not evidence about enrollment (a per-user channel, the /ddm-proxied DeclarativeManagement duplicate, a
-        # token topic): note the device was heard from, change nothing else, never create a row.
-        if not _is_device_channel(event) or topic not in _ENROLLMENT_STATE_TOPICS:
+        # Not evidence about enrollment (the /ddm-proxied DeclarativeManagement duplicate, a token topic): note the
+        # device was heard from, change nothing else, never create a row.
+        if topic not in _ENROLLMENT_STATE_TOPICS:
             await self._note_liveness(udid, url_params, topic=topic)
             return
 
@@ -291,7 +410,9 @@ class WebhookHandler:
     @staticmethod
     async def _handle_set_bootstrap_token(udid: str, url_params: Dict[str, Any],
                                           event: Dict[str, Any]) -> None:
-        """Handle SetBootstrapToken check-in, tracking escrow state without storing token bytes."""
+        """Handle a SetBootstrapToken check-in. After the cutover the escrow flag and the sealed copy change only when
+        _bootstrap_token_judged holds; otherwise a bad_identity attempt is recorded and nothing changes. Before it,
+        only the flag is tracked."""
         device = await Device.get_or_none(udid=udid)
         if device is None:
             return
@@ -299,9 +420,39 @@ class WebhookHandler:
             return
         plist = _decode_plist(event.get("raw_payload"))
         token = plist.get("BootstrapToken")
-        escrowed = bool(token and len(token) > 0)
-        device.bootstrap_token_escrowed = escrowed
-        await device.save(update_fields=["bootstrap_token_escrowed"])
+        # NanoMDM stores the padded standard base64 of the token bytes.
+        token_b64 = base64.b64encode(token).decode("ascii") if isinstance(token, bytes) and token else None
+        escrowed = token_b64 is not None
+        fields = ["bootstrap_token_escrowed"]
+        async with AsyncExitStack() as locks:
+            if await identity.cutover_done():
+                await locks.enter_async_context(identity.device_locks(device.id, udid))
+                await device.refresh_from_db()
+                if not await _bootstrap_token_judged(device, udid, token_b64):
+                    logger.warning("webhook: ignored a SetBootstrapToken for %s, the certificate behind it is not one "
+                                   "the device allows", udid)
+                    await log_attempt("bad_identity", tenant=await Tenant.get_or_none(id=device.tenant_id),
+                                      udid=udid, serial_number=device.serial_number, topic="mdm.SetBootstrapToken",
+                                      detail={"reason": "bootstrap_token_unjudged"})
+                    return
+                sealed = None
+                if token_b64 is not None:
+                    try:
+                        sealed = identity.seal_bootstrap_token(device, token_b64)
+                    except Exception as exc:
+                        logger.error("webhook: could not seal the bootstrap token for device %s: %s", device.id,
+                                     type(exc).__name__)
+                else:
+                    try:
+                        await nanomdm_store.clear_bootstrap_token(udid, only_if_empty=True)
+                    except Exception as exc:
+                        logger.error("webhook: clearing the bootstrap token for %s failed: %s", udid, exc)
+                # A copy that could not be sealed is dropped, as the stored one no longer matches the device's token.
+                # token.
+                device.bootstrap_token_enc = sealed
+                fields.append("bootstrap_token_enc")
+            device.bootstrap_token_escrowed = escrowed
+            await device.save(update_fields=fields)
         logger.info("webhook: SetBootstrapToken for %s (escrowed=%s)", udid, escrowed)
 
     @staticmethod
@@ -326,8 +477,6 @@ class WebhookHandler:
         # Unscoped by tenant: a udid is globally unique and survives an erase, so this is the normal re-enrollment
         # path, not an edge case.
         device = await Device.get_or_none(udid=udid)
-        matched_by_udid = device is not None
-        created = False
 
         # A verifiable tenant claim has to agree with the row before anything the caller sent reaches it. See
         # _refuse_conflicting_claim.
@@ -335,79 +484,31 @@ class WebhookHandler:
             if await _refuse_conflicting_claim(device, url_params, topic=topic, info=info):
                 return None
 
-        # Unknown udid: fall back to the serial.
-        if device is None:
-            tenant, reason = await _resolve_tenant(url_params)
-            if tenant is None:
-                logger.warning(
-                    f"webhook: no tenant resolvable for new device {udid} (reason={reason}); skipping"
-                )
-                # The requested tenant id was never verified, so it stays out of the FK: anyone could pass
-                # ?tenant=<victim> to pollute that tenant's attempt log. Diagnostic detail only.
-                requested = _first_param(url_params, "tenant")
-                # bad_signature means a real tenant was claimed without a valid signature; everything else is a
-                # misconfiguration, and the two read differently.
-                outcome = "bad_tenant_claim" if reason == "bad_signature" else "no_tenant"
-                detail: Dict[str, Any] = {"reason": reason}
-                if requested:
-                    detail["requested_tenant"] = requested
-                await _log_attempt(
-                    outcome, tenant=None, udid=udid, topic=topic, detail=detail,
-                )
+        judged = device is None or device.enrollment_state != "enrolled" or topic in _JUDGED_TOPICS
+        if judged:
+            # The asyncio lock covers this process only; the advisory lock serializes across supervisord processes.
+            async with identity.device_locks(device.id if device is not None else None, udid):
+                bound = await self._judge_and_bind(udid, url_params, info, topic)
+            if bound is None:
                 return None
-            serial = (info.get("SerialNumber") or "").strip()
-            if not serial:
-                serial = await _serial_from_nanomdm(udid)
-            if serial:
-                # .first(), not get_or_none: duplicate serials from older rows would raise MultipleObjectsReturned and
-                # drop the enrollment.
-                device = (
-                    await Device.filter(tenant=tenant, serial_number=serial)
-                    .order_by("enrollment_date").first()
-                )
-            if device is not None:
-                if device.udid and device.udid != udid:
-                    # Takes over the row (groups, targeted config, command stream). Legitimate causes exist (a
-                    # logic-board swap, a restore, a missed CheckOut), so recorded rather than blocked.
-                    logger.info(
-                        f"webhook: re-keying serial={serial!r} to udid={udid} "
-                        f"(was {device.udid}, state {device.enrollment_state})"
-                    )
-                    await _audit_rekey(tenant, device, new_udid=udid)
-                device.udid = udid
-            elif serial and _require_known_serial():
-                logger.warning(
-                    f"webhook: refusing to create device for unprovisioned "
-                    f"serial={serial!r} (MDM_ENROLL_REQUIRE_KNOWN_SERIAL is set)"
-                )
-                await _log_attempt(
-                    "unknown_serial", tenant=tenant, udid=udid,
-                    serial_number=serial, topic=topic,
-                )
-                return None
-            elif serial:
-                device = await Device.create(
-                    tenant=tenant,
-                    udid=udid,
-                    serial_number=serial,
-                    device_model=info.get("ProductName") or info.get("Model") or "",
-                    os_version=info.get("OSVersion") or "",
-                    hostname=_reported_hostname(info),
-                )
-                created = True
-                logger.info(
-                    f"webhook: enrolled device udid={udid} serial={serial!r} tenant={tenant.id}"
-                )
-            else:
-                logger.info(f"webhook: skipping serial-less check-in for unknown udid={udid}")
-                # This tenant is a real row, so it's safe in the FK.
-                await _log_attempt("no_serial", tenant=tenant, udid=udid, topic=topic)
-                return None
+            device = bound.device
+        else:
+            bound = _Bound(device, False, True, False, None, False)
 
-        # The other half of the takeover the serial branch audits above, and the half an attacker can reach. Still
-        # permitted, never silent.
+        was_inactive = device.enrollment_state != "enrolled"
+        fresh_enrollment = bound.created or was_inactive or bound.reenrolled
+        # Inside the refusal window an Authenticate that bound nothing may be the refused certificate's, delivered
+        # after its TokenUpdate was refused, so its inventory is not written.
+        if (topic == "mdm.Authenticate" and not fresh_enrollment and not bound.fresh_bind
+                and await identity.recently_refused(device)):
+            logger.warning("webhook: ignored the inventory of an Authenticate for %s, a certificate for it was "
+                           "refused in the last %d minutes", udid, identity.REFUSAL_WINDOW.seconds // 60)
+            await identity.record_ignored(device, "authenticate")
+            info = {}
+
+        # Re-keying by udid is permitted and always audited.
         rekey_refused = False
-        if matched_by_udid:
+        if bound.matched_by_udid:
             reported = (info.get("SerialNumber") or "").strip()
             if reported and device.serial_number and reported != device.serial_number:
                 logger.warning(
@@ -416,7 +517,6 @@ class WebhookHandler:
                 )
                 rekey_refused = not await _rekey_serial(device, reported, topic=topic)
 
-        was_inactive = device.enrollment_state != "enrolled"
         device.enrollment_state = "enrolled"
         device.unenrolled_at = None
         # Tracked rather than a full-row save: every Connect, including a bare Idle poll, comes through here, and a
@@ -442,10 +542,9 @@ class WebhookHandler:
         # dep_server_id synced from ABM/ASM is the reliable ADE signal. Stamped before the group match so a
         # tag-scoped group or DEP-scoped flow sees it this check-in rather than the next.
         if getattr(device, "dep_server_id", None):
-            attrs = dict(device.attributes or {})
-            attrs["enrollment_source"] = "ade"
-            device.attributes = attrs
-            dirty.add("attributes")
+            if not bound.source:
+                device.attributes = {**(device.attributes or {}), "enrollment_source": "ade"}
+                dirty.add("attributes")
             if "dep" not in (device.tags or []):
                 device.tags = list(device.tags or []) + ["dep"]
                 dirty.add("tags")
@@ -502,13 +601,32 @@ class WebhookHandler:
                 logger.exception(
                     f"webhook: naming derivation failed for udid={udid}; enrolling without an auto-name"
                 )
-        await device.save(update_fields=sorted(dirty))  # last_seen is in there
+        if topic == "mdm.TokenUpdate":
+            # Inside the refusal window a push token from a check-in that bound nothing may be the refused
+            # certificate's, so the sealed one is kept, except on a renewal or Return to Service row bound since.
+            refused_at = None
+            if not fresh_enrollment and not bound.fresh_bind:
+                refused_at = await identity.refused_since(device)
+            if refused_at is not None and not identity.rebound_since(bound.row, refused_at):
+                await _keep_push_token(device, udid)
+            elif _store_push_token(device, info):
+                dirty.add("push_token_enc")
+        # A CheckOut processed since the row was read, or since the bind released the locks, is not overwritten by
+        # this save.
+        async with identity.device_locks(device.id, udid):
+            if not was_inactive and await Device.filter(id=device.id, enrollment_state="unenrolled").exists():
+                logger.warning("webhook: %s for %s not applied, the device checked out while it was processed",
+                               topic, udid)
+                return None
+            await device.save(update_fields=sorted(dirty))  # last_seen is in there
 
         # On a fresh (re)enroll, query full device state while it is still connected. Best-effort, never blocks
         # enrollment.
-        if created or was_inactive:
+        if fresh_enrollment:
             if was_inactive:
                 logger.info(f"webhook: device udid={udid} re-enrolled (history retained)")
+            # A SetBootstrapToken processed before this check-in was not sealed.
+            await _capture_bootstrap_token(device, udid, locked=False)
             try:
                 from controller.services.poller import on_device_enrolled
                 # Inline, under the same per-device lock the deferred fan-out uses: overlapping a deferred advance
@@ -518,6 +636,234 @@ class WebhookHandler:
             except Exception:
                 logger.exception(f"webhook: post-enroll hook failed for udid={udid}")
         return device
+
+    async def _judge_and_bind(
+        self, udid: str, url_params: Dict[str, Any], info: Dict[str, Any], topic: Optional[str],
+    ) -> Optional[_Bound]:
+        """Judge udid's identity certificate and bind it to its row, creating the row when there is none. Returns
+        None when the check-in is dropped. A no-op decision binds and parks nothing. The caller holds the device lock
+        and identity.udid_lock."""
+        device = await Device.get_or_none(udid=udid)
+        now = utcnow()
+        decision = await identity.judge(udid, device=device, now=now, apply=False, topic=topic)
+        unjudged = decision.reason in identity.NO_OP_REASONS
+        if not decision.accepted and not unjudged:
+            # Judge recorded an unreadable identity itself and nothing is parked for it; the reconciler retries.
+            if decision.reason != "identity_unreadable":
+                await identity.apply_refusal(decision, udid, device)
+            return None
+        if device is None:
+            return await self._bind_new_udid(decision, udid, url_params, info, topic, now)
+        if unjudged:
+            return _Bound(device, False, True, False, None, False)
+        row = decision.row
+        serial = (info.get("SerialNumber") or "").strip() or (device.serial_number or "")
+        if row is not None and row.serial and serial and serial != row.serial:
+            await identity.apply_refusal(decision, udid, device, reason="serial_mismatch")
+            return None
+        takeover = await identity.settle_takeover(decision, udid, device, now)
+        if not decision.accepted:
+            return None
+        return await self._bind_row(device, decision, udid, topic, now, takeover, matched_by_udid=True)
+
+    async def _bind_new_udid(
+        self, decision: identity.Decision, udid: str, url_params: Dict[str, Any], info: Dict[str, Any],
+        topic: Optional[str], now: datetime,
+    ) -> Optional[_Bound]:
+        """A check-in from a udid without a row: resolve its tenant, adopt the tenant's row holding the reported serial
+        under the takeover rule, or create one. The caller holds the device lock and identity.udid_lock."""
+        unjudged = decision.reason in identity.NO_OP_REASONS
+        row = decision.row
+        tenant, reason = decision.tenant, None
+        if tenant is None:
+            # A legacy certificate carries no tenant of its own, so the signed URL claim decides.
+            tenant, reason = await _resolve_tenant(url_params)
+        if tenant is None:
+            logger.warning(
+                f"webhook: no tenant resolvable for new device {udid} (reason={reason}); skipping"
+            )
+            # The requested tenant id is unverified, so it goes in the detail and not the FK, where it could pollute
+            # another tenant's attempt log.
+            requested = _first_param(url_params, "tenant")
+            # bad_signature means a real tenant was claimed without a valid signature; every other reason is a
+            # misconfiguration.
+            outcome = "bad_tenant_claim" if reason == "bad_signature" else "no_tenant"
+            detail: Dict[str, Any] = {"reason": reason}
+            if requested:
+                detail["requested_tenant"] = requested
+            await log_attempt(
+                outcome, tenant=None, udid=udid, topic=topic, detail=detail,
+            )
+            await _park_dropped(decision, "no_tenant", udid)
+            return None
+        serial = (info.get("SerialNumber") or "").strip()
+        if not serial:
+            serial = await _serial_from_nanomdm(udid)
+        if row is not None and row.serial and serial and serial != row.serial:
+            await identity.apply_refusal(decision, udid, None, reason="serial_mismatch")
+            return None
+        device = None
+        if serial:
+            # .first(), not get_or_none: duplicate serials from older rows would raise MultipleObjectsReturned and
+            # drop the enrollment.
+            device = (
+                await Device.filter(tenant=tenant, serial_number=serial)
+                .order_by("enrollment_date").first()
+            )
+        if device is not None:
+            if decision.origin == "manual" and getattr(device, "dep_server_id", None):
+                # A self-reported serial does not earn a manual enrollment the ABM assignment of that serial, and
+                # the tenant and serial unique index leaves no room for a second row.
+                logger.warning("webhook: refusing a manual enrollment of udid=%s onto ADE device %s (serial=%r)",
+                               udid, device.id, serial)
+                await identity.apply_serial_refusal(decision, udid, serial, reason="ade_row_refused", topic=topic)
+                return None
+            takeover = None
+            if device.udid and device.udid != udid:
+                if device.enrollment_state == "enrolled":
+                    # A fresh challenge takes over an enrolled row only under the takeover rule. A legacy
+                    # certificate keeps the audited re-key, since the snapshot already vouches for it.
+                    decision.is_takeover = True
+                    takeover = await identity.settle_takeover(decision, udid, device, now, serial=serial,
+                                                              topic=topic)
+                    if not unjudged and not decision.accepted:
+                        return None
+                logger.info(
+                    f"webhook: re-keying serial={serial!r} to udid={udid} "
+                    f"(was {device.udid}, state {device.enrollment_state})"
+                )
+                await _audit_rekey(tenant, device, new_udid=udid)
+            if unjudged:
+                device.udid = udid
+                return _Bound(device, False, False, False, None, False)
+            return await self._bind_row(device, decision, udid, topic, now, takeover, matched_by_udid=False,
+                                        serial=serial)
+        if serial and _require_known_serial():
+            logger.warning(
+                f"webhook: refusing to create device for unprovisioned "
+                f"serial={serial!r} (MDM_ENROLL_REQUIRE_KNOWN_SERIAL is set)"
+            )
+            await log_attempt(
+                "unknown_serial", tenant=tenant, udid=udid,
+                serial_number=serial, topic=topic,
+            )
+            await _park_dropped(decision, "unknown_serial", udid)
+            return None
+        if not serial:
+            logger.info(f"webhook: skipping serial-less check-in for unknown udid={udid}")
+            # This tenant is a real row, so it's safe in the FK.
+            await log_attempt("no_serial", tenant=tenant, udid=udid, topic=topic)
+            await _park_dropped(decision, "no_serial", udid)
+            return None
+        if not unjudged:
+            decision = await identity.apply_acceptance(decision, udid, None, now=now, topic=topic, serial=serial)
+            if not decision.accepted:
+                return None
+        source = decision.enrollment_source
+        device = await Device.create(
+            tenant=tenant,
+            udid=udid,
+            serial_number=serial,
+            device_model=info.get("ProductName") or info.get("Model") or "",
+            os_version=info.get("OSVersion") or "",
+            hostname=_reported_hostname(info),
+            identity_sha256=decision.cert_sha256,
+            identity_pem=decision.identity.pem if decision.cert_sha256 and decision.identity else None,
+            attributes={"enrollment_source": source} if source else {},
+        )
+        logger.info(
+            f"webhook: enrolled device udid={udid} serial={serial!r} tenant={tenant.id}"
+        )
+        return _Bound(device, True, False, False, source, row is not None and not unjudged)
+
+    async def _bind_row(
+        self, device: Device, decision: identity.Decision, udid: str, topic: Optional[str], now: datetime,
+        takeover: Optional[str], *, matched_by_udid: bool, serial: Optional[str] = None,
+    ) -> Optional[_Bound]:
+        """Bind an accepted certificate onto an existing row and run the re-enrollment or renewal a fresh bind
+        implies. serial is the reported serial on the serial path. The caller holds the device lock and
+        identity.udid_lock."""
+        row = decision.row
+        prior_udid = device.udid
+        was_enrolled = device.enrollment_state == "enrolled"
+        fresh_bind = row is not None and not (row.bound_udid == udid and row.cert_sha256 == decision.cert_sha256)
+        # apply_acceptance sets device.udid, and only once the bind has succeeded.
+        decision = await identity.apply_acceptance(decision, udid, device, now=now, topic=topic, serial=serial)
+        if not decision.accepted:
+            return None
+
+        fresh = False
+        renewed = (topic == "mdm.TokenUpdate" and decision.origin == "renewal"
+                   and decision.cert_sha256 == row.cert_sha256)
+        if prior_udid and (fresh_bind or (decision.origin == "legacy" and not was_enrolled)):
+            fresh = await self._reenroll(device, decision, prior_udid, takeover, now)
+            if decision.origin == "rts":
+                await _capture_bootstrap_token(device, udid, locked=True)
+            if renewed:
+                await _finish_renewal_on_token_update(device, row)
+        elif renewed and not fresh_bind:
+            await _finish_renewal_on_token_update(device, row)
+        return _Bound(device, False, matched_by_udid, fresh, decision.enrollment_source if fresh_bind else None,
+                      fresh_bind, row)
+
+    @staticmethod
+    async def _reenroll(device: Device, decision: identity.Decision, prior_udid: str, takeover: Optional[str],
+                        now: datetime) -> bool:
+        """An accepted bind of a new certificate onto an existing row. Fails the commands already sent, resets the
+        bootstrap token and DDM state, and audits. A fresh enrollment also clears the managed state the way a CheckOut
+        does; a renewal or Return to Service keeps it. Returns whether this was a fresh enrollment."""
+        from controller.services import reconciler
+
+        row = decision.row
+        renewal = decision.origin == "renewal"
+        if not renewal:
+            await _fail_open_renewal(device, now)
+        sent = Task.filter(device_id=device.id, status__in=_OPEN_TASK_STATUSES, command_uuid__isnull=False)
+        if renewal and row is not None and row.task_id is not None:
+            sent = sent.exclude(id=row.task_id)
+        failed = await sent.values("id", "type", "tenant_id")
+        await reconciler.fail_tasks(failed, REENROLL_ERROR, now, locked=True)
+        for task in failed:
+            _defer(device.id, _atc_signal(device.id, "command_ack", ref=str(task["id"])))
+
+        fields = ["ddm_last_published_token"]
+        device.ddm_last_published_token = None
+        # On a renewal apply_acceptance set the flag from its bootstrap token write; None means it wrote nothing.
+        if not renewal or decision.bootstrap_token_restored is None:
+            device.bootstrap_token_escrowed = False
+            fields.append("bootstrap_token_escrowed")
+        if not renewal:
+            device.bootstrap_token_enc = None
+            fields.append("bootstrap_token_enc")
+        await device.save(update_fields=fields)
+
+        fresh = decision.origin in ("manual", "ade", "legacy")
+        if fresh:
+            await _clear_managed_state(device, REENROLL_ERROR, now)
+
+        tenant = await Tenant.get_or_none(id=device.tenant_id)
+        if tenant is not None:
+            try:
+                from controller.services.audit import record_system_audit
+
+                await record_system_audit(
+                    tenant, "device.renew" if renewal else "device.reenroll",
+                    target_type="device", target_id=str(device.id),
+                    detail={
+                        "origin": decision.origin,
+                        "udid": device.udid,
+                        "previous_udid": prior_udid if prior_udid != device.udid else None,
+                        "takeover": takeover,
+                        "challenge_id": str(row.id) if row is not None else None,
+                        "failed_tasks": len(failed),
+                        "bootstrap_token_restored": bool(decision.bootstrap_token_restored),
+                    },
+                )
+            except Exception:
+                logger.exception("webhook: failed to audit the re-enrollment of device %s", device.id)
+        logger.info("webhook: device %s %s (%s, %d sent command(s) failed)",
+                    device.udid, "renewed" if renewal else "re-enrolled", decision.origin, len(failed))
+        return fresh
 
     async def _handle_checkout(self, udid: str, url_params: Dict[str, Any],
                                topic: Optional[str] = None):
@@ -529,27 +875,28 @@ class WebhookHandler:
         # (https://github.com/micromdm/nanomdm/blob/v0.9.0/service/webhook/service.go).
         if await _refuse_conflicting_claim(device, url_params, topic=topic):
             return
-        # Soft-unenroll: keep the record and history so a re-enroll picks the state back up. Bulk update, not a
-        # save() loop, so bypassing Task.save() cannot desync its command_uuid mirror.
-        await Task.filter(device=device, status__in=["pending", "running"]).update(
-            status="cancelled",
-            error="Device unenrolled",
-            completed_at=datetime.now(timezone.utc),
-        )
-        # Unenrolling strips every managed profile and app off the device, so the deployment records stop being true.
-        # Clear them; task history stays, and the reconciler rebuilds them on re-enroll.
-        await AppDeployment.filter(device=device).delete()
-        await ProfileDeployment.filter(device=device).delete()
-        # Clearing the token is what makes sync_device publish declarations again on re-enroll (it skips when the
-        # token equals ddm_last_published_token). ddm_enabled_at stays, or compliance would read the device as one
-        # that never used DDM.
-        device.ddm_last_published_token = None
-        device.enrollment_state = "unenrolled"
-        device.unenrolled_at = datetime.now(timezone.utc)
-        device.bootstrap_token_escrowed = False
-        await device.save(update_fields=["enrollment_state", "unenrolled_at",
-                                         "last_seen", "ddm_last_published_token",
-                                         "bootstrap_token_escrowed"])
+        # Serialized with Judge, so a CheckOut cannot unenroll the row between a refused Authenticate and its park.
+        async with identity.device_locks(device.id, udid):
+            await device.refresh_from_db()
+            if not await identity.checkout_allowed(device, udid):
+                return
+            now = utcnow()
+            # Soft-unenroll: keep the record and history so a re-enroll picks the state back up.
+            await _fail_open_renewal(device, now)
+            await _clear_managed_state(device, "Device unenrolled", now)
+            await enrollment_links.expire_rts_challenges(now, udid=udid)
+            # Clearing the token is what makes sync_device publish declarations again on re-enroll (it skips when the
+            # token equals ddm_last_published_token). ddm_enabled_at stays, or compliance would read the device as one
+            # that never used DDM.
+            device.ddm_last_published_token = None
+            device.enrollment_state = "unenrolled"
+            device.unenrolled_at = now
+            device.bootstrap_token_escrowed = False
+            device.bootstrap_token_enc = None
+            device.push_token_enc = None
+            await device.save(update_fields=["enrollment_state", "unenrolled_at",
+                                             "last_seen", "ddm_last_published_token",
+                                             "bootstrap_token_escrowed", "bootstrap_token_enc", "push_token_enc"])
         logger.info(f"webhook: device {udid} checked out (unenrolled, record retained)")
 
     # ==Command results (Connect with an acknowledge_event)==
@@ -706,6 +1053,12 @@ class WebhookHandler:
         # takes the generic branch instead, never reaching _handle_profile_remove_response.
         if status == "Acknowledged" and task.type in _PROFILE_INVENTORY_TASK_TYPES:
             _defer(task.device_id, _refresh_profile_inventory(task.device_id))
+        # Only once the renewed certificate is bound; before that identity_sha256 still names the old one.
+        if (status == "Acknowledged" and task.type == identity.RENEW_TASK_TYPE
+                and await ScepChallenge.filter(task_id=task.id, bound_at__isnull=False).exists()):
+            await identity.finish_renewal(device, task_id=task.id)
+        elif status in ("Error", "CommandFormatError") and task.type == identity.RENEW_TASK_TYPE:
+            await identity.fail_renewal(device, task_id=task.id, force=True)
 
     @staticmethod
     async def _record_error(task: Task, response: Dict[str, Any], fallback: str) -> str:
@@ -776,7 +1129,9 @@ class WebhookHandler:
                     await self._fail_bypass_fetch(task, response, "Escrowing the bypass code failed")
                     return
 
-            if task.type in ("erase", "erase_device"):
+            if task.type in enrollment_links.ERASE_TASK_TYPES:
+                # Lets the next enrollment of this machine bind onto the row (identity.takeover_allowed).
+                await Device.filter(id=task.device_id).update(erase_acked_at=utcnow())
                 try:
                     from controller.services import device_secrets
                     await device_secrets.on_device_wiped(task.device_id)
@@ -809,7 +1164,8 @@ class WebhookHandler:
             # fields first, so the stored inventory says what each certificate is rather than only that there is one.
             if "CertificateList" in trimmed:
                 trimmed["CertificateList"] = _summarize_certificates(trimmed["CertificateList"])
-            if trimmed:
+            # A location fix is kept on the device only, where a member does not read it.
+            if trimmed and task.type != "device_location":
                 task.details = {**(task.details or {}), "response": _json_safe(trimmed)}
                 await task.save(update_fields=["details"])
             await self._persist_inventory(task, response)
@@ -820,6 +1176,8 @@ class WebhookHandler:
         elif status in ("Error", "CommandFormatError"):
             await self._record_error(task, response, f"{task.type} failed")
             await task.update_progress(task.progress, "failed")
+            if task.type in enrollment_links.ERASE_TASK_TYPES:
+                await enrollment_links.expire_rts_challenges(utcnow(), task_ids=[task.id])
             # A rejected command is an answer too: a wait_for(command_ack) barrier treats completed or failed alike
             # as answered, and escrow reconciliation hangs off the same signal.
             _defer(task.device_id, _atc_signal(task.device_id, "command_ack", ref=str(task.id)))

@@ -1,6 +1,8 @@
 """Verify the CMS signature on an ADE device's x-apple-aspen-deviceinfo.
 
-Returns (content, verified, detail); never raises.
+The SignerInfo signature has to verify with the signer certificate's key.
+The signer certificate has to chain to a bundled or configured Apple anchor
+Its issuer CN has to be one of DEP_APPLE_DEVICE_CA_NAMES, by default "Apple iPhone Device CA".
 
 https://www.rfc-editor.org/rfc/rfc5652
 """
@@ -18,6 +20,7 @@ logger = logging.getLogger(__name__)
 
 _BUNDLED_ANCHORS = os.path.join(os.path.dirname(__file__), "..", "data", "apple_ca_anchors.pem")
 _MAX_CHAIN_DEPTH = 10
+_DEFAULT_DEVICE_CA_NAMES = ["Apple iPhone Device CA"]
 
 
 @lru_cache(maxsize=1)
@@ -38,6 +41,18 @@ def _anchors() -> List[x509.Certificate]:
         except Exception:
             logger.exception("Failed to load Apple anchor certs from %s", path)
     return certs
+
+
+def _device_ca_names() -> List[str]:
+    """Issuer CNs allowed to sign a MachineInfo signer certificate, read from the environment on every call."""
+    raw = os.getenv("DEP_APPLE_DEVICE_CA_NAMES") or ""
+    names = [n.strip() for n in raw.split(",") if n.strip()]
+    return names or list(_DEFAULT_DEVICE_CA_NAMES)
+
+
+def _issuer_cn(cert: x509.Certificate) -> Optional[str]:
+    attrs = cert.issuer.get_attributes_for_oid(x509.NameOID.COMMON_NAME)
+    return str(attrs[0].value) if attrs else None
 
 
 def _fp(cert: x509.Certificate) -> bytes:
@@ -132,24 +147,27 @@ _HASH_BY_OID = {
 }
 
 
-def verify_cms(cms_der: bytes) -> Tuple[Optional[bytes], bool, str]:
+def verify_cms(cms_der: bytes) -> Tuple[Optional[bytes], bool, str, Optional[bytes]]:
     """Verify an ADE MachineInfo CMS SignedData blob.
 
-    Returns (content, verified, detail). Never raises."""
+    Returns (content, verified, detail, signature), where signature is the first SignerInfo's signature bytes when the
+    blob verifies and None otherwise. A failure is reported in detail."""
     try:
         from asn1crypto import cms as asn1_cms
     except Exception:
-        return None, False, "asn1crypto unavailable"
+        return None, False, "asn1crypto unavailable", None
 
     try:
-        ci = asn1_cms.ContentInfo.load(cms_der)
+        # strict refuses trailing bytes after the DER structure.
+        ci = asn1_cms.ContentInfo.load(cms_der, strict=True)
         if ci["content_type"].native != "signed_data":
-            return None, False, "not signed_data"
+            return None, False, "not signed_data", None
         sd = ci["content"]
         signer_infos = sd["signer_infos"]
         if len(signer_infos) == 0:
-            return None, False, "no signer_infos"
+            return None, False, "no signer_infos", None
         si = signer_infos[0]
+        signature = bytes(si["signature"].native)
 
         # eContent (the MachineInfo plist).
         encap = sd["encap_content_info"]
@@ -165,12 +183,12 @@ def verify_cms(cms_der: bytes) -> Tuple[Optional[bytes], bool, str]:
         ) if c is not None]
         signer_cert = _find_signer_cert(si, crypto_certs)
         if signer_cert is None:
-            return content, False, "signer cert not found"
+            return content, False, "signer cert not found", None
 
         digest_alg = si["digest_algorithm"]["algorithm"].native
         hash_cls = _HASH_BY_OID.get(digest_alg)
         if hash_cls is None:
-            return content, False, f"unsupported digest {digest_alg}"
+            return content, False, f"unsupported digest {digest_alg}", None
         hash_alg = hash_cls()
 
         # What the signature covers: the DER of signed_attrs (re-tagged SET) when present, else the eContent directly.
@@ -178,31 +196,34 @@ def verify_cms(cms_der: bytes) -> Tuple[Optional[bytes], bool, str]:
         if signed_attrs is not None and len(signed_attrs) > 0:
             # The messageDigest attr has to equal digest(eContent).
             if content is None:
-                return None, False, "signed_attrs without content"
+                return None, False, "signed_attrs without content", None
             md = _attr_value(signed_attrs, "message_digest")
             if md is None:
-                return content, False, "no messageDigest attr"
+                return content, False, "no messageDigest attr", None
             h = hashes.Hash(hash_alg)
             h.update(bytes(content))
             if not _consttime_eq(h.finalize(), bytes(md)):
-                return content, False, "messageDigest mismatch"
+                return content, False, "messageDigest mismatch", None
             signed_bytes = signed_attrs.untag().dump()  # SET OF encoding per RFC 5652
         else:
             if content is None:
-                return None, False, "no content to verify"
+                return None, False, "no content to verify", None
             signed_bytes = bytes(content)
 
-        signature = si["signature"].native
         if not _verify_signature(signer_cert, signed_bytes, signature, hash_alg):
-            return content, False, "signature invalid"
+            return content, False, "signature invalid", None
 
         if not _chain_trusted(signer_cert, crypto_certs):
-            return content, False, "not chained to an Apple anchor"
+            return content, False, "not chained to an Apple anchor", None
 
-        return content, True, f"verified via {signer_cert.issuer.rfc4514_string()}"
+        cn = _issuer_cn(signer_cert)
+        if cn not in _device_ca_names():
+            return content, False, f"issuer CN {cn or '<none>'!r} is not an allowed Apple device CA", None
+
+        return content, True, f"verified via {signer_cert.issuer.rfc4514_string()}", signature
     except Exception as exc:  # defensive: never raise into the enroll path
         logger.warning("ADE CMS verification error: %s", exc)
-        return None, False, f"error: {exc}"
+        return None, False, f"error: {exc}", None
 
 
 def _find_signer_cert(si, certs: List[x509.Certificate]) -> Optional[x509.Certificate]:
@@ -225,7 +246,7 @@ def _find_signer_cert(si, certs: List[x509.Certificate]) -> Optional[x509.Certif
             except x509.ExtensionNotFound:
                 continue
         return None
-    return certs[0] if len(certs) == 1 else None
+    return None
 
 
 def _attr_value(signed_attrs, attr_name):

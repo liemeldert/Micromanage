@@ -148,6 +148,18 @@ class Device(Model):
     ddm_declaration_status = fields.JSONField(default=dict)
     ddm_client_capabilities = fields.JSONField(default=dict)
     bootstrap_token_escrowed = fields.BooleanField(default=False)
+    # Either one lets a fresh enrollment take over this enrolled row (services.identity.takeover_allowed). A fresh
+    # bind of a challenge certificate clears both; a legacy acceptance does not.
+    reenrollment_allowed_until = fields.DatetimeField(null=True)
+    erase_acked_at = fields.DatetimeField(null=True)
+    # Token and PushMagic from the last accepted TokenUpdate, sealed with crypto_secrets.
+    push_token_enc = fields.TextField(null=True)
+    # Base64 bootstrap token NanoMDM held for this install, sealed with crypto_secrets.
+    bootstrap_token_enc = fields.TextField(null=True)
+    # sha256 of the bound identity certificate's DER, lowercase hex.
+    identity_sha256 = fields.CharField(max_length=64, null=True)
+    # PEM of that certificate, written back to NanoMDM's devices row after a refused Authenticate overwrote it.
+    identity_pem = fields.TextField(null=True)
 
     class Meta:
         table = "devices"
@@ -291,6 +303,95 @@ class EnrollmentAttempt(Model):
             "detail": self.detail or {},
             "created_at": self.created_at.isoformat() if self.created_at else None,
         }
+
+
+class EnrollmentLink(Model):
+    """A manual enrollment link. The token is kept sealed so the link can be shown again, and looked up by its hash."""
+    id = fields.UUIDField(pk=True)
+    tenant = fields.ForeignKeyField("models.Tenant", related_name="enrollment_links")
+    token_enc = fields.TextField()
+    token_hash = fields.CharField(max_length=64, index=True)
+    label = fields.CharField(max_length=120, null=True)
+    created_by = fields.CharField(max_length=255)
+    created_at = fields.DatetimeField(auto_now_add=True)
+    expires_at = fields.DatetimeField()
+    max_downloads = fields.IntField(null=True)  # null means no limit
+    downloads = fields.IntField(default=0)
+    revoked_at = fields.DatetimeField(null=True)
+
+    class Meta:
+        table = "enrollment_links"
+        ordering = ["-created_at"]
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "id": str(self.id),
+            "tenant_id": str(self.tenant_id),
+            "label": self.label,
+            "created_by": self.created_by,
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+            "expires_at": self.expires_at.isoformat() if self.expires_at else None,
+            "max_downloads": self.max_downloads,
+            "downloads": self.downloads,
+            "revoked_at": self.revoked_at.isoformat() if self.revoked_at else None,
+        }
+
+
+class ScepChallenge(Model):
+    """One SCEP challenge, minted per enrollment profile and consumed once by the step-ca webhook. Only its sha256 is
+    stored. subject_cn is the Subject CN the profile asks for, and bound_* records the certificate that used it."""
+    id = fields.UUIDField(pk=True)
+    tenant = fields.ForeignKeyField("models.Tenant", related_name="scep_challenges")
+    link = fields.ForeignKeyField("models.EnrollmentLink", related_name="challenges", null=True,
+                                  on_delete=fields.SET_NULL)
+    serial = fields.CharField(max_length=64, null=True)
+    expected_udid = fields.CharField(max_length=40, null=True)
+    device = fields.ForeignKeyField("models.Device", related_name="scep_challenges", null=True,
+                                    on_delete=fields.SET_NULL)
+    task = fields.ForeignKeyField("models.Task", related_name="scep_challenges", null=True,
+                                  on_delete=fields.SET_NULL)
+    challenge_hash = fields.CharField(max_length=64, unique=True)
+    subject_cn = fields.CharField(max_length=64)
+    remote_addr = fields.CharField(max_length=64, null=True)
+    created_at = fields.DatetimeField(auto_now_add=True)
+    usable_from = fields.DatetimeField(null=True)  # null means usable at once
+    expires_at = fields.DatetimeField()
+    consumed_at = fields.DatetimeField(null=True)
+    transaction_id = fields.CharField(max_length=128, null=True)
+    csr_hash = fields.CharField(max_length=64, null=True)
+    spki_hash = fields.CharField(max_length=64, null=True)
+    cert_sha256 = fields.CharField(max_length=64, null=True)
+    bound_at = fields.DatetimeField(null=True)
+    bound_udid = fields.CharField(max_length=40, null=True)
+    # On a renewal row, the PEM of the certificate the device held before it, for a rollback.
+    previous_pem = fields.TextField(null=True)
+    # manual, ade, rts or renewal, set when minted. The foreign keys above can be nulled by retention later.
+    origin = fields.CharField(max_length=16)
+
+    class Meta:
+        table = "scep_challenges"
+
+
+class LegacyIdentity(Model):
+    """An identity certificate association that existed when the cutover ran (services.identity.run_cutover)."""
+    id = fields.IntField(pk=True)
+    udid = fields.CharField(max_length=40)
+    cert_sha256 = fields.CharField(max_length=64)
+    snapshot_at = fields.DatetimeField(auto_now_add=True)
+
+    class Meta:
+        table = "legacy_identities"
+        unique_together = (("udid", "cert_sha256"),)
+
+
+class IdentityCutover(Model):
+    """A single row, id 1, written once the legacy identity snapshot is complete."""
+    id = fields.IntField(pk=True, generated=False)
+    cutover_at = fields.DatetimeField()
+    snapshot_done = fields.BooleanField(default=False)
+
+    class Meta:
+        table = "identity_cutover"
 
 
 class AuditLog(Model):

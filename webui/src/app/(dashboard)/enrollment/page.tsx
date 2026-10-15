@@ -9,7 +9,6 @@ import {
     Button,
     Code,
     CopyButton,
-    Divider,
     Group,
     List,
     Loader,
@@ -19,15 +18,16 @@ import {
     Tooltip,
 } from "@mantine/core";
 import {notifications} from "@mantine/notifications";
-import {IconAlertTriangle, IconCheck, IconCopy, IconDownload, IconQrcode, IconRefresh,} from "@tabler/icons-react";
-import QRCode from "react-qr-code";
+import {IconAlertTriangle, IconCheck, IconCopy, IconInfoCircle, IconRefresh} from "@tabler/icons-react";
 import {api, type EnrollmentAttempt, type EnrollmentDetails} from "../../../../lib/api";
 import {useAuth} from "../../../../lib/auth-context";
+import {useReadiness} from "../../../../lib/readiness";
 import {PageHeader} from "@/components/layout/PageHeader";
 import {PageSkeleton} from "@/components/layout/PageSkeleton";
+import {EnrollmentLinksCard} from "@/components/enrollment/EnrollmentLinksCard";
 import {GlassCard} from "@/components/ui/GlassCard";
 
-// Mirrors the outcomes webhook_handler writes (controller/services/webhook_handler.py).
+// an outcome missing from this map renders as its id.
 const ATTEMPT_OUTCOME_LABELS: Record<string, string> = {
     no_tenant: "No tenant resolved",
     no_serial: "No serial number",
@@ -35,6 +35,10 @@ const ATTEMPT_OUTCOME_LABELS: Record<string, string> = {
     unsigned_tenant_claim: "Unsigned tenant claim",
     unknown_serial: "Unprovisioned serial",
     serial_conflict: "Serial held by another device",
+    challenge_refused: "SCEP challenge refused",
+    bad_identity: "Identity certificate refused",
+    identity_unreadable: "Unreadable identity certificate",
+    machineinfo_replay: "Repeated setup request",
 };
 
 // Renewal-reminder severity for an expiry date entered in Settings. A null days_remaining shows nothing.
@@ -110,6 +114,8 @@ function DetailRow({label, value}: { label: string; value: string | null }) {
 const fetchTenantAttempts = (token: string) => api.getEnrollmentAttempts(token, {limit: 20});
 const fetchUnattributedAttempts = (token: string) =>
     api.getUnattributedEnrollmentAttempts(token, {limit: 20});
+
+const FAILED_ATTEMPTS_DESCRIPTION = "Enrollment requests the controller refused or could not match to a device.";
 
 function AttemptsCard({
                           title,
@@ -209,6 +215,8 @@ export default function EnrollmentPage() {
     const {token, isAdmin} = useAuth();
     const [details, setDetails] = useState<EnrollmentDetails | null>(null);
     const [loading, setLoading] = useState(true);
+    const {readiness, reload: reloadReadiness} = useReadiness();
+    const enrollWarnings = readiness?.capabilities.find((c) => c.capability === "enroll")?.warnings ?? [];
 
     const load = useCallback(async () => {
         if (!token) return;
@@ -222,33 +230,43 @@ export default function EnrollmentPage() {
         }
     }, [token]);
 
-    useEffect(() => {
+    const refresh = () => {
         load();
-    }, [load]);
+        reloadReadiness();
+    };
 
-    const downloadPath =
-        details && details.enroll_url
-            ? api.enrollmentDownloadPath(details.tenant_id, details.token)
-            : null;
+    useEffect(() => {
+        if (isAdmin) load();
+        else setLoading(false);
+    }, [isAdmin, load]);
+
+    if (!isAdmin) {
+        return (
+            <Stack gap="lg">
+                <PageHeader/>
+                <Alert color="gray" icon={<IconInfoCircle size={16}/>}>
+                    Manual enrollment is managed by tenant administrators.
+                </Alert>
+                <AttemptsCard
+                    title="Recent failed attempts"
+                    description={FAILED_ATTEMPTS_DESCRIPTION}
+                    emptyText="No failed attempts logged."
+                    fetchAttempts={fetchTenantAttempts}
+                />
+            </Stack>
+        );
+    }
 
     return (
         <Stack gap="lg">
             <PageHeader
-                description="Install this profile on a device to enroll it by hand. It is specific to your organization. The QR code opens the same link, so you do not have to type the URL into the device."
+                description="Open an enrollment link on a device to enroll it by hand."
                 actions={
-                    <Button variant="light" leftSection={<IconRefresh size={14}/>} onClick={load}>
+                    <Button variant="light" leftSection={<IconRefresh size={14}/>} onClick={refresh}>
                         Refresh
                     </Button>
                 }
             />
-
-            <Alert variant="light" color="gray" icon={<IconAlertTriangle size={16}/>}>
-                <Text fz="xs">
-                    The enrollment URL embeds a secret token and the profile contains a SCEP challenge.
-                    Keep these private and do not share them publicly. Anyone with access can enroll devices into your
-                    organization.
-                </Text>
-            </Alert>
 
             {loading ? (
                 <PageSkeleton variant="form"/>
@@ -263,16 +281,39 @@ export default function EnrollmentPage() {
                             icon={<IconAlertTriangle size={16}/>}
                             title="Enrollment is not fully configured"
                         >
-                            <Text fz="sm" mb={4}>
-                                Set the following in your environment, then refresh:
-                            </Text>
-                            <List size="sm" spacing={2}>
-                                {details.missing.map((m) => (
-                                    <List.Item key={m}>
-                                        <Code>{m}</Code>
-                                    </List.Item>
-                                ))}
-                            </List>
+                            {details.reason && (
+                                <Text fz="sm" mb={4}>
+                                    {details.reason}
+                                </Text>
+                            )}
+                            {details.missing.length > 0 && (
+                                <>
+                                    <Text fz="sm" mb={4}>
+                                        Set the following in your environment, then refresh:
+                                    </Text>
+                                    <List size="sm" spacing={2}>
+                                        {details.missing.map((m) => (
+                                            <List.Item key={m}>
+                                                <Code>{m}</Code>
+                                            </List.Item>
+                                        ))}
+                                    </List>
+                                </>
+                            )}
+                            {details.broken.length > 0 && (
+                                <>
+                                    <Text fz="sm" mt="xs" mb={4}>
+                                        Not usable:
+                                    </Text>
+                                    <List size="sm" spacing={2}>
+                                        {details.broken.map((b) => (
+                                            <List.Item key={b}>
+                                                <Code>{b}</Code>
+                                            </List.Item>
+                                        ))}
+                                    </List>
+                                </>
+                            )}
                         </Alert>
                     )}
 
@@ -287,79 +328,32 @@ export default function EnrollmentPage() {
                         daysRemaining={details.dep_days_remaining}
                     />
 
-                    <Group align="stretch" gap="lg" wrap="wrap">
-                        {/* Details */}
-                        <GlassCard withBorder padding="lg" style={{flex: "1 1 420px", minWidth: 320}}>
-                            <Group justify="space-between" mb="md">
-                                <Text fw={600}>Manual enrollment</Text>
-                                <Badge color={details.configured ? "teal" : "orange"} variant="light">
-                                    {details.configured ? "Ready" : "Needs config"}
-                                </Badge>
-                            </Group>
-                            <Stack gap="sm">
-                                <DetailRow label="Organization" value={details.organization}/>
-                                <DetailRow label="MDM server" value={details.mdm_server_url}/>
-                                <DetailRow label="SCEP URL" value={details.scep_url}/>
-                                <DetailRow label="APNs topic" value={details.topic}/>
-                                <DetailRow label="Hostname" value={details.hostname}/>
-                                <Divider my="xs"/>
-                                <DetailRow label="Enrollment URL" value={details.enroll_url}/>
-                                <Group mt="xs">
-                                    {downloadPath && (
-                                        <Button
-                                            component="a"
-                                            href={downloadPath}
-                                            leftSection={<IconDownload size={16}/>}
-                                        >
-                                            Download profile
-                                        </Button>
-                                    )}
-                                    {details.enroll_url && (
-                                        <CopyButton value={details.enroll_url}>
-                                            {({copied, copy}) => (
-                                                <Button variant="default" leftSection={<IconCopy size={16}/>}
-                                                        onClick={copy}>
-                                                    {copied ? "Copied" : "Copy link"}
-                                                </Button>
-                                            )}
-                                        </CopyButton>
-                                    )}
-                                </Group>
-                            </Stack>
-                        </GlassCard>
+                    <GlassCard withBorder padding="lg">
+                        <Group justify="space-between" mb="md">
+                            <Text fw={600}>Manual enrollment</Text>
+                            <Badge color={details.configured ? "teal" : "orange"} variant="light">
+                                {details.configured ? "Ready" : "Needs config"}
+                            </Badge>
+                        </Group>
+                        <Stack gap="sm">
+                            <DetailRow label="Organization" value={details.organization}/>
+                            <DetailRow label="MDM server" value={details.mdm_server_url}/>
+                            <DetailRow label="SCEP URL" value={details.scep_url}/>
+                            <DetailRow label="APNs topic" value={details.topic}/>
+                            <DetailRow label="Hostname" value={details.hostname}/>
+                            {enrollWarnings.map((w, i) => (
+                                <Text key={i} fz="xs" c="yellow.7">
+                                    {w}
+                                </Text>
+                            ))}
+                        </Stack>
+                    </GlassCard>
 
-                        {/* QR */}
-                        <GlassCard withBorder padding="lg" style={{flex: "0 1 280px", minWidth: 240}}>
-                            <Stack align="center" gap="sm">
-                                <Group gap={6}>
-                                    <IconQrcode size={18}/>
-                                    <Text fw={600}>Scan to enroll</Text>
-                                </Group>
-                                {details.enroll_url ? (
-                                    <>
-                                        <Box p="md" bg="white" style={{borderRadius: "var(--mantine-radius-sm)"}}>
-                                            <QRCode value={details.enroll_url} size={180}/>
-                                        </Box>
-                                        <Text fz="xs" c="dimmed" ta="center">
-                                            Scan with the device&apos;s camera and open the link. The profile downloads,
-                                            then you install it from Settings.
-                                        </Text>
-                                    </>
-                                ) : (
-                                    <Text fz="sm" c="dimmed" ta="center" py="xl">
-                                        Set <Code>PUBLIC_API_URL</Code> to generate an enrollment link.
-                                    </Text>
-                                )}
-                            </Stack>
-                        </GlassCard>
-                    </Group>
+                    <EnrollmentLinksCard/>
 
                     <AttemptsCard
                         title="Recent failed attempts"
-                        description={
-                            "Check-ins that reached the controller but couldn't be matched to a device. " +
-                            "SCEP-stage failures (before a device ever talks to the controller) aren't visible here."
-                        }
+                        description={FAILED_ATTEMPTS_DESCRIPTION}
                         emptyText="No failed attempts logged."
                         fetchAttempts={fetchTenantAttempts}
                     />

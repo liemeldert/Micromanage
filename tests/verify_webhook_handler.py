@@ -19,9 +19,7 @@ os.environ["YAML_CONFIG_PATH"] = _TMP_BASE
 os.environ["JWT_SECRET"] = "test-secret-for-webhook-handler"
 os.environ["MDM_SERVER_URL"] = "https://mdm.example.test/mdm"
 os.environ["PUBLIC_API_URL"] = "https://mdm.example.test"
-os.environ.pop("MDM_ALLOW_UNSIGNED_TENANT_CLAIM", None)
 os.environ.pop("MDM_ENROLL_REQUIRE_KNOWN_SERIAL", None)
-os.environ.pop("MDM_REQUIRE_SIGNED_TENANT_CLAIM", None)
 os.environ.pop("MDM_NAMING_CACHE_TTL_SECONDS", None)
 
 from tortoise import Tortoise, connections  # noqa: E402
@@ -33,7 +31,7 @@ from controller.models.tenant import (  # noqa: E402
 from controller.services import enrollment as enroll  # noqa: E402
 from controller.services import tenant_config  # noqa: E402
 from controller.services import webhook_handler as wh  # noqa: E402
-from tests._verify_harness import make_check, SqlSpy
+from tests._verify_harness import install_identity_stub, make_check, SqlSpy
 
 PASS, FAIL = [], []
 REPO = Path(__file__).resolve().parent.parent
@@ -43,7 +41,7 @@ check = make_check(FAIL, PASS)
 
 
 def raw_payload(info):
-    """A check-in body in the shape NanoMDM forwards: a base64 plist."""
+    """A check-in body as NanoMDM forwards it: a base64 plist."""
     return base64.b64encode(plistlib.dumps(info)).decode()
 
 
@@ -68,7 +66,8 @@ def write_config_yaml(tenant_id, doc):
 
 
 def _checkout_bulk_update_kwargs():
-    """Extract the keywords from the Task.filter(...).update(...) in _handle_checkout.
+    """Extract the keywords from the Task.filter(...).update(...) in _clear_managed_state, the cleanup a checkout and a
+    fresh re-enrollment share.
 
     Parsed from source: a fourth keyword beyond status, error, completed_at would desync mirror columns.
     """
@@ -76,7 +75,7 @@ def _checkout_bulk_update_kwargs():
     for node in ast.walk(tree):
         if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
             continue
-        if node.name != "_handle_checkout":
+        if node.name != "_clear_managed_state":
             continue
         for call in ast.walk(node):
             if not (isinstance(call, ast.Call)
@@ -103,6 +102,8 @@ async def main():
     await Tortoise.init(db_url="sqlite://:memory:",
                         modules={"models": ["controller.models.tenant"]})
     await Tortoise.generate_schemas()
+    # Every udid without an override holds a legacy certificate that is in the snapshot.
+    stub = install_identity_stub()
 
     # Patch out the post-enroll hook to avoid poll tasks polluting task counts and tenant reads.
     import controller.services.poller as poller
@@ -269,7 +270,7 @@ async def main():
           and post.status == "cancelled")
 
     kwargs = _checkout_bulk_update_kwargs()
-    check("the bulk update in _handle_checkout was found in the source",
+    check("the bulk update in _clear_managed_state was found in the source",
           kwargs is not None)
     check("...and it writes exactly status, error and completed_at "
           f"(got {sorted(kwargs) if kwargs else kwargs})",
@@ -816,7 +817,7 @@ async def main():
              "PayloadDisplayName": "Lab Dock Size"},
         ]}, command_uuid=pending.command_uuid)
         await i_dev.refresh_from_db()
-        check("the answer lands on the device's reported profile inventory",
+        check("the answer is recorded on the device's reported profile inventory",
               [p.get("PayloadIdentifier") for p in (i_dev.installed_profiles or [])]
               == ["com.micromanage.default.enroll", "com.mdm.default.lab-dock"])
     finally:
@@ -870,7 +871,7 @@ async def main():
             tenant=t10, type="restart", status="running", device=e_dev,
             user="admin@t1", description="restart", details={}, progress=10)
         await post_ack(e_dev, "cmd-slow")
-        await asyncio.sleep(0.25)  # Wait is now polling.
+        await asyncio.sleep(0.25)  # Let the acknowledgement handler poll for the task a few times.
         # Wait runs outside both locks to avoid stalling other devices.
         check(f"the wait holds none of the deferred slots "
               f"({_rec._semaphore()._value} of {_rec.MAX_CONCURRENT_TASKS} free)",
@@ -881,7 +882,7 @@ async def main():
         await slow.save(update_fields=["details"])
         await wh.drain_deferred()
         await slow.refresh_from_db()
-        check("...and the answer still lands once the row catches up",
+        check("...and the answer is still recorded once the row catches up",
               slow.status == "completed" and slow.progress == 100)
 
         # Orphan with no matching task row: window is only open during dispatch.
@@ -893,7 +894,7 @@ async def main():
         await ack(e_dev, {}, command_uuid="cmd-never-existed")
         orphan_wait = time.monotonic() - started
         after_states = {str(t.id): t.status for t in await Task.filter(tenant=t10)}
-        check(f"an orphan with no dispatch in flight gives up in about the grace "
+        check(f"an orphan with no dispatch pending gives up in about the grace "
               f"looks, not the whole wait ({orphan_wait:.2f}s of 5s)",
               orphan_wait < 1.0)
         check("...and it changed nothing", before_states == after_states)
@@ -1010,6 +1011,16 @@ async def main():
     await co_dev.refresh_from_db()
     check("an event with no ids is still treated as the device channel",
           co_dev.enrollment_state == "enrolled")
+
+    # A CheckOut on the user channel is proof of life and nothing else.
+    seen_before = co_dev.last_seen
+    await checkin_event("UDID-M15", "mdm.CheckOut",
+                        ids={"id": "UDID-M15:501", "parent_id": "UDID-M15", "type": "User"})
+    await co_dev.refresh_from_db()
+    check("a user-channel CheckOut leaves the device enrolled",
+          co_dev.enrollment_state == "enrolled" and co_dev.unenrolled_at is None)
+    check("...and still counts as proof of life",
+          co_dev.last_seen is not None and co_dev.last_seen > seen_before)
 
     # Liveness path still respects tenant guard.
     other_seen = co_dev.last_seen
@@ -1424,7 +1435,7 @@ async def main():
           claimant.enrollment_state == "enrolled")
 
     # An unenrolled placeholder holding the serial is a stub for this same machine, so it merges instead of blocking.
-    stub = await Device.create(
+    placeholder = await Device.create(
         tenant=t19, udid=None, serial_number="M19-STUB", device_model="",
         os_version="", enrollment_state="pending", attributes={}, groups=[], tags=[])
     mover = await Device.create(
@@ -1433,15 +1444,1032 @@ async def main():
         enrollment_state="enrolled", attributes={}, groups=[], tags=[])
     await checkin("m19", mover.udid, {"SerialNumber": "M19-STUB"})
     await mover.refresh_from_db()
-    check("a placeholder holding the serial is merged, and the re-key lands",
+    check("a placeholder holding the serial is merged, and the re-key is applied",
           mover.serial_number == "M19-STUB"
-          and await Device.get_or_none(id=stub.id) is None)
+          and await Device.get_or_none(id=placeholder.id) is None)
 
     from controller.models.tenant import AuditLog  # noqa: E402
 
     check("...and the re-key is audited, as every takeover has to be",
           await AuditLog.filter(tenant=t19, action="device.rekey",
                                 target_id=str(mover.id)).exists())
+
+    print("\n== 21. identity enforcement on the check-in path ==")
+    import hashlib
+
+    from controller.models.tenant import Alert, AuditLog, LegacyIdentity, ScepChallenge  # noqa: E402
+    from controller.services import enrollment_links, identity as identity_svc  # noqa: E402
+    from controller.services.nanomdm_store import Identity  # noqa: E402
+    from controller.utils.timeutil import as_utc  # noqa: E402
+
+    t21 = await Tenant.create(id="m21", name="M21 Org")
+    write_config_yaml("m21", {"device_naming": {}})
+    link21, _ = await enrollment_links.create_link(
+        t21, "admin@m21", "cart", datetime.now(timezone.utc) + timedelta(days=1), None)
+    not_after = datetime.now(timezone.utc) + timedelta(days=365)
+
+    def h(value):
+        return hashlib.sha256(value.encode()).hexdigest()
+
+    async def consumed_row(udid, *, spki=None, **kw):
+        """A challenge consumed by step-ca, and make its certificate udid's identity in the stub."""
+        kw.setdefault("lifetime", enrollment_links.MANUAL_LIFETIME)
+        if not {"link", "device", "task", "serial"} & set(kw):
+            kw["link"] = link21
+        row, _, cn = await enrollment_links.mint_challenge(t21, **kw)
+        await ScepChallenge.filter(id=row.id).update(consumed_at=datetime.now(timezone.utc),
+                                                     spki_hash=h(f"spki:{row.id}"))
+        await row.refresh_from_db()
+        cert = Identity(cert_sha256=h(f"cert:{row.id}"), spki_sha256=spki or h(f"spki:{row.id}"),
+                        subject_cn=cn, not_after=not_after)
+        stub.set_identity(udid, cert)
+        return row, cert
+
+    async def send(udid, topic="mdm.Authenticate", info=None, params=None):
+        await handler.handle_webhook({"topic": topic, "checkin_event": {
+            "udid": udid, "url_params": url_params("m21") if params is None else params,
+            "raw_payload": raw_payload(info) if info else None}})
+        await wh.drain_deferred()
+        return await Device.get_or_none(udid=udid)
+
+    def facts(serial):
+        return {"SerialNumber": serial, "ProductName": "MacBookPro18,3", "OSVersion": "26.0"}
+
+    async def age_refusals(device):
+        """Move the device's last refusal outside identity.REFUSAL_WINDOW."""
+        aged = (datetime.now(timezone.utc) - identity_svc.REFUSAL_WINDOW - timedelta(minutes=1)).isoformat()
+        for alert in await Alert.filter(device_id=device.id, rule_id=identity_svc.ALERT_RULE_REFUSED):
+            alert.detail = {**(alert.detail or {}), "last_seen_at": aged}
+            await alert.save(update_fields=["detail"])
+
+    # A challenge certificate takes its tenant from the row, with no tenant claim in the URL.
+    row, cert = await consumed_row("UDID-M21-A")
+    dev_a = await send("UDID-M21-A", info=facts("M21-A"), params={})
+    await row.refresh_from_db()
+    check("a challenge certificate enrolls with the row's tenant and no URL claim",
+          dev_a is not None and dev_a.tenant_id == "m21")
+    check("...binds the row and the device's identity",
+          row.bound_udid == "UDID-M21-A" and row.cert_sha256 == cert.cert_sha256
+          and dev_a is not None and dev_a.identity_sha256 == cert.cert_sha256)
+    check("...and records the manual origin as ota",
+          dev_a is not None and (dev_a.attributes or {}).get("enrollment_source") == "ota")
+
+    # The push token of an accepted TokenUpdate is kept, sealed.
+    dev_a = await send("UDID-M21-A", topic="mdm.TokenUpdate",
+                       info={"Token": b"\x01\x02\xab", "PushMagic": "magic-a"})
+    check("an accepted TokenUpdate stores the push token sealed",
+          dev_a.push_token_enc and "magic-a" not in dev_a.push_token_enc
+          and identity_svc.open_push_token(dev_a) == ("0102ab", "magic-a"))
+
+    # A certificate whose key is not the one step-ca signed is refused and parked.
+    _, bad = await consumed_row("UDID-M21-SPKI", spki=h("another key"))
+    check("a certificate whose key differs from the CSR's creates nothing",
+          await send("UDID-M21-SPKI", info=facts("M21-SPKI")) is None)
+    check("...its hash is parked",
+          ("park", "UDID-M21-SPKI", bad.cert_sha256) in stub.calls)
+    check("...and the refusal is recorded with its reason",
+          any((a.detail or {}).get("reason") == "spki_mismatch"
+              for a in await EnrollmentAttempt.filter(udid="UDID-M21-SPKI", outcome="bad_identity")))
+
+    # A fresh challenge onto an enrolled row needs one of the takeover conditions.
+    stub.calls.clear()
+    _, intruder = await consumed_row("UDID-M21-A")
+    stub.associations["UDID-M21-A"].add(cert.cert_sha256)
+    await send("UDID-M21-A", info=facts("M21-A"))
+    await dev_a.refresh_from_db()
+    check("a fresh challenge onto an enrolled row is refused",
+          dev_a.identity_sha256 == cert.cert_sha256 and dev_a.enrollment_state == "enrolled")
+    check("...the new certificate is parked and the last push token restored",
+          ("park", "UDID-M21-A", intruder.cert_sha256) in stub.calls
+          and [c[2][:2] for c in stub.restores if c[1] == "UDID-M21-A"] == [("0102ab", "magic-a")])
+    check("...and an alert is open on the device",
+          await Alert.filter(device_id=dev_a.id, rule_id=identity_svc.ALERT_RULE_REFUSED).exists())
+    check("...and the accepted certificate is written back to NanoMDM's devices row",
+          [c[2][0] for c in stub.identity_restores if c[1] == "UDID-M21-A"] == [stub.pem_for(cert)]
+          and stub.overrides["UDID-M21-A"].cert_sha256 == cert.cert_sha256)
+    dev_a = await send("UDID-M21-A", topic="mdm.TokenUpdate",
+                       info={"Token": b"\x03\x04", "PushMagic": "magic-a2"})
+    check("a TokenUpdate inside the refusal window is accepted and keeps the sealed push token",
+          dev_a.identity_sha256 == cert.cert_sha256
+          and identity_svc.open_push_token(dev_a) == ("0102ab", "magic-a"))
+    refusal = await Alert.filter(device_id=dev_a.id, rule_id=identity_svc.ALERT_RULE_REFUSED).first()
+    check("...writes the sealed push token back to NanoMDM and counts the ignored one on the alert",
+          [c[2][:2] for c in stub.restores if c[1] == "UDID-M21-A"] == [("0102ab", "magic-a")] * 2
+          and ((refusal.detail or {}).get("ignored") or {}).get("push_token", {}).get("count") == 1)
+    await age_refusals(dev_a)
+    dev_a = await send("UDID-M21-A", topic="mdm.TokenUpdate",
+                       info={"Token": b"\x03\x04", "PushMagic": "magic-a2"})
+    check("a TokenUpdate outside the refusal window stores its push token",
+          dev_a.identity_sha256 == cert.cert_sha256
+          and identity_svc.open_push_token(dev_a) == ("0304", "magic-a2")
+          and len([c for c in stub.restores if c[1] == "UDID-M21-A"]) == 2)
+
+    _, np_cert = await consumed_row("UDID-M21-NOPUSH")
+    np_dev = await send("UDID-M21-NOPUSH", info=facts("M21-NOPUSH"))
+    await consumed_row("UDID-M21-NOPUSH")
+    stub.associations["UDID-M21-NOPUSH"].add(np_cert.cert_sha256)
+    await send("UDID-M21-NOPUSH", info=facts("M21-NOPUSH"))
+    np_dev = await send("UDID-M21-NOPUSH", topic="mdm.TokenUpdate",
+                        info={"Token": b"\x07\x08", "PushMagic": "magic-np"})
+    np_alert = await Alert.filter(device_id=np_dev.id, rule_id=identity_svc.ALERT_RULE_REFUSED).first()
+    check("a TokenUpdate inside the refusal window with no sealed push token stores none and restores none",
+          np_dev.identity_sha256 == np_cert.cert_sha256 and np_dev.push_token_enc is None
+          and not [c for c in stub.restores if c[1] == "UDID-M21-NOPUSH"])
+    check("...and still counts the ignored push token on the alert",
+          ((np_alert.detail or {}).get("ignored") or {}).get("push_token", {}).get("count") == 1)
+
+    for label, prepare in (
+            ("after the erase was acknowledged",
+             lambda: Device.filter(id=dev_a.id).update(erase_acked_at=datetime.now(timezone.utc))),
+            ("inside the re-enrollment allowance",
+             lambda: Device.filter(id=dev_a.id).update(
+                 reenrollment_allowed_until=datetime.now(timezone.utc) + timedelta(hours=1))),
+    ):
+        await prepare()
+        _, taker = await consumed_row("UDID-M21-A")
+        await send("UDID-M21-A", info=facts("M21-A"))
+        await dev_a.refresh_from_db()
+        check(f"a fresh challenge onto an enrolled row is accepted {label}",
+              dev_a.identity_sha256 == taker.cert_sha256)
+        check("...and the condition is consumed by the bind",
+              dev_a.erase_acked_at is None and dev_a.reenrollment_allowed_until is None)
+    check("an accepted takeover raises the takeover alert",
+          await Alert.filter(device_id=dev_a.id, rule_id=identity_svc.ALERT_RULE_TAKEOVER).exists())
+    check("...and is audited as a re-enrollment",
+          await AuditLog.filter(action="device.reenroll", target_id=str(dev_a.id)).count() == 2)
+
+    await age_refusals(dev_a)
+    await send("UDID-M21-A", topic="mdm.CheckOut")
+    _, after_checkout = await consumed_row("UDID-M21-A")
+    dev_a = await send("UDID-M21-A", info=facts("M21-A"))
+    check("a fresh challenge after a CheckOut re-enrolls the row",
+          dev_a.enrollment_state == "enrolled" and dev_a.identity_sha256 == after_checkout.cert_sha256)
+
+    # The same rule on the serial path: an unknown udid reporting an enrolled row's serial.
+    held = await Device.create(
+        tenant=t21, udid="UDID-M21-HELD", serial_number="M21-HELD", device_model="MacBookPro18,3",
+        os_version="26.0", enrollment_state="enrolled", groups=[], tags=[], attributes={})
+    _, thief = await consumed_row("UDID-M21-THIEF")
+    check("a fresh challenge reporting an enrolled row's serial from another udid is refused",
+          await send("UDID-M21-THIEF", info=facts("M21-HELD")) is None
+          and (await Device.get(id=held.id)).udid == "UDID-M21-HELD")
+    check("...and the thief's certificate is parked",
+          ("park", "UDID-M21-THIEF", thief.cert_sha256) in stub.calls)
+    check("...the attempt names the reported serial and the refusal",
+          any(a.serial_number == "M21-HELD" and (a.detail or {}).get("reason") == "takeover_refused"
+              and (a.detail or {}).get("cert_sha256") == thief.cert_sha256
+              for a in await EnrollmentAttempt.filter(udid="UDID-M21-THIEF", outcome="bad_identity")))
+    check("...and no refusal alert is raised on the row that holds the serial",
+          not await Alert.filter(device_id=held.id, rule_id=identity_svc.ALERT_RULE_REFUSED).exists())
+    await send("UDID-M21-HELD", topic="mdm.CheckOut")
+    check("...so that device's own CheckOut is still applied",
+          (await Device.get(id=held.id)).enrollment_state == "unenrolled")
+
+    # A serial-bound ADE row binds only for its own serial.
+    await consumed_row("UDID-M21-ADE", serial="M21-ADE", lifetime=enrollment_links.ADE_LIFETIME)
+    check("an ADE challenge reporting another serial is refused",
+          await send("UDID-M21-ADE", info=facts("M21-NOT-ADE")) is None
+          and any((a.detail or {}).get("reason") == "serial_mismatch"
+                  for a in await EnrollmentAttempt.filter(udid="UDID-M21-ADE", outcome="bad_identity")))
+
+    # Renewal: deployments stay, sent commands fail, the previous certificate stays allowed until the device answers.
+    renewing = await Device.create(
+        tenant=t21, udid="UDID-M21-RENEW", serial_number="M21-RENEW", device_model="MacBookPro18,3",
+        os_version="26.0", enrollment_state="enrolled", groups=[], tags=[], attributes={},
+        identity_sha256=h("old-renew"))
+    long_ago = datetime.now(timezone.utc) - timedelta(days=300)
+    await ScepChallenge.create(tenant=t21, origin="manual", challenge_hash=h("renew-first"), subject_cn="mm first",
+                               expires_at=long_ago, consumed_at=long_ago, bound_at=long_ago,
+                               bound_udid="UDID-M21-RENEW", cert_sha256=h("old-renew"))
+    renew_task = await Task.create(tenant=t21, type="enrollment_renew", status="running", device=renewing,
+                                   user="system", description="renew", details={"command_uuid": "CMD-RENEW"})
+    sent_task = await Task.create(tenant=t21, type="restart", status="running", device=renewing, user="admin",
+                                  description="restart", details={"command_uuid": "CMD-RENEW-SENT"})
+    await ProfileDeployment.create(tenant=t21, device=renewing, profile_id="wifi", status="installed")
+    renew_row, renewed = await consumed_row("UDID-M21-RENEW", device=renewing, task=renew_task,
+                                    lifetime=enrollment_links.RENEWAL_LIFETIME)
+    stub.associations["UDID-M21-RENEW"].add(h("old-renew"))
+    await send("UDID-M21-RENEW", info=facts("M21-RENEW"))
+    await renewing.refresh_from_db()
+    check("a renewal Authenticate binds the renewed certificate",
+          renewing.identity_sha256 == renewed.cert_sha256)
+    check("...keeps the deployments",
+          await ProfileDeployment.filter(device=renewing).count() == 1)
+    check("...fails the commands already sent, except the renewal itself",
+          (await Task.get(id=sent_task.id)).error == wh.REENROLL_ERROR
+          and (await Task.get(id=renew_task.id)).status == "running")
+    check("...and keeps the previous certificate allowed",
+          stub.associations["UDID-M21-RENEW"] == {h("old-renew"), renewed.cert_sha256}
+          and await identity_svc.allowed_hashes(renewing) == {h("old-renew"), renewed.cert_sha256})
+    await send("UDID-M21-RENEW", topic="mdm.TokenUpdate")
+    check("the next TokenUpdate leaves the renewal task to the device's answer",
+          (await Task.get(id=renew_task.id)).status == "running")
+    check("...and keeps both certificates held",
+          stub.associations["UDID-M21-RENEW"] == {h("old-renew"), renewed.cert_sha256})
+    await ScepChallenge.filter(id=renew_row.id).update(previous_pem="previous certificate")
+    await ack(renewing, {}, command_uuid="CMD-RENEW")
+    await renew_row.refresh_from_db()
+    check("the Acknowledged answer completes the renewal task",
+          (await Task.get(id=renew_task.id)).status == "completed")
+    check("...prunes the previous certificate and clears the renewal row's previous PEM",
+          stub.associations["UDID-M21-RENEW"] == {renewed.cert_sha256} and renew_row.previous_pem is None)
+    check("...and the renewal is audited as such",
+          await AuditLog.filter(action="device.renew", target_id=str(renewing.id)).exists())
+
+    # An Error answer to the renewal rolls the device back to the certificate it held before.
+    failing = await Device.create(
+        tenant=t21, udid="UDID-M21-RFAIL", serial_number="M21-RFAIL", device_model="MacBookPro18,3",
+        os_version="26.0", enrollment_state="unenrolled", groups=[], tags=[], attributes={})
+    _, old_cert = await consumed_row("UDID-M21-RFAIL")
+    await send("UDID-M21-RFAIL", info=facts("M21-RFAIL"))
+    fail_task = await Task.create(tenant=t21, type="enrollment_renew", status="running", device=failing,
+                                  user="system", description="renew", details={"command_uuid": "CMD-RFAIL"})
+    fail_row, failed_cert = await consumed_row("UDID-M21-RFAIL", device=failing, task=fail_task,
+                                               lifetime=enrollment_links.RENEWAL_LIFETIME)
+    stub.associations["UDID-M21-RFAIL"].add(old_cert.cert_sha256)
+    await send("UDID-M21-RFAIL", info=facts("M21-RFAIL"))
+    await failing.refresh_from_db()
+    check("a second renewal binds its certificate before the device answers",
+          failing.identity_sha256 == failed_cert.cert_sha256)
+    await ack(failing, {"ErrorChain": [{"ErrorCode": 1, "ErrorDomain": "test"}]}, status="Error",
+              command_uuid="CMD-RFAIL")
+    await failing.refresh_from_db()
+    await fail_row.refresh_from_db()
+    check("an Error on the renewal task puts the previous certificate back",
+          failing.identity_sha256 == old_cert.cert_sha256)
+    check("...prunes the renewed certificate and expires the renewal row",
+          failed_cert.cert_sha256 not in stub.associations.get("UDID-M21-RFAIL", set())
+          and fail_row.cert_sha256 is None
+          and as_utc(fail_row.expires_at) <= datetime.now(timezone.utc))
+
+    # A TokenUpdate on the renewed certificate before the answer leaves the task open, so a later Error still rolls
+    # the renewal back.
+    erring = await Device.create(
+        tenant=t21, udid="UDID-M21-RTERR", serial_number="M21-RTERR", device_model="MacBookPro18,3",
+        os_version="26.0", enrollment_state="unenrolled", groups=[], tags=[], attributes={})
+    _, err_old = await consumed_row("UDID-M21-RTERR")
+    await send("UDID-M21-RTERR", info=facts("M21-RTERR"))
+    err_task = await Task.create(tenant=t21, type="enrollment_renew", status="running", device=erring,
+                                 user="system", description="renew", details={"command_uuid": "CMD-RTERR"})
+    err_row, err_new = await consumed_row("UDID-M21-RTERR", device=erring, task=err_task,
+                                          lifetime=enrollment_links.RENEWAL_LIFETIME)
+    stub.associations["UDID-M21-RTERR"].add(err_old.cert_sha256)
+    await send("UDID-M21-RTERR", info=facts("M21-RTERR"))
+    await send("UDID-M21-RTERR", topic="mdm.TokenUpdate")
+    check("a TokenUpdate on the renewed certificate before the answer leaves the task running and both held",
+          (await Task.get(id=err_task.id)).status == "running"
+          and stub.associations["UDID-M21-RTERR"] == {err_old.cert_sha256, err_new.cert_sha256})
+    await ack(erring, {"ErrorChain": [{"ErrorCode": 1, "ErrorDomain": "test"}]}, status="Error",
+              command_uuid="CMD-RTERR")
+    await erring.refresh_from_db()
+    await err_row.refresh_from_db()
+    check("an Error after that TokenUpdate fails the task and puts the previous certificate and its PEM back",
+          (await Task.get(id=err_task.id)).status == "failed"
+          and erring.identity_sha256 == err_old.cert_sha256 and erring.identity_pem == stub.pem_for(err_old))
+    check("...writes the previous certificate to NanoMDM only while it still holds the renewed one",
+          [c[2] for c in stub.identity_restores if c[1] == "UDID-M21-RTERR"]
+          == [(stub.pem_for(err_old), "M21-RTERR", stub.pem_for(err_new))])
+    check("...and prunes the renewed certificate",
+          stub.associations["UDID-M21-RTERR"] == {err_old.cert_sha256} and err_row.cert_sha256 is None)
+
+    # A fresh re-enrollment clears the managed state and runs the post-enroll hook.
+    enrolled_hook = []
+
+    async def _record_enroll_hook(device):
+        enrolled_hook.append(device.udid)
+
+    poller.on_device_enrolled = _record_enroll_hook
+    try:
+        fresh = await Device.create(
+            tenant=t21, udid="UDID-M21-FRESH", serial_number="M21-FRESH", device_model="MacBookPro18,3",
+            os_version="26.0", enrollment_state="enrolled", groups=[], tags=[], attributes={},
+            bootstrap_token_escrowed=True, ddm_last_published_token="tok", bootstrap_token_enc="sealed-copy",
+            reenrollment_allowed_until=datetime.now(timezone.utc) + timedelta(hours=1))
+        sent = await Task.create(tenant=t21, type="restart", status="running", device=fresh, user="admin",
+                                 description="sent", details={"command_uuid": "CMD-FRESH-SENT"})
+        unsent = await Task.create(tenant=t21, type="restart", status="pending", device=fresh, user="admin",
+                                   description="unsent", details={})
+        await AppDeployment.create(tenant=t21, device=fresh, app_id="slack", app_version="1.0", status="installed")
+        await consumed_row("UDID-M21-FRESH")
+        await send("UDID-M21-FRESH", info=facts("M21-FRESH"))
+        await fresh.refresh_from_db()
+        check("a fresh re-enrollment fails the sent command",
+              (await Task.get(id=sent.id)).status == "failed"
+              and (await Task.get(id=sent.id)).error == wh.REENROLL_ERROR)
+        check("...cancels the unsent one",
+              (await Task.get(id=unsent.id)).status == "cancelled")
+        check("...deletes the deployments",
+              await AppDeployment.filter(device=fresh).count() == 0)
+        check("...resets the bootstrap token and DDM state",
+              fresh.bootstrap_token_escrowed is False and fresh.ddm_last_published_token is None)
+        check("...and drops the sealed bootstrap token", fresh.bootstrap_token_enc is None)
+        check("...and runs on_device_enrolled", enrolled_hook == ["UDID-M21-FRESH"])
+    finally:
+        poller.on_device_enrolled = _no_enroll_hook
+
+    # The sealed bootstrap token copy: captured only from the device's own identity, written back after a renewal.
+    async def set_bootstrap_token(udid, token):
+        return await send(udid, topic="mdm.SetBootstrapToken", info={"BootstrapToken": token})
+
+    async def unjudged(udid):
+        return [a for a in await EnrollmentAttempt.filter(udid=udid, outcome="bad_identity")
+                if "bootstrap_token_unjudged" in ((a.detail or {}).get("reasons") or [(a.detail or {}).get("reason")])]
+
+    _, bt_cert = await consumed_row("UDID-M21-BT")
+    bt_dev = await send("UDID-M21-BT", info=facts("M21-BT"))
+    token = b"genuine-bootstrap-token"
+    token_b64 = base64.b64encode(token).decode()
+    stub.bootstrap["UDID-M21-BT"] = (token_b64, True)
+    bt_dev = await set_bootstrap_token("UDID-M21-BT", token)
+    check("a SetBootstrapToken from the device's own identity seals a copy",
+          bt_dev.bootstrap_token_escrowed is True and identity_svc.open_bootstrap_token(bt_dev) == token_b64
+          and token_b64 not in (bt_dev.bootstrap_token_enc or token_b64))
+
+    _, bt_intruder = await consumed_row("UDID-M21-BT")
+    stub.associations["UDID-M21-BT"].add(bt_cert.cert_sha256)
+    hostile = b"hostile-bootstrap-token"
+    stub.bootstrap["UDID-M21-BT"] = (base64.b64encode(hostile).decode(), True)
+    bt_dev = await set_bootstrap_token("UDID-M21-BT", hostile)
+    check("a hostile SetBootstrapToken processed before the refusal changes nothing",
+          bt_dev.bootstrap_token_escrowed is True and identity_svc.open_bootstrap_token(bt_dev) == token_b64)
+    check("...and is recorded as bootstrap_token_unjudged", bool(await unjudged("UDID-M21-BT")))
+
+    stub.bootstrap["UDID-M21-BT"] = (None, False)
+    await send("UDID-M21-BT", info=facts("M21-BT"))
+    await bt_dev.refresh_from_db()
+    check("the refused Authenticate writes the sealed copy back unconditionally",
+          ("restore_bootstrap_token", "UDID-M21-BT", (token_b64, False)) in stub.calls
+          and stub.bootstrap["UDID-M21-BT"] == (token_b64, True) and bt_dev.bootstrap_token_escrowed is True)
+    async def bad_identity_count(udid):
+        """Attempts are merged per outcome with a repeat count."""
+        return sum(int((a.detail or {}).get("count", 1))
+                   for a in await EnrollmentAttempt.filter(udid=udid, outcome="bad_identity"))
+
+    unjudged_before = await bad_identity_count("UDID-M21-BT")
+    bt_dev = await set_bootstrap_token("UDID-M21-BT", hostile)
+    check("the same hostile SetBootstrapToken processed after the refusal changes nothing",
+          bt_dev.bootstrap_token_escrowed is True and identity_svc.open_bootstrap_token(bt_dev) == token_b64
+          and stub.bootstrap["UDID-M21-BT"] == (token_b64, True))
+    check("...and is recorded as bootstrap_token_unjudged, since NanoMDM now holds a different token",
+          await bad_identity_count("UDID-M21-BT") == unjudged_before + 1
+          and ((await unjudged("UDID-M21-BT"))[0].detail.get("reasons") or [None])[-1] == "bootstrap_token_unjudged")
+
+    stub.bootstrap["UDID-M21-BT"] = (None, True)
+    bt_dev = await set_bootstrap_token("UDID-M21-BT", b"")
+    check("an empty SetBootstrapToken clears the copy and the flag",
+          bt_dev.bootstrap_token_escrowed is False and bt_dev.bootstrap_token_enc is None
+          and ("clear_bootstrap_token", "UDID-M21-BT", True) in stub.calls)
+
+    # A SetBootstrapToken processed ahead of the Authenticate the device sent first is sealed once the row is enrolled.
+    early_token = b"early-bootstrap-token"
+    early_b64 = base64.b64encode(early_token).decode()
+    await Device.create(
+        tenant=t21, udid="UDID-M21-BTX", serial_number="M21-BTX", device_model="MacBookPro18,3",
+        os_version="26.0", enrollment_state="unenrolled", groups=[], tags=[], attributes={})
+    await consumed_row("UDID-M21-BTX")
+    stub.bootstrap["UDID-M21-BTX"] = (early_b64, True)
+    btx = await set_bootstrap_token("UDID-M21-BTX", early_token)
+    check("a SetBootstrapToken before the Authenticate of an existing row is recorded unjudged and seals nothing",
+          bool(await unjudged("UDID-M21-BTX")) and btx.bootstrap_token_enc is None and not btx.bootstrap_token_escrowed)
+    btx = await send("UDID-M21-BTX", info=facts("M21-BTX"))
+    check("...and the Authenticate then seals the token NanoMDM holds",
+          btx.enrollment_state == "enrolled" and btx.bootstrap_token_escrowed is True
+          and identity_svc.open_bootstrap_token(btx) == early_b64)
+
+    await consumed_row("UDID-M21-BTNEW")
+    stub.bootstrap["UDID-M21-BTNEW"] = (early_b64, True)
+    check("a SetBootstrapToken for a udid with no row creates and records nothing",
+          await set_bootstrap_token("UDID-M21-BTNEW", early_token) is None
+          and not await EnrollmentAttempt.filter(udid="UDID-M21-BTNEW").exists())
+    btnew = await send("UDID-M21-BTNEW", info=facts("M21-BTNEW"))
+    check("...and the enrollment then seals the token NanoMDM holds",
+          btnew is not None and btnew.bootstrap_token_escrowed is True
+          and identity_svc.open_bootstrap_token(btnew) == early_b64)
+
+    await consumed_row("UDID-M21-BTRTS")
+    btrts = await send("UDID-M21-BTRTS", info=facts("M21-BTRTS"))
+    rts_erase = await Task.create(tenant=t21, type="erase_device", status="running", device=btrts, user="admin",
+                                  description="erase", details={"command_uuid": "CMD-BTRTS-ERASE"})
+    await consumed_row("UDID-M21-BTRTS", serial="M21-BTRTS", expected_udid="UDID-M21-BTRTS", task=rts_erase,
+                       origin="rts", lifetime=enrollment_links.RTS_LIFETIME)
+    await ack(btrts, {}, command_uuid="CMD-BTRTS-ERASE")
+    stub.bootstrap["UDID-M21-BTRTS"] = (early_b64, True)
+    btrts = await send("UDID-M21-BTRTS", info=facts("M21-BTRTS"))
+    check("a Return to Service enrollment seals the token NanoMDM holds",
+          btrts.enrollment_state == "enrolled" and btrts.bootstrap_token_escrowed is True
+          and identity_svc.open_bootstrap_token(btrts) == early_b64)
+
+    async def hostile_after_refusal(udid, serial, sealed):
+        """Enroll udid, let a refused takeover leave the attacker's token in NanoMDM, then replay its
+        SetBootstrapToken."""
+        _, own = await consumed_row(udid)
+        dev = await send(udid, info=facts(serial))
+        if sealed:
+            dev.bootstrap_token_enc = identity_svc.seal_bootstrap_token(dev, token_b64)
+            dev.bootstrap_token_escrowed = True
+            await dev.save(update_fields=["bootstrap_token_enc", "bootstrap_token_escrowed"])
+        await consumed_row(udid)
+        stub.associations[udid].add(own.cert_sha256)
+        stub.bootstrap[udid] = (base64.b64encode(hostile).decode(), True)
+        await send(udid, info=facts(serial))
+        cleared = stub.bootstrap[udid] == (None, False)
+        dev = await set_bootstrap_token(udid, hostile)
+        return dev, cleared
+
+    bt_nocopy, cleared = await hostile_after_refusal("UDID-M21-BTN", "M21-BTN", sealed=False)
+    check("a refusal with no sealed copy clears the token the refused certificate left in NanoMDM", cleared)
+    check("...so its SetBootstrapToken replayed afterwards is refused and seals nothing",
+          bt_nocopy.bootstrap_token_escrowed is False and bt_nocopy.bootstrap_token_enc is None
+          and stub.bootstrap["UDID-M21-BTN"] == (None, False) and bool(await unjudged("UDID-M21-BTN")))
+    stub.fail_bootstrap = {"restore"}
+    try:
+        bt_failed, cleared = await hostile_after_refusal("UDID-M21-BTF", "M21-BTF", sealed=True)
+    finally:
+        stub.fail_bootstrap = set()
+    check("a refusal whose write back fails still clears the refused certificate's token", cleared)
+    check("...and the replayed SetBootstrapToken leaves the kept copy and the cleared flag",
+          bt_failed.bootstrap_token_escrowed is False and identity_svc.open_bootstrap_token(bt_failed) == token_b64
+          and stub.bootstrap["UDID-M21-BTF"] == (None, False) and bool(await unjudged("UDID-M21-BTF")))
+
+    async def renewal_device(udid, serial):
+        """An enrolled device with a sealed bootstrap token whose renewal certificate is issued but not yet bound."""
+        dev = await Device.create(
+            tenant=t21, udid=udid, serial_number=serial, device_model="MacBookPro18,3", os_version="26.0",
+            enrollment_state="enrolled", groups=[], tags=[], attributes={}, identity_sha256=h(f"old:{udid}"),
+            bootstrap_token_escrowed=True)
+        dev.bootstrap_token_enc = identity_svc.seal_bootstrap_token(dev, token_b64)
+        dev.push_token_enc = identity_svc.seal_push_token(dev, "0a0b", "magic-bt")
+        await dev.save()
+        await ScepChallenge.create(tenant=t21, origin="manual", challenge_hash=h(f"first:{udid}"),
+                                   subject_cn="mm first", expires_at=long_ago, consumed_at=long_ago,
+                                   bound_at=long_ago, bound_udid=udid, cert_sha256=h(f"old:{udid}"))
+        task = await Task.create(tenant=t21, type="enrollment_renew", status="running", device=dev, user="system",
+                                 description="renew", details={"command_uuid": f"CMD-{udid}"})
+        _, cert = await consumed_row(udid, device=dev, task=task, lifetime=enrollment_links.RENEWAL_LIFETIME)
+        stub.associations[udid].add(h(f"old:{udid}"))
+        return dev, cert
+
+    bt_renew, btr_cert = await renewal_device("UDID-M21-BTR", "M21-BTR")
+    stub.bootstrap["UDID-M21-BTR"] = (None, False)
+    bt_renew = await send("UDID-M21-BTR", info=facts("M21-BTR"))
+    check("a renewal Authenticate writes the sealed copy back only while NanoMDM's is unset",
+          ("restore_bootstrap_token", "UDID-M21-BTR", (token_b64, True)) in stub.calls
+          and stub.bootstrap["UDID-M21-BTR"] == (token_b64, True))
+    check("...keeps the escrow flag",
+          bt_renew.identity_sha256 == btr_cert.cert_sha256 and bt_renew.bootstrap_token_escrowed is True)
+    audit = await AuditLog.filter(action="device.renew", target_id=str(bt_renew.id)).first()
+    check("...and the renewal audit says the token was restored",
+          audit is not None and audit.detail.get("bootstrap_token_restored") is True)
+
+    bt_early, _ = await renewal_device("UDID-M21-BTE", "M21-BTE")
+    renewed_b64 = base64.b64encode(b"renewal-window-token").decode()
+    stub.bootstrap["UDID-M21-BTE"] = (renewed_b64, True)
+    bt_early = await set_bootstrap_token("UDID-M21-BTE", b"renewal-window-token")
+    check("a SetBootstrapToken from the renewal certificate before its Authenticate is processed is sealed",
+          identity_svc.open_bootstrap_token(bt_early) == renewed_b64)
+    bt_early = await send("UDID-M21-BTE", info=facts("M21-BTE"))
+    check("...and the renewal Authenticate then leaves NanoMDM's newer token and the flag alone",
+          ("restore_bootstrap_token", "UDID-M21-BTE", (renewed_b64, True)) in stub.calls
+          and stub.bootstrap["UDID-M21-BTE"] == (renewed_b64, True) and bt_early.bootstrap_token_escrowed is True)
+    audit = await AuditLog.filter(action="device.renew", target_id=str(bt_early.id)).first()
+    check("...and its audit says nothing was restored",
+          audit is not None and audit.detail.get("bootstrap_token_restored") is False)
+
+    await send("UDID-M21-BTR", topic="mdm.CheckOut")
+    await bt_renew.refresh_from_db()
+    check("a CheckOut clears the sealed bootstrap token and push token",
+          bt_renew.enrollment_state == "unenrolled" and bt_renew.bootstrap_token_enc is None
+          and bt_renew.push_token_enc is None and bt_renew.bootstrap_token_escrowed is False)
+
+    # A refused certificate on a TokenUpdate does not bring a checked-out row back.
+    gone = await Device.create(
+        tenant=t21, udid="UDID-M21-GONE", serial_number="M21-GONE", device_model="MacBookPro18,3",
+        os_version="26.0", enrollment_state="unenrolled", groups=[], tags=[], attributes={})
+    stub.set_identity("UDID-M21-GONE", Identity(cert_sha256=h("gone"), spki_sha256=h("gone-spki"),
+                                                subject_cn="someone else", not_after=not_after))
+    await send("UDID-M21-GONE", topic="mdm.TokenUpdate")
+    await gone.refresh_from_db()
+    check("a refused TokenUpdate leaves a checked-out row unenrolled",
+          gone.enrollment_state == "unenrolled")
+    check("...and parks the certificate", ("park", "UDID-M21-GONE", h("gone")) in stub.calls)
+
+    # Before the cutover a check-in takes the flow it had before identity enforcement.
+    pre_row, _ = await consumed_row("UDID-M21-PRE")
+    calls_before = len(stub.calls)
+    identity_svc.reset_cutover_cache()
+    try:
+        pre = await send("UDID-M21-PRE", info=facts("M21-PRE"))
+    finally:
+        identity_svc.set_cutover_cache(True)
+    await pre_row.refresh_from_db()
+    check("before the cutover a check-in enrolls by its tenant claim and serial, with no identity",
+          pre is not None and pre.tenant_id == "m21" and pre.identity_sha256 is None)
+    check("...and nothing is bound, parked or refused",
+          pre_row.bound_udid is None and len(stub.calls) == calls_before
+          and not await EnrollmentAttempt.filter(udid="UDID-M21-PRE", outcome="bad_identity").exists())
+    # Before the cutover a new udid reporting an enrolled row's serial still takes the audited re-key.
+    from controller.models.tenant import AuditLog  # noqa: E402
+    prekey = await Device.create(
+        tenant=t21, udid="UDID-M21-PREKEY-A", serial_number="M21-PREKEY", device_model="MacBookPro18,3",
+        os_version="26.0", enrollment_state="enrolled", groups=[], tags=[], attributes={})
+    identity_svc.reset_cutover_cache()
+    try:
+        rekeyed = await send("UDID-M21-PREKEY-B", info=facts("M21-PREKEY"))
+    finally:
+        identity_svc.set_cutover_cache(True)
+    await prekey.refresh_from_db()
+    check("before the cutover a serial match onto an enrolled row re-keys it to the new udid",
+          rekeyed is not None and rekeyed.id == prekey.id and prekey.udid == "UDID-M21-PREKEY-B"
+          and await AuditLog.filter(action="device.rekey", target_id=str(prekey.id)).exists())
+
+    # A CheckOut is applied only for an identity the row allows, or one already parked.
+    _, co_cert = await consumed_row("UDID-M21-CO")
+    co_dev = await send("UDID-M21-CO", info=facts("M21-CO"))
+    stub.set_identity("UDID-M21-CO", Identity(cert_sha256=h("co-intruder"), spki_sha256=h("co-spki"),
+                                              subject_cn="someone else", not_after=not_after))
+    stub.associations["UDID-M21-CO"] = {co_cert.cert_sha256, h("co-intruder")}
+    await send("UDID-M21-CO", topic="mdm.CheckOut")
+    await co_dev.refresh_from_db()
+    check("a CheckOut while NanoMDM holds a refused identity leaves the row enrolled",
+          co_dev.enrollment_state == "enrolled")
+    check("...and is recorded as checkout_refused",
+          any((a.detail or {}).get("reason") == "checkout_refused"
+              for a in await EnrollmentAttempt.filter(udid="UDID-M21-CO", outcome="bad_identity")))
+    rts_task = await Task.create(tenant=t21, type="erase_device", status="running", device=co_dev, user="admin",
+                                 description="erase", details={"command_uuid": "CMD-CO-ERASE"})
+    co_rts, _, _ = await enrollment_links.mint_challenge(t21, serial="M21-CO", expected_udid="UDID-M21-CO",
+                                                         task=rts_task, origin="rts",
+                                                         lifetime=enrollment_links.RTS_LIFETIME)
+    stub.associations["UDID-M21-CO"] = {co_cert.cert_sha256}
+    await send("UDID-M21-CO", topic="mdm.CheckOut")
+    await co_dev.refresh_from_db()
+    await co_rts.refresh_from_db()
+    check("a CheckOut once that identity is parked unenrolls the row", co_dev.enrollment_state == "unenrolled")
+    check("...and expires the device's Return to Service challenge",
+          co_rts.origin == "rts" and as_utc(co_rts.expires_at) <= datetime.now(timezone.utc))
+
+    # A TokenUpdate from the device while NanoMDM's devices row still holds a parked certificate.
+    _, st_cert = await consumed_row("UDID-M21-STALE")
+    await send("UDID-M21-STALE", info=facts("M21-STALE"))
+    await Device.filter(udid="UDID-M21-STALE").update(identity_pem=None)
+    stub.set_identity("UDID-M21-STALE", Identity(cert_sha256=h("st-parked"), spki_sha256=h("st-spki"),
+                                                 subject_cn="someone else", not_after=not_after))
+    stub.associations["UDID-M21-STALE"] = {st_cert.cert_sha256}
+    calls_before = len(stub.calls)
+    stale = await send("UDID-M21-STALE", topic="mdm.TokenUpdate",
+                       info={"Token": b"\x05\x06", "PushMagic": "magic-st"})
+    check("a TokenUpdate with a parked certificate in the devices row still stores its push token",
+          stale.enrollment_state == "enrolled" and identity_svc.open_push_token(stale) == ("0506", "magic-st")
+          and stale.identity_sha256 == st_cert.cert_sha256)
+    check("...and refuses, parks and restores nothing",
+          len(stub.calls) == calls_before
+          and not await EnrollmentAttempt.filter(udid="UDID-M21-STALE", outcome="bad_identity").exists())
+
+    # An acknowledged erase allows the next enrollment; a failed or timed-out one revokes its Return to Service row.
+    eraser = await Device.create(
+        tenant=t21, udid="UDID-M21-ERASE", serial_number="M21-ERASE", device_model="MacBookPro18,3",
+        os_version="26.0", enrollment_state="enrolled", groups=[], tags=[], attributes={})
+    erase_ok = await Task.create(tenant=t21, type="erase_device", status="running", device=eraser, user="admin",
+                                 description="erase", details={"command_uuid": "CMD-ERASE-OK"})
+    await ack(eraser, {}, command_uuid="CMD-ERASE-OK")
+    await eraser.refresh_from_db()
+    check("an acknowledged EraseDevice sets erase_acked_at",
+          eraser.erase_acked_at is not None and (await Task.get(id=erase_ok.id)).status == "completed")
+    erase_bad = await Task.create(tenant=t21, type="erase_device", status="running", device=eraser, user="admin",
+                                  description="erase", details={"command_uuid": "CMD-ERASE-BAD"})
+    bad_rts, _, _ = await enrollment_links.mint_challenge(t21, serial="M21-ERASE", expected_udid="UDID-M21-ERASE",
+                                                          task=erase_bad, origin="rts",
+                                                          lifetime=enrollment_links.RTS_LIFETIME)
+    await ack(eraser, {"ErrorChain": [{"ErrorCode": 1, "ErrorDomain": "test"}]}, status="Error",
+              command_uuid="CMD-ERASE-BAD")
+    await bad_rts.refresh_from_db()
+    check("an Error on the erase expires its Return to Service challenge",
+          as_utc(bad_rts.expires_at) <= datetime.now(timezone.utc))
+    from controller.services import reconciler as reconciler_svc  # noqa: E402
+
+    erase_late = await Task.create(tenant=t21, type="erase_device", status="running", device=eraser, user="admin",
+                                   description="erase", details={"command_uuid": "CMD-ERASE-LATE"})
+    late_rts, _, _ = await enrollment_links.mint_challenge(t21, serial="M21-ERASE", expected_udid="UDID-M21-ERASE",
+                                                           task=erase_late, origin="rts",
+                                                           lifetime=enrollment_links.RTS_LIFETIME)
+    await reconciler_svc.fail_tasks([{"id": erase_late.id, "type": erase_late.type, "tenant_id": "m21"}],
+                                    reconciler_svc.TIMEOUT_ERROR)
+    await late_rts.refresh_from_db()
+    check("a timed-out erase expires its Return to Service challenge",
+          as_utc(late_rts.expires_at) <= datetime.now(timezone.utc))
+
+    # An acknowledged enrollment_renew finishes the renewal only once the renewed certificate is bound.
+    racker = await Device.create(
+        tenant=t21, udid="UDID-M21-RACK", serial_number="M21-RACK", device_model="MacBookPro18,3",
+        os_version="26.0", enrollment_state="unenrolled", groups=[], tags=[], attributes={})
+    _, rack_old = await consumed_row("UDID-M21-RACK")
+    await send("UDID-M21-RACK", info=facts("M21-RACK"), params={})
+    await racker.refresh_from_db()
+    rack_task = await Task.create(tenant=t21, type="enrollment_renew", status="running", device=racker,
+                                  user="system", description="renew", details={"command_uuid": "CMD-RACK-1"})
+    await enrollment_links.mint_challenge(t21, device=racker, task=rack_task,
+                                          lifetime=enrollment_links.RENEWAL_LIFETIME)
+    prunes_before = len(stub.prunes)
+    await ack(racker, {}, command_uuid="CMD-RACK-1")
+    check("an enrollment_renew Acknowledged before the bind completes the task and prunes nothing",
+          (await Task.get(id=rack_task.id)).status == "completed" and len(stub.prunes) == prunes_before)
+    rack_task2 = await Task.create(tenant=t21, type="enrollment_renew", status="running", device=racker,
+                                   user="system", description="renew", details={"command_uuid": "CMD-RACK-2"})
+    await ScepChallenge.filter(device_id=racker.id).update(expires_at=datetime.now(timezone.utc))
+    _, rack_new = await consumed_row("UDID-M21-RACK", device=racker, task=rack_task2,
+                                     lifetime=enrollment_links.RENEWAL_LIFETIME)
+    stub.associations["UDID-M21-RACK"].add(rack_old.cert_sha256)
+    await send("UDID-M21-RACK", info=facts("M21-RACK"))
+    check("...and after the bind both certificates are held until the answer",
+          stub.associations["UDID-M21-RACK"] == {rack_old.cert_sha256, rack_new.cert_sha256})
+    await ack(racker, {}, command_uuid="CMD-RACK-2")
+    check("an enrollment_renew Acknowledged after the bind prunes the previous certificate",
+          stub.associations["UDID-M21-RACK"] == {rack_new.cert_sha256}
+          and (await Task.get(id=rack_task2.id)).status == "completed")
+
+    # The TokenUpdate on a renewed certificate finishes the renewal once its task is no longer pending or running,
+    # unless a later renewal of the device is open.
+    async def renew_then_token(udid, serial, status, *, ack_before=False, authenticate=True, ack_after=False):
+        dev = await Device.create(
+            tenant=t21, udid=udid, serial_number=serial, device_model="MacBookPro18,3", os_version="26.0",
+            enrollment_state="unenrolled", groups=[], tags=[], attributes={})
+        _, old = await consumed_row(udid)
+        await send(udid, info=facts(serial), params={})
+        await dev.refresh_from_db()
+        task = await Task.create(tenant=t21, type="enrollment_renew", status=status, device=dev, user="system",
+                                 description="renew", details={"command_uuid": f"CMD-{serial}"})
+        if ack_before:
+            await ack(dev, {}, command_uuid=f"CMD-{serial}")
+        _, new = await consumed_row(udid, device=dev, task=task, lifetime=enrollment_links.RENEWAL_LIFETIME)
+        stub.associations[udid].add(old.cert_sha256)
+        await LegacyIdentity.create(udid=udid, cert_sha256=old.cert_sha256)
+        if authenticate:
+            await send(udid, info=facts(serial))
+        if ack_after:
+            await ack(await Device.get(id=dev.id), {}, command_uuid=f"CMD-{serial}")
+        held = set(stub.associations[udid])
+        await send(udid, topic="mdm.TokenUpdate")
+        bound = (await Device.get(id=dev.id)).identity_sha256 == new.cert_sha256
+        return dev, task, old, new, bound, held
+
+    async def finished(udid, task, new, bound, status):
+        return (bound and stub.associations[udid] == {new.cert_sha256}
+                and not await LegacyIdentity.filter(udid=udid).exists()
+                and (await Task.get(id=task.id)).status == status)
+
+    _, late_task, _, late_new, late_bound, _ = await renew_then_token("UDID-M21-RLATE", "M21-RLATE", "running",
+                                                                      ack_before=True)
+    check("a TokenUpdate after an early acknowledgement finishes the renewal and the task stays completed",
+          await finished("UDID-M21-RLATE", late_task, late_new, late_bound, "completed"))
+
+    _, tok_task, _, tok_new, tok_bound, _ = await renew_then_token("UDID-M21-RTOKEN", "M21-RTOKEN", "running",
+                                                                   ack_before=True, authenticate=False)
+    check("a renewal bound on a TokenUpdate after an early acknowledgement finishes the renewal",
+          await finished("UDID-M21-RTOKEN", tok_task, tok_new, tok_bound, "completed"))
+
+    _, out_task, _, out_new, out_bound, _ = await renew_then_token("UDID-M21-RTIMEOUT", "M21-RTIMEOUT", "failed")
+    check("a TokenUpdate on a renewal whose task timed out finishes the renewal and the task stays failed",
+          await finished("UDID-M21-RTIMEOUT", out_task, out_new, out_bound, "failed"))
+
+    _, twice_task, _, twice_new, twice_bound, twice_held = await renew_then_token(
+        "UDID-M21-RTWICE", "M21-RTWICE", "running", ack_after=True)
+    check("a TokenUpdate after a renewal already finished by its acknowledgement changes nothing",
+          twice_held == {twice_new.cert_sha256}
+          and await finished("UDID-M21-RTWICE", twice_task, twice_new, twice_bound, "completed"))
+
+    newer_dev, _, _, newer_first, _, _ = await renew_then_token("UDID-M21-RNEWER", "M21-RNEWER", "running",
+                                                               ack_before=True)
+    newer_task = await Task.create(tenant=t21, type="enrollment_renew", status="pending", device=newer_dev,
+                                   user="system", description="renew", details={"command_uuid": "CMD-RNEWER-2"})
+    await consumed_row("UDID-M21-RNEWER", device=newer_dev, task=newer_task,
+                       lifetime=enrollment_links.RENEWAL_LIFETIME)
+    stub.set_identity("UDID-M21-RNEWER", newer_first)
+    stub.associations["UDID-M21-RNEWER"].add(h("rnewer-legacy"))
+    await LegacyIdentity.create(udid="UDID-M21-RNEWER", cert_sha256=h("rnewer-legacy"))
+    await send("UDID-M21-RNEWER", topic="mdm.TokenUpdate")
+    check("a TokenUpdate on an earlier renewal's certificate prunes nothing while a later renewal is open",
+          h("rnewer-legacy") in stub.associations["UDID-M21-RNEWER"]
+          and await LegacyIdentity.filter(udid="UDID-M21-RNEWER").exists()
+          and (await Task.get(id=newer_task.id)).status == "pending")
+
+    async def renewal_bound(udid, serial):
+        """An enrolled device whose renewal certificate is bound while its enrollment_renew task is still running."""
+        dev = await Device.create(
+            tenant=t21, udid=udid, serial_number=serial, device_model="MacBookPro18,3", os_version="26.0",
+            enrollment_state="unenrolled", groups=[], tags=[], attributes={})
+        _, old = await consumed_row(udid)
+        await send(udid, info=facts(serial))
+        task = await Task.create(tenant=t21, type="enrollment_renew", status="running", device=dev, user="system",
+                                 description="renew", details={"command_uuid": f"CMD-{serial}"})
+        row, new = await consumed_row(udid, device=dev, task=task, lifetime=enrollment_links.RENEWAL_LIFETIME)
+        stub.associations[udid].add(old.cert_sha256)
+        stale = await Device.get(id=dev.id)
+        await send(udid, info=facts(serial))
+        return stale, task, row, old, new
+
+    # An Acknowledged answer processed with a row read before the bind prunes against the refreshed row.
+    race_stale, race_task, _, race_old, race_new = await renewal_bound("UDID-M21-RRACE", "M21-RRACE")
+    calls_before = len(stub.calls)
+    await handler._apply_command_response(race_stale, await Task.get(id=race_task.id), "Acknowledged", {})
+    check("an Acknowledged answer holding a row read before the bind keeps the renewed certificate",
+          stub.associations["UDID-M21-RRACE"] == {race_new.cert_sha256}
+          and [c for c in stub.calls[calls_before:] if c[0] == "prune"]
+          == [("prune", "UDID-M21-RRACE", {race_new.cert_sha256})]
+          and (await Task.get(id=race_task.id)).status == "completed")
+    check("...and prunes only once the refreshed row names it", race_stale.identity_sha256 == race_new.cert_sha256)
+
+    # The task timeout fails an unanswered renewal without a rollback, the reconciler prunes the previous certificate,
+    # and a late Error then keeps the renewed one.
+    lapse_dev, lapse_task, lapse_row, lapse_old, lapse_new = await renewal_bound("UDID-M21-RLAPSE", "M21-RLAPSE")
+    await send("UDID-M21-RLAPSE", topic="mdm.TokenUpdate")
+    await reconciler_svc.fail_tasks([{"id": lapse_task.id, "type": lapse_task.type, "tenant_id": "m21"}],
+                                    reconciler_svc.TIMEOUT_ERROR)
+    await lapse_dev.refresh_from_db()
+    await lapse_row.refresh_from_db()
+    check("a timed-out renewal task expires its row and keeps the renewed certificate",
+          (await Task.get(id=lapse_task.id)).status == "failed"
+          and as_utc(lapse_row.expires_at) <= datetime.now(timezone.utc)
+          and lapse_dev.identity_sha256 == lapse_new.cert_sha256)
+    async with wh._device_lock(str(lapse_dev.id)), identity_svc.udid_lock("UDID-M21-RLAPSE"):
+        await identity_svc.judge("UDID-M21-RLAPSE", device=await Device.get(id=lapse_dev.id), apply=True)
+    check("...and the reconciler's Judge then prunes the previous certificate",
+          stub.associations["UDID-M21-RLAPSE"] == {lapse_new.cert_sha256})
+    await ack(lapse_dev, {"ErrorChain": [{"ErrorCode": 1, "ErrorDomain": "test"}]}, status="Error",
+              command_uuid="CMD-M21-RLAPSE")
+    await lapse_dev.refresh_from_db()
+    check("a late Error after the prune keeps the renewed certificate",
+          lapse_dev.identity_sha256 == lapse_new.cert_sha256
+          and stub.associations["UDID-M21-RLAPSE"] == {lapse_new.cert_sha256})
+    check("...and raises the renewal alert",
+          await Alert.filter(device_id=lapse_dev.id, rule_id=identity_svc.ALERT_RULE_RENEWAL).exists())
+
+    # The serial path: an accepted takeover by a new udid, an ADE enrollment replacing a manual one, and a manual
+    # enrollment onto an ABM-assigned row.
+    board = await Device.create(
+        tenant=t21, udid="UDID-M21-BOARD-OLD", serial_number="M21-BOARD", device_model="MacBookPro18,3",
+        os_version="26.0", enrollment_state="enrolled", groups=[], tags=[], attributes={},
+        reenrollment_allowed_until=datetime.now(timezone.utc) + timedelta(hours=1))
+    _, board_cert = await consumed_row("UDID-M21-BOARD-NEW")
+    moved = await send("UDID-M21-BOARD-NEW", info=facts("M21-BOARD"))
+    check("a fresh challenge reporting an enrolled row's serial binds onto it inside the allowance",
+          moved is not None and moved.id == board.id and moved.identity_sha256 == board_cert.cert_sha256)
+    rekey = await AuditLog.filter(action="device.rekey", target_id=str(board.id)).first()
+    reenroll = await AuditLog.filter(action="device.reenroll", target_id=str(board.id)).first()
+    check("...audits the re-key and the re-enrollment with the condition and the previous udid",
+          rekey is not None and rekey.detail.get("new_udid") == "UDID-M21-BOARD-NEW"
+          and reenroll is not None and reenroll.detail.get("takeover") == "allowance"
+          and reenroll.detail.get("previous_udid") == "UDID-M21-BOARD-OLD")
+    check("...and raises the takeover alert",
+          await Alert.filter(device_id=board.id, rule_id=identity_svc.ALERT_RULE_TAKEOVER).exists())
+
+    manual_bound = await send("UDID-M21-BOARD-NEW", topic="mdm.TokenUpdate")
+    _, ade_cert = await consumed_row("UDID-M21-BOARD-ADE", serial="M21-BOARD", lifetime=enrollment_links.ADE_LIFETIME)
+    replaced = await send("UDID-M21-BOARD-ADE", info=facts("M21-BOARD"))
+    check("an ADE challenge for the serial of a manually enrolled row binds onto it from another udid",
+          manual_bound is not None and replaced is not None and replaced.id == board.id
+          and replaced.identity_sha256 == ade_cert.cert_sha256)
+    check("...as the ade_serial condition",
+          any(a.detail.get("takeover") == "ade_serial"
+              for a in await AuditLog.filter(action="device.reenroll", target_id=str(board.id))))
+
+    assigned = await Device.create(
+        tenant=t21, udid=None, serial_number="M21-ABM", device_model="", os_version="",
+        enrollment_state="pending", groups=[], tags=[], attributes={},
+        dep_server_id="5c0f6d3e-1b2a-4c3d-8e9f-0a1b2c3d4e5f")
+    _, abm_cert = await consumed_row("UDID-M21-ABM")
+    check("a manual challenge reporting an ABM-assigned row's serial is refused",
+          await send("UDID-M21-ABM", info=facts("M21-ABM")) is None
+          and (await Device.get(id=assigned.id)).udid is None)
+    check("...parked and recorded",
+          ("park", "UDID-M21-ABM", abm_cert.cert_sha256) in stub.calls
+          and any((a.detail or {}).get("reason") == "ade_row_refused"
+                  for a in await EnrollmentAttempt.filter(udid="UDID-M21-ABM", outcome="bad_identity")))
+    check("...and no refusal alert is raised on the placeholder",
+          not await Alert.filter(device_id=assigned.id, rule_id=identity_svc.ALERT_RULE_REFUSED).exists())
+
+    # An accepted serial-path takeover whose bind loses the compare-and-set to another udid.
+    lost = await Device.create(
+        tenant=t21, udid="UDID-M21-LOST-OLD", serial_number="M21-LOST", device_model="MacBookPro18,3",
+        os_version="26.0", enrollment_state="enrolled", groups=[], tags=[], attributes={},
+        reenrollment_allowed_until=datetime.now(timezone.utc) + timedelta(hours=1))
+    lost_row, lost_cert = await consumed_row("UDID-M21-LOST-NEW")
+    audit_rekey = wh._audit_rekey
+
+    async def _bind_elsewhere_first(tenant, device, **kw):
+        await ScepChallenge.filter(id=lost_row.id).update(
+            bound_udid="UDID-M21-LOST-THIEF", bound_at=datetime.now(timezone.utc), cert_sha256=lost_cert.cert_sha256)
+        await audit_rekey(tenant, device, **kw)
+
+    wh._audit_rekey = _bind_elsewhere_first
+    try:
+        lost_new = await send("UDID-M21-LOST-NEW", info=facts("M21-LOST"))
+    finally:
+        wh._audit_rekey = audit_rekey
+    await lost.refresh_from_db()
+    check("a serial-path takeover whose bind loses the compare-and-set is refused and leaves the row alone",
+          lost_new is None and lost.udid == "UDID-M21-LOST-OLD" and lost.identity_sha256 is None
+          and lost.enrollment_state == "enrolled")
+    check("...parks the certificate and records bound_elsewhere against the new udid with its serial",
+          ("park", "UDID-M21-LOST-NEW", lost_cert.cert_sha256) in stub.calls
+          and any((a.detail or {}).get("reason") == "bound_elsewhere" and a.serial_number == "M21-LOST"
+                  for a in await EnrollmentAttempt.filter(udid="UDID-M21-LOST-NEW", outcome="bad_identity")))
+    check("...and raises no refusal alert on the matched row",
+          not await Alert.filter(device_id=lost.id, rule_id=identity_svc.ALERT_RULE_REFUSED).exists())
+
+    # A CheckOut processed between the bind and the save of a check-in is not overwritten by that save.
+    await consumed_row("UDID-M21-GAP")
+    gap_dev = await send("UDID-M21-GAP", info=facts("M21-GAP"))
+    rekey_serial = wh._rekey_serial
+
+    async def _checkout_in_the_gap(device, reported, topic=None):
+        await handler._handle_checkout("UDID-M21-GAP", url_params("m21"), topic="mdm.CheckOut")
+        return False
+
+    wh._rekey_serial = _checkout_in_the_gap
+    try:
+        await send("UDID-M21-GAP", info=facts("M21-GAP-2"))
+    finally:
+        wh._rekey_serial = rekey_serial
+    await gap_dev.refresh_from_db()
+    check("a CheckOut processed between the bind and the save leaves the row unenrolled",
+          gap_dev.enrollment_state == "unenrolled" and gap_dev.unenrolled_at is not None
+          and gap_dev.push_token_enc is None and gap_dev.serial_number == "M21-GAP")
+
+    await consumed_row("UDID-M21-GAPC")
+    gapc_dev = await send("UDID-M21-GAPC", info=facts("M21-GAPC"))
+
+    async def _checkout_in_the_connect_gap(device, reported, topic=None):
+        await handler._handle_checkout("UDID-M21-GAPC", url_params("m21"), topic="mdm.CheckOut")
+        return False
+
+    wh._rekey_serial = _checkout_in_the_connect_gap
+    try:
+        await send("UDID-M21-GAPC", topic="mdm.Connect", info=facts("M21-GAPC-2"))
+    finally:
+        wh._rekey_serial = rekey_serial
+    await gapc_dev.refresh_from_db()
+    check("a CheckOut processed between the read and the save of a Connect leaves the row unenrolled",
+          gapc_dev.enrollment_state == "unenrolled" and gapc_dev.unenrolled_at is not None
+          and gapc_dev.serial_number == "M21-GAPC")
+
+    # A refused certificate's Authenticate delivered after its TokenUpdate was refused writes no inventory.
+    _, inv_cert = await consumed_row("UDID-M21-INV")
+    inv_dev = await send("UDID-M21-INV", info=facts("M21-INV"))
+    _, inv_intruder = await consumed_row("UDID-M21-INV")
+    stub.associations["UDID-M21-INV"].add(inv_cert.cert_sha256)
+    await send("UDID-M21-INV", topic="mdm.TokenUpdate")
+    check("a TokenUpdate on an intruder's certificate is refused and the device's own written back",
+          ("park", "UDID-M21-INV", inv_intruder.cert_sha256) in stub.calls
+          and stub.overrides["UDID-M21-INV"].cert_sha256 == inv_cert.cert_sha256)
+    inv_dev = await send("UDID-M21-INV", info={"SerialNumber": "M21-EVIL", "ProductName": "Evil1,1",
+                                               "OSVersion": "99.0", "HostName": "evil"})
+    inv_alert = await Alert.filter(device_id=inv_dev.id, rule_id=identity_svc.ALERT_RULE_REFUSED).first()
+    check("the Authenticate inside the refusal window that bound nothing writes no inventory",
+          inv_dev.enrollment_state == "enrolled" and inv_dev.serial_number == "M21-INV"
+          and inv_dev.device_model == "MacBookPro18,3" and inv_dev.os_version == "26.0" and not inv_dev.hostname)
+    check("...attempts no re-key and counts the ignored Authenticate on the alert",
+          not await AuditLog.filter(action="device.rekey", target_id=str(inv_dev.id)).exists()
+          and ((inv_alert.detail or {}).get("ignored") or {}).get("authenticate", {}).get("count") == 1)
+    await age_refusals(inv_dev)
+    inv_dev = await send("UDID-M21-INV", info={**facts("M21-INV"), "OSVersion": "26.1"})
+    check("...and one outside the window is applied", inv_dev.os_version == "26.1")
+
+    # A renewal Authenticate inside the window binds its row, so its inventory is written.
+    inv_renew, invr_cert = await renewal_device("UDID-M21-INVR", "M21-INVR")
+    stub.set_identity("UDID-M21-INVR", Identity(cert_sha256=h("invr-intruder"), spki_sha256=h("invr-spki"),
+                                                subject_cn="someone else", not_after=not_after))
+    stub.associations["UDID-M21-INVR"] = {h("old:UDID-M21-INVR"), h("invr-intruder")}
+    await send("UDID-M21-INVR", topic="mdm.TokenUpdate")
+    check("a refused TokenUpdate on a device with a renewal pending opens the window",
+          ("park", "UDID-M21-INVR", h("invr-intruder")) in stub.calls
+          and await identity_svc.recently_refused(await Device.get(id=inv_renew.id)))
+    stub.set_identity("UDID-M21-INVR", invr_cert)
+    stub.associations["UDID-M21-INVR"].add(h("old:UDID-M21-INVR"))
+    inv_renew = await send("UDID-M21-INVR", info={**facts("M21-INVR"), "OSVersion": "26.2"})
+    check("the renewal Authenticate inside the window binds and writes its inventory",
+          inv_renew.identity_sha256 == invr_cert.cert_sha256 and inv_renew.os_version == "26.2")
+
+    # A renewal TokenUpdate inside the window binds its row, so its push token is stored rather than written back.
+    tok_renew, tokr_cert = await renewal_device("UDID-M21-TOKR", "M21-TOKR")
+    stub.set_identity("UDID-M21-TOKR", Identity(cert_sha256=h("tokr-intruder"), spki_sha256=h("tokr-spki"),
+                                                subject_cn="someone else", not_after=not_after))
+    stub.associations["UDID-M21-TOKR"] = {h("old:UDID-M21-TOKR"), h("tokr-intruder")}
+    await send("UDID-M21-TOKR", topic="mdm.TokenUpdate")
+    stub.set_identity("UDID-M21-TOKR", tokr_cert)
+    stub.associations["UDID-M21-TOKR"].add(h("old:UDID-M21-TOKR"))
+    restores_before = len([c for c in stub.restores if c[1] == "UDID-M21-TOKR"])
+    tok_renew = await send("UDID-M21-TOKR", topic="mdm.TokenUpdate",
+                           info={"Token": b"\x0c\x0d", "PushMagic": "magic-tokr"})
+    check("the renewal TokenUpdate inside the window binds and stores its push token",
+          tok_renew.identity_sha256 == tokr_cert.cert_sha256
+          and identity_svc.open_push_token(tok_renew) == ("0c0d", "magic-tokr")
+          and len([c for c in stub.restores if c[1] == "UDID-M21-TOKR"]) == restores_before)
+
+    # In the usual order the renewal Authenticate binds the row and the TokenUpdate that follows on the renewed
+    # certificate binds nothing, and its push token is still stored.
+    tok_order, toko_cert = await renewal_device("UDID-M21-TOKO", "M21-TOKO")
+    stub.set_identity("UDID-M21-TOKO", Identity(cert_sha256=h("toko-intruder"), spki_sha256=h("toko-spki"),
+                                                subject_cn="someone else", not_after=not_after))
+    stub.associations["UDID-M21-TOKO"] = {h("old:UDID-M21-TOKO"), h("toko-intruder")}
+    await send("UDID-M21-TOKO", topic="mdm.TokenUpdate")
+    stub.set_identity("UDID-M21-TOKO", toko_cert)
+    stub.associations["UDID-M21-TOKO"].add(h("old:UDID-M21-TOKO"))
+    tok_order = await send("UDID-M21-TOKO", info=facts("M21-TOKO"))
+    restores_before = len([c for c in stub.restores if c[1] == "UDID-M21-TOKO"])
+    tok_order = await send("UDID-M21-TOKO", topic="mdm.TokenUpdate",
+                           info={"Token": b"\x0e\x0f", "PushMagic": "magic-toko"})
+    toko_alert = await Alert.filter(device_id=tok_order.id, rule_id=identity_svc.ALERT_RULE_REFUSED).first()
+    check("the renewal TokenUpdate after its Authenticate inside the window stores its push token",
+          tok_order.identity_sha256 == toko_cert.cert_sha256
+          and identity_svc.open_push_token(tok_order) == ("0e0f", "magic-toko")
+          and len([c for c in stub.restores if c[1] == "UDID-M21-TOKO"]) == restores_before
+          and not ((toko_alert.detail or {}).get("ignored") or {}).get("push_token"))
+
+    # The same order after a Return to Service erase.
+    _, rtso_first = await consumed_row("UDID-M21-RTSO")
+    rtso = await send("UDID-M21-RTSO", info=facts("M21-RTSO"))
+    rtso = await send("UDID-M21-RTSO", topic="mdm.TokenUpdate", info={"Token": b"\x10\x11", "PushMagic": "magic-rtso"})
+    rtso_erase = await Task.create(tenant=t21, type="erase_device", status="running", device=rtso, user="admin",
+                                   description="erase", details={"command_uuid": "CMD-RTSO-ERASE"})
+    _, rtso_cert = await consumed_row("UDID-M21-RTSO", serial="M21-RTSO", expected_udid="UDID-M21-RTSO",
+                                      task=rtso_erase, origin="rts", lifetime=enrollment_links.RTS_LIFETIME)
+    await ack(rtso, {}, command_uuid="CMD-RTSO-ERASE")
+    stub.set_identity("UDID-M21-RTSO", Identity(cert_sha256=h("rtso-intruder"), spki_sha256=h("rtso-spki"),
+                                                subject_cn="someone else", not_after=not_after))
+    stub.associations["UDID-M21-RTSO"] = {rtso_first.cert_sha256, h("rtso-intruder")}
+    await send("UDID-M21-RTSO", topic="mdm.TokenUpdate")
+    check("a refused TokenUpdate after an acknowledged erase opens the window",
+          await identity_svc.recently_refused(await Device.get(id=rtso.id)))
+    stub.set_identity("UDID-M21-RTSO", rtso_cert)
+    stub.associations["UDID-M21-RTSO"].add(rtso_first.cert_sha256)
+    rtso = await send("UDID-M21-RTSO", info=facts("M21-RTSO"))
+    restores_before = len([c for c in stub.restores if c[1] == "UDID-M21-RTSO"])
+    rtso = await send("UDID-M21-RTSO", topic="mdm.TokenUpdate", info={"Token": b"\x12\x13", "PushMagic": "magic-rtso2"})
+    check("the Return to Service TokenUpdate after its Authenticate inside the window stores its push token",
+          rtso.identity_sha256 == rtso_cert.cert_sha256
+          and identity_svc.open_push_token(rtso) == ("1213", "magic-rtso2")
+          and len([c for c in stub.restores if c[1] == "UDID-M21-RTSO"]) == restores_before)
+
+    # A CheckOut within five minutes of a refused Authenticate, through the handler.
+    _, win_cert = await consumed_row("UDID-M21-WIN")
+    win_dev = await send("UDID-M21-WIN", info=facts("M21-WIN"))
+    await consumed_row("UDID-M21-WIN")
+    stub.associations["UDID-M21-WIN"].add(win_cert.cert_sha256)
+    await send("UDID-M21-WIN", info=facts("M21-WIN"))
+    await send("UDID-M21-WIN", topic="mdm.CheckOut")
+    await win_dev.refresh_from_db()
+    win_alert = await Alert.filter(device_id=win_dev.id, rule_id=identity_svc.ALERT_RULE_REFUSED).first()
+    check("a CheckOut within five minutes of a refused Authenticate leaves the row enrolled",
+          win_dev.enrollment_state == "enrolled" and win_dev.identity_sha256 == win_cert.cert_sha256)
+    check("...is recorded as checkout_refused for the recent refusal and counted on the alert",
+          any((a.detail or {}).get("reason") == "checkout_refused" and (a.detail or {}).get("cause") == "recent_refusal"
+              for a in await EnrollmentAttempt.filter(udid="UDID-M21-WIN", outcome="bad_identity"))
+          and ((win_alert.detail or {}).get("ignored") or {}).get("checkout", {}).get("count") == 1)
+
+    # The serial path across tenants: a tenant's challenge never reaches another tenant's row.
+    t21b = await Tenant.create(id="m21b", name="M21 B Org")
+    write_config_yaml("m21b", {"device_naming": {}})
+    link21b, _ = await enrollment_links.create_link(
+        t21b, "admin@m21b", "cart", datetime.now(timezone.utc) + timedelta(days=1), None)
+    victim = await Device.create(
+        tenant=t21, udid="UDID-M21-XT-A", serial_number="M21-XT", device_model="MacBookPro18,3",
+        os_version="26.0", enrollment_state="enrolled", groups=[], tags=[], attributes={},
+        identity_sha256=h("xt-own"))
+    row_b, _, cn_b = await enrollment_links.mint_challenge(t21b, link=link21b,
+                                                           lifetime=enrollment_links.MANUAL_LIFETIME)
+    await ScepChallenge.filter(id=row_b.id).update(consumed_at=datetime.now(timezone.utc),
+                                                   spki_hash=h(f"spki:{row_b.id}"))
+    stub.set_identity("UDID-M21-XT-B", Identity(cert_sha256=h(f"cert:{row_b.id}"), spki_sha256=h(f"spki:{row_b.id}"),
+                                                subject_cn=cn_b, not_after=not_after))
+    xt = await send("UDID-M21-XT-B", info=facts("M21-XT"), params={})
+    await victim.refresh_from_db()
+    await row_b.refresh_from_db()
+    check("a challenge from another tenant reporting an enrolled serial binds nothing onto that tenant's row",
+          victim.udid == "UDID-M21-XT-A" and victim.identity_sha256 == h("xt-own")
+          and victim.enrollment_state == "enrolled" and row_b.bound_udid != "UDID-M21-XT-A")
+    check("...raises no alert on it and records nothing against it",
+          not await Alert.filter(device_id=victim.id).exists()
+          and not await EnrollmentAttempt.filter(udid="UDID-M21-XT-A").exists())
+    check("...and enrolls as its own tenant's row", xt is not None and xt.tenant_id == "m21b" and xt.id != victim.id)
+
+    # A TokenUpdate on a renewal whose task was cancelled finishes it the way a failed one does.
+    _, can_task, _, can_new, can_bound, _ = await renew_then_token("UDID-M21-RCANCEL", "M21-RCANCEL", "cancelled")
+    check("a TokenUpdate on a renewal whose task was cancelled finishes the renewal and the task stays cancelled",
+          await finished("UDID-M21-RCANCEL", can_task, can_new, can_bound, "cancelled"))
+
+    # A CheckOut whose identity NanoMDM does not hold is refused without an alert.
+    await consumed_row("UDID-M21-NOID")
+    noid = await send("UDID-M21-NOID", info=facts("M21-NOID"))
+    stub.set_identity("UDID-M21-NOID", None)
+    await send("UDID-M21-NOID", topic="mdm.CheckOut")
+    await noid.refresh_from_db()
+    check("a CheckOut whose identity cannot be read from the devices row leaves the row enrolled",
+          noid.enrollment_state == "enrolled")
+    check("...is recorded as checkout_refused for an identity that is not allowed, and raises no alert",
+          any((a.detail or {}).get("reason") == "checkout_refused"
+              and (a.detail or {}).get("cause") == "identity_not_allowed"
+              for a in await EnrollmentAttempt.filter(udid="UDID-M21-NOID", outcome="bad_identity"))
+          and not await Alert.filter(device_id=noid.id).exists())
 
     await Tortoise.close_connections()
     print(f"\nRESULT: {'PASS' if not FAIL else 'FAIL'} ({len(PASS)} passed, {len(FAIL)} failed)")

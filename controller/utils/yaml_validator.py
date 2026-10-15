@@ -146,14 +146,14 @@ class YAMLValidator:
         """A tenant's S3 block has to be complete or absent (services.app_manager.resolve_s3_settings enforces this at
         runtime too; why)."""
         from controller.services.app_manager import (
-            REQUIRED_TENANT_S3_KEYS, TENANT_S3_KEYS, _is_set,
+            REQUIRED_TENANT_S3_KEYS, TENANT_S3_KEYS, is_set,
         )
 
         s3 = config.s3 or {}
-        declared = [k for k in TENANT_S3_KEYS if _is_set(s3.get(k))]
+        declared = [k for k in TENANT_S3_KEYS if is_set(s3.get(k))]
         if not declared:
             return
-        missing = [k for k in REQUIRED_TENANT_S3_KEYS if not _is_set(s3.get(k))]
+        missing = [k for k in REQUIRED_TENANT_S3_KEYS if not is_set(s3.get(k))]
         if missing:
             self.errors.append(
                 f"S3 configuration sets {', '.join(declared)} but not "

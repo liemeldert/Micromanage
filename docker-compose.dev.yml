@@ -3,8 +3,9 @@
 #
 # It mounts the live controller source with a shorter sync interval, publishes Postgres on loopback for IDE database
 # tools, and disables the webui service (run yarn dev on the host). NanoMDM still validates device certs against
-# step-ca. MDM_PORT defaults to 8443 so nanomdm-front binds without root. localhost:8443 serves /mdm and returns 404 for
-# everything else, as in production. NanoMDM's own listener, /v1/ included, is on 127.0.0.1:9000.
+# step-ca. MDM_PORT defaults to 8443 so nanomdm-front binds without root; localhost:8443 serves /mdm and answers 404
+# elsewhere, as in production. NanoMDM's own listener, /v1/ included, is on 127.0.0.1:9000. localhost:9443 is
+# scep-front, which serves only the SCEP path
 
 services:
   # Bound to loopback so the IDE database tools and host scripts can reach the controller database. Production
@@ -30,7 +31,7 @@ services:
       SYNC_INTERVAL_MINUTES: "1" # reconcile every minute in dev
       PUBLIC_API_URL: "${DEV_TUNNEL_URL:-http://localhost:8001}"
     ports:
-      - "8000:8000" # also expose the webhook port in dev, e.g. for ngrok tunnels
+      - "127.0.0.1:8000:8000" # the webhook app, on loopback only
       - "8001:8001"
 
   webui:

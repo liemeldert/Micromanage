@@ -7,6 +7,7 @@ reason it is not.
 import base64
 import logging
 import os
+import time
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -39,7 +40,6 @@ PLACEHOLDER_VALUES = frozenset({
     "changeme_long_random_secret",  # JWT_SECRET
     "changeme_webhook_secret",  # WEBHOOK_SECRET
     "changeme_random_api_key",  # NANOMDM_API_KEY
-    "changeme_scep_challenge",  # SCEP_CHALLENGE
     "changeme_strong_password",  # DB_PASSWORD
     "change-me-now",  # CONTROLLER_BOOTSTRAP_ADMIN_PASSWORD
 })
@@ -102,15 +102,50 @@ def public_api_url() -> str:
 
 
 def dep_ade_require_apple_signature() -> bool:
-    """Whether the ADE endpoint rejects a MachineInfo that does not verify."""
+    """Whether the ADE endpoint rejects a MachineInfo that does not verify. On unless set to a false word."""
     from controller.utils.coerce import env_flag
-    return env_flag("DEP_ADE_REQUIRE_APPLE_SIGNATURE")
+    return env_flag("DEP_ADE_REQUIRE_APPLE_SIGNATURE", "true")
 
 
-def allow_unsigned_tenant_claim() -> bool:
-    """Whether a device may claim a tenant on its ServerURL without a signature."""
-    from controller.utils.coerce import env_flag
-    return env_flag("MDM_ALLOW_UNSIGNED_TENANT_CLAIM")
+def scep_webhook_secret_path() -> str:
+    """The file holding the step-ca challenge webhook's secret."""
+    return _value("SCEP_WEBHOOK_SECRET_FILE") or "/stepca-webhook/scep_webhook_secret"
+
+
+def scep_webhook_id_path() -> str:
+    """The file holding the step-ca challenge webhook's id."""
+    return _value("SCEP_WEBHOOK_ID_FILE") or "/stepca-webhook/scep_webhook_id"
+
+
+def _file_text(path: str) -> str:
+    """A file's contents without surrounding whitespace, or empty when it cannot be read."""
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            return handle.read().strip()
+    except (OSError, UnicodeDecodeError):
+        return ""
+
+
+def scep_webhook_key() -> Optional[bytes]:
+    """The step-ca challenge webhook's secret decoded from the standard base64 its file holds, or None when the file is
+    missing, empty or not base64."""
+    text = _file_text(scep_webhook_secret_path())
+    if not text:
+        return None
+    try:
+        return base64.b64decode(text, validate=True) or None
+    except (ValueError, TypeError):
+        return None
+
+
+def scep_webhook_id() -> str:
+    """The step-ca challenge webhook's id, or empty when its file cannot be read."""
+    return _file_text(scep_webhook_id_path())
+
+
+def scep_name() -> str:
+    """The name of step-ca's SCEP provisioner, SCEP_NAME or mdm_device_scep."""
+    return _value("SCEP_NAME") or "mdm_device_scep"
 
 
 def ddm_secret() -> str:
@@ -157,6 +192,12 @@ def _http_warning(where: str) -> Optional[str]:
 
 # ==The predicates==
 
+def _cutover_done() -> bool:
+    """The identity cutover state as this process last read it. warm_enroll_state refreshes it."""
+    from controller.services import identity
+    return identity.cutover_done_cached()
+
+
 def _check_enroll(tenant, active_tenants: Optional[int]) -> Status:
     """Over-the-air enrollment: whether this server can hand a device a live profile."""
     from controller.services import enrollment
@@ -164,8 +205,6 @@ def _check_enroll(tenant, active_tenants: Optional[int]) -> Status:
     missing: List[str] = []
     if not _value("MDM_TOPIC"):
         missing.append("MDM_TOPIC")
-    if not _value("SCEP_CHALLENGE"):
-        missing.append("SCEP_CHALLENGE")
     if not public_api_url():
         missing.append("PUBLIC_API_URL")
     if _jwt_secret_missing():
@@ -178,43 +217,54 @@ def _check_enroll(tenant, active_tenants: Optional[int]) -> Status:
 
     # Reported as broken, not missing: a set-and-broken path breaks the profile.
     broken: List[str] = []
+    sentences: List[str] = []
     ca_error = enrollment.embedded_ca_error()
     if ca_error:
         broken.append("MDM_EMBED_CA_CERT_PATH")
+        sentences.append(ca_error)
+    secret_path = scep_webhook_secret_path()
+    if scep_webhook_key() is None:
+        broken.append("SCEP_WEBHOOK_SECRET_FILE")
+        sentences.append(
+            f"The step-ca challenge webhook secret at {secret_path} is missing, empty or not base64, so the controller "
+            "refuses every SCEP challenge. It is written when step-ca attaches the webhook.")
+    # The two conditions below are not settings, so they block with a sentence and add nothing to broken.
+    if not _cutover_done():
+        sentences.append(
+            "The identity cutover has not run, so certificates issued before it are not yet recorded. It runs when "
+            "the controller starts and can reach NanoMDM's database.")
+    webhook = _SCEP_WEBHOOK_PROBE.get("state")
+    if webhook == "detached":
+        sentences.append(
+            f"step-ca's {scep_name()} provisioner has no SCEPCHALLENGE webhook with the id in "
+            f"{scep_webhook_id_path()}, so step-ca does not ask the controller about SCEP challenges.")
 
     warnings: List[str] = []
-    http = _http_warning("the enrollment profile, with the SCEP challenge in it,")
+    http = _http_warning("the enrollment profile, with its SCEP challenge,")
     if http:
         warnings.append(http)
-    if is_placeholder(_value("SCEP_CHALLENGE")):
+    if webhook == "unreachable":
         warnings.append(
-            "SCEP_CHALLENGE is still the value from the env template. It works as long as step-ca's provisioner "
-            "carries the same string, and anyone who has read the template knows it, which is enough to get a device "
-            "identity certificate from this deployment.")
-    # Only when SCEP_URL is unset (the bundled step-ca): it bakes its secret in at init and never reads it back.
-    if _value("SCEP_CHALLENGE") and not _value("SCEP_URL"):
+            "step-ca could not be reached to confirm that its SCEP provisioner calls the controller's challenge "
+            "webhook.")
+    legacy = (_LEGACY_PROBE.get("counts") or {}).get(str(tenant.id)) if tenant is not None else None
+    if legacy:
         warnings.append(
-            "The SCEP challenge the controller puts in enrollment profiles cannot be compared with the one the bundled "
-            "step-ca will accept: step-ca bakes its provisioner secret in at first-run init and nothing reads it back. "
-            "If SCEP enrollments fail at step-ca, a SCEP_CHALLENGE rotated since that init is the "
-            "first thing to check.")
-    if allow_unsigned_tenant_claim() and (
-        active_tenants is None or active_tenants > 1):
-        warnings.append(
-            "MDM_ALLOW_UNSIGNED_TENANT_CLAIM is on, so a device may name its own tenant on check-in without a "
-            "signature. Anyone holding one tenant's enrollment profile can edit it and enrol into another fleet. Turn "
-            "it off once every device in the field has a profile carrying a signed tenant claim.")
+            f"{legacy} enrolled device(s) still hold an identity certificate issued before per-enrollment SCEP "
+            "challenges. They keep working and move to a new certificate when it is renewed.")
+    schema = _NANOMDM_SCHEMA_PROBE.get("warning")
+    if schema:
+        warnings.append(schema)
 
-    if not missing and not broken:
+    if not missing and not sentences:
         return Ready(warnings=warnings)
 
-    # Built from the unset settings only; a set-and-broken setting brings its own sentence via ca_error.
+    # Built from the unset settings only; each set-and-broken item and each other problem has its own sentence.
     parts = []
     if missing:
         parts.append(f"Enrollment cannot be served: {_names(missing)} "
                      f"{'is' if len(missing) == 1 else 'are'} not configured.")
-    if ca_error:
-        parts.append(ca_error)
+    parts.extend(sentences)
     return Blocked(" ".join(parts), missing=missing, broken=broken,
                    scope=DEPLOYMENT, warnings=warnings)
 
@@ -233,9 +283,9 @@ def _check_ade(tenant, active_tenants: Optional[int]) -> Status:
         warnings.append(http)
     if not dep_ade_require_apple_signature():
         warnings.append(
-            "DEP_ADE_REQUIRE_APPLE_SIGNATURE is off, so the ADE enrollment endpoint serves the enrollment profile, "
-            "SCEP challenge included, to any caller holding this tenant's enrollment token, which never rotates. "
-            "Confirm real devices verify against an Apple anchor in staging, then turn it on.")
+            "DEP_ADE_REQUIRE_APPLE_SIGNATURE is off, so the ADE enrollment endpoint issues an enrollment profile to "
+            "any caller holding this tenant's enrollment token who names a serial DEP lists for this tenant and that "
+            "is not enrolled. Confirm real devices verify against an Apple anchor in staging, then turn it on.")
 
     if not missing:
         return Ready(warnings=warnings)
@@ -400,7 +450,7 @@ def _names(missing: List[str]) -> str:
 
 
 def settings_to_check(answer: Any) -> str:
-    """The setting names from a readiness answer, as one comma-separated string."""
+    """The setting names from a readiness answer, as one comma-separated string, empty when none is named."""
     if isinstance(answer, Status):
         missing, broken = answer.missing, answer.broken
     else:
@@ -478,20 +528,21 @@ def enforce_boot() -> None:
         raise SystemExit(1)
 
 
-async def check_nanomdm_storage() -> Optional[str]:
-    """Check NanoMDM database for retained command results indicating delete=1 is not active."""
-    import asyncpg
-    from controller.services.nanomdm_store import _nanomdm_dsn
+async def _nanomdm_connection():
+    """A connection to NanoMDM's database, or None with a warning logged when it cannot be reached."""
+    from controller.services import nanomdm_store
 
     try:
-        dsn = _nanomdm_dsn()
-    except Exception as exc:
-        logger.warning("readiness: cannot resolve NanoMDM DSN: %s", exc)
-        return None
-    try:
-        conn = await asyncpg.connect(dsn)
+        return await nanomdm_store._connect()
     except Exception as exc:
         logger.warning("readiness: cannot connect to NanoMDM database: %s", exc)
+        return None
+
+
+async def check_nanomdm_storage() -> Optional[str]:
+    """Check NanoMDM database for retained command results indicating delete=1 is not active."""
+    conn = await _nanomdm_connection()
+    if conn is None:
         return None
     try:
         query = (
@@ -509,3 +560,153 @@ async def check_nanomdm_storage() -> Optional[str]:
         return None
     finally:
         await conn.close()
+
+
+NANOMDM_COLUMNS: Dict[str, Tuple[str, ...]] = {
+    "devices": ("id", "identity_cert", "serial_number", "unlock_token", "bootstrap_token_b64", "bootstrap_token_at"),
+    "enrollments": ("id", "token_hex", "push_magic", "enabled"),
+    "cert_auth_associations": ("id", "sha256", "created_at"),
+}
+
+
+async def check_nanomdm_schema() -> Optional[str]:
+    """The NANOMDM_COLUMNS entries NanoMDM's database lacks, as a sentence, or None when it has them all or cannot be
+    read."""
+    conn = await _nanomdm_connection()
+    if conn is None:
+        return None
+    try:
+        rows = await conn.fetch(
+            "SELECT table_name, column_name FROM information_schema.columns "
+            "WHERE table_schema = current_schema() AND table_name = ANY($1::text[])", list(NANOMDM_COLUMNS))
+    except Exception as exc:
+        logger.warning("readiness: reading NanoMDM's columns failed: %s", exc)
+        return None
+    finally:
+        await conn.close()
+    present = {(row["table_name"], row["column_name"]) for row in rows}
+    missing = [f"{table}.{column}" for table, columns in NANOMDM_COLUMNS.items() for column in columns
+               if (table, column) not in present]
+    if not missing:
+        return None
+    return (f"NanoMDM's database has no {', '.join(missing)} column{'' if len(missing) == 1 else 's'}, which the "
+            "controller reads and writes. Check that NANOMDM_DATABASE_URL, or DATABASE_URL when it is unset, names "
+            "NanoMDM's database and that its schema is the version this release expects.")
+
+
+_PROBE_TTL_SECONDS = 60
+# Process-local results the sync enroll predicate reads
+_SCEP_WEBHOOK_PROBE: Dict[str, Any] = {}
+_LEGACY_PROBE: Dict[str, Any] = {}
+_NANOMDM_SCHEMA_PROBE: Dict[str, Any] = {}
+
+
+def _fresh(cache: Dict[str, Any]) -> bool:
+    checked = cache.get("checked_at")
+    return checked is not None and time.monotonic() - checked < _PROBE_TTL_SECONDS
+
+
+def _webhook_attached(provisioners: Any, name: str, webhook_id: str) -> bool:
+    """Whether the named provisioner carries a SCEPCHALLENGE webhook with this id."""
+    if not webhook_id or not isinstance(provisioners, list):
+        return False
+    for provisioner in provisioners:
+        if not isinstance(provisioner, dict) or provisioner.get("name") != name:
+            continue
+        hooks = (provisioner.get("options") or {}).get("webhooks") or provisioner.get("webhooks") or []
+        if any(isinstance(h, dict) and h.get("kind") == "SCEPCHALLENGE" and h.get("id") == webhook_id
+               for h in hooks):
+            return True
+    return False
+
+
+async def warm_enroll_state() -> None:
+    """Read the identity cutover state and the step-ca webhook probe into this process, so the sync enroll predicate
+    uses current values."""
+    from controller.services import identity
+
+    try:
+        await identity.cutover_done()
+    except Exception as exc:
+        logger.warning("readiness: cannot read the identity cutover state: %s", exc)
+    try:
+        await probe_scep_webhook()
+    except Exception as exc:
+        logger.warning("readiness: cannot probe step-ca's SCEP webhook: %s", exc)
+
+
+async def probe_scep_webhook() -> Optional[str]:
+    """Whether step-ca's SCEP provisioner calls the controller's challenge webhook: attached, detached or unreachable.
+    Cached per process for 60 s."""
+    if _fresh(_SCEP_WEBHOOK_PROBE):
+        return _SCEP_WEBHOOK_PROBE.get("state")
+    import ssl
+
+    import httpx
+
+    base = (_value("STEPCA_URL") or "https://step-ca:9000").rstrip("/")
+    root = _value("STEPCA_ROOT_FILE") or "/stepca-certs/root_ca.crt"
+    try:
+        context = ssl.create_default_context(cafile=root)
+        async with httpx.AsyncClient(verify=context, timeout=3) as client:
+            response = await client.get(f"{base}/provisioners", params={"limit": 100})
+            response.raise_for_status()
+    except Exception as exc:
+        logger.warning("readiness: cannot read step-ca's provisioners from %s: %s", base, exc)
+        state = "unreachable"
+    else:
+        # step-ca answered, so a body that does not parse counts as detached.
+        try:
+            body = response.json()
+            provisioners = body.get("provisioners") if isinstance(body, dict) else None
+        except ValueError:
+            logger.warning("readiness: step-ca's provisioners answer from %s is not JSON", base)
+            provisioners = None
+        attached = _webhook_attached(provisioners, scep_name(), scep_webhook_id())
+        state = "attached" if attached else "detached"
+    _SCEP_WEBHOOK_PROBE.update(state=state, checked_at=time.monotonic())
+    return state
+
+
+async def probe_legacy_identities() -> Optional[Dict[str, int]]:
+    """Per tenant id, how many enrolled devices hold a certificate with a pre-cutover subject, or None when NanoMDM
+    cannot be read. Cached per process for 60 s."""
+    if _fresh(_LEGACY_PROBE):
+        return _LEGACY_PROBE.get("counts")
+    from controller.models.tenant import Device
+    from controller.services import identity, nanomdm_store
+
+    counts: Optional[Dict[str, int]]
+    try:
+        rows = await Device.filter(enrollment_state="enrolled", udid__isnull=False).values_list("tenant_id", "udid")
+        tenant_of = {udid: str(tenant_id) for tenant_id, udid in rows if udid}
+        identities = await nanomdm_store.list_identities(list(tenant_of)) if tenant_of else {}
+        counts = {}
+        for udid, found in identities.items():
+            if udid in tenant_of and identity.LEGACY_CN.match(found.subject_cn or ""):
+                counts[tenant_of[udid]] = counts.get(tenant_of[udid], 0) + 1
+    except Exception as exc:
+        logger.warning("readiness: cannot count legacy identity certificates: %s", exc)
+        counts = None
+    _LEGACY_PROBE.update(counts=counts, checked_at=time.monotonic())
+    return counts
+
+
+async def probe_nanomdm_schema() -> Optional[str]:
+    """check_nanomdm_schema's warning, cached per process for 60 s."""
+    if _fresh(_NANOMDM_SCHEMA_PROBE):
+        return _NANOMDM_SCHEMA_PROBE.get("warning")
+    try:
+        warning = await check_nanomdm_schema()
+    except Exception as exc:
+        logger.warning("readiness: cannot check NanoMDM's columns: %s", exc)
+        warning = None
+    _NANOMDM_SCHEMA_PROBE.update(warning=warning, checked_at=time.monotonic())
+    return warning
+
+
+async def probe_enrollment() -> None:
+    """Run every enrollment probe so the next report reads current results."""
+    await warm_enroll_state()
+    await probe_legacy_identities()
+    await probe_nanomdm_schema()

@@ -352,7 +352,7 @@ async def main():
         def __init__(self, count):
             self._count = count
 
-        async def connect(self, dsn):
+        async def connect(self, dsn, **kwargs):
             return FakeConn(self._count)
 
     async def check_storage_with_fake(fake):

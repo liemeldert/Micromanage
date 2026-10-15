@@ -63,7 +63,7 @@ const S3_REDACTED_PLACEHOLDER = "***redacted***";
 
 // Setting any one of these declares that the tenant runs its own object store, and a bucket and both
 // credentials then become required. Mirrors TENANT_S3_KEYS in controller/services/app_manager.py.
-// prefix is absent from both lists: it picks a path inside whichever bucket is in force.
+// prefix is absent from both lists: it picks a path inside the tenant's own bucket.
 const TENANT_S3_KEYS = [
     "bucket", "access_key_id", "secret_access_key", "session_token",
     "endpoint_url", "region", "use_ssl", "path_style",
@@ -279,20 +279,22 @@ export default function SettingsPage() {
             : "Reverse-DNS notation: two or more dot-separated labels of lowercase letters, digits and hyphens, like com.example.mdm";
     // Stored under a key this form has no input for. Round-tripped on save, and named below.
     const hasStoredSessionToken = s3IsSet(existingCfg.session_token);
+    // shared_prefix is the operator's placement in the server's bucket; the server keeps it whatever a save sends.
     const unknownS3Keys = Object.keys(existingCfg).filter(
-        (k) => !FORM_S3_KEYS.has(k) && k !== "session_token",
+        (k) => !FORM_S3_KEYS.has(k) && k !== "session_token" && k !== "shared_prefix",
     );
+    // Configs from before shared_prefix kept the operator's value in prefix.
+    const sharedPrefix = typeof existingCfg.shared_prefix === "string"
+        ? existingCfg.shared_prefix
+        : !declaresOwnS3(existingCfg) && typeof existingCfg.prefix === "string" ? existingCfg.prefix : "";
 
     /**
-     * The s3_config to PUT. The endpoint replaces it wholesale, so keys this form has no input for are copied across
-     * and a secret nobody retyped goes back as the redaction sentinel. Server mode keeps only prefix.
+     * The s3_config to PUT. The endpoint replaces it wholesale, so keys without an input here are copied across and a
+     * secret nobody retyped goes back as the redaction sentinel. Server mode sends nothing.
      */
     function buildS3Payload(): Record<string, unknown> {
+        if (s3Draft.mode === "server") return {};
         const prefix = s3Draft.prefix.trim();
-        if (s3Draft.mode === "server") {
-            // prefix is not one of TENANT_S3_KEYS, so it survives in server mode.
-            return prefix ? {prefix} : {};
-        }
 
         const next: Record<string, unknown> = {};
         for (const key of unknownS3Keys) next[key] = existingCfg[key];
@@ -439,6 +441,18 @@ export default function SettingsPage() {
         } finally {
             setEnrolling(false);
         }
+    }
+
+    function closeEnrollModal() {
+        setEnrollModalOpen(false);
+        setEnrollPassword("");
+        setEnrollError(null);
+    }
+
+    function closeDisableModal() {
+        setDisableModalOpen(false);
+        setDisablePassword("");
+        setDisableError(null);
     }
 
     function cancelMfaEnroll() {
@@ -698,11 +712,7 @@ export default function SettingsPage() {
 
             <Modal
                 opened={enrollModalOpen}
-                onClose={() => {
-                    setEnrollModalOpen(false);
-                    setEnrollPassword("");
-                    setEnrollError(null);
-                }}
+                onClose={closeEnrollModal}
                 title="Set up two-factor authentication"
                 size="sm"
             >
@@ -725,7 +735,7 @@ export default function SettingsPage() {
                         error={enrollError}
                     />
                     <Group justify="flex-end">
-                        <Button variant="default" onClick={() => setEnrollModalOpen(false)}>
+                        <Button variant="default" onClick={closeEnrollModal}>
                             Cancel
                         </Button>
                         <Button
@@ -741,11 +751,7 @@ export default function SettingsPage() {
 
             <Modal
                 opened={disableModalOpen}
-                onClose={() => {
-                    setDisableModalOpen(false);
-                    setDisablePassword("");
-                    setDisableError(null);
-                }}
+                onClose={closeDisableModal}
                 title="Turn off two-factor authentication"
                 size="sm"
             >
@@ -765,7 +771,7 @@ export default function SettingsPage() {
                         error={disableError}
                     />
                     <Group justify="flex-end">
-                        <Button variant="default" onClick={() => setDisableModalOpen(false)}>
+                        <Button variant="default" onClick={closeDisableModal}>
                             Cancel
                         </Button>
                         <Button
@@ -1038,13 +1044,25 @@ export default function SettingsPage() {
                             </Grid>
                         )}
 
-                        <TextInput
-                            label="Key prefix"
-                            description="Optional. Prepended to every object key written for this tenant, in either mode."
-                            placeholder="tenant-acme/"
-                            value={s3Draft.prefix}
-                            onChange={(e) => editS3({prefix: e.currentTarget.value})}
-                        />
+                        {s3Draft.mode === "tenant" ? (
+                            <TextInput
+                                label="Key prefix"
+                                description="Optional. Prepended to every object key written to this bucket."
+                                placeholder="tenant-acme/"
+                                value={s3Draft.prefix}
+                                onChange={(e) => editS3({prefix: e.currentTarget.value})}
+                            />
+                        ) : (
+                            <Text fz="xs" c="dimmed">
+                                {sharedPrefix ? (
+                                    <>Packages are stored under <Code>{sharedPrefix}</Code> in the server&apos;s
+                                        bucket.</>
+                                ) : (
+                                    "Packages are stored at the top level of the server's bucket."
+                                )}
+                                {" "}The server operator sets this location.
+                            </Text>
+                        )}
 
                         {s3Draft.mode === "tenant" && hasStoredSessionToken && (
                             <Text fz="xs" c="dimmed">

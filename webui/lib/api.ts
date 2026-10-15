@@ -40,6 +40,22 @@ function handleUnauthorized(path: string, method = "GET") {
     }
 }
 
+// One entry of a request validation 422 detail list.
+interface ValidationItem {
+    loc: (string | number)[];
+    msg: string;
+}
+
+function isValidationItem(v: unknown): v is ValidationItem {
+    const o = v as ValidationItem | null;
+    return !!o && typeof o === "object" && Array.isArray(o.loc) && typeof o.msg === "string";
+}
+
+function validationLine(item: ValidationItem): string {
+    const loc = item.loc.filter((p, i) => !(i === 0 && (p === "body" || p === "query" || p === "path")));
+    return loc.length ? `${loc.join(".")}: ${item.msg}` : item.msg;
+}
+
 // The same call as request, handing back the Response as well, for the few callers that need a header off it
 // (X-Config-Version on a config read or save).
 async function requestWithResponse<T>(
@@ -63,7 +79,9 @@ async function requestWithResponse<T>(
         try {
             const body = await res.json();
             rawDetail = body?.detail;
-            if (rawDetail && typeof rawDetail === "object") {
+            if (Array.isArray(rawDetail) && rawDetail.length && rawDetail.every(isValidationItem)) {
+                message = rawDetail.map(validationLine).join("; ");
+            } else if (rawDetail && typeof rawDetail === "object") {
                 // Config validation errors and a confirmable command warning both arrive carrying errors and
                 // warnings arrays; a save conflict carries error "conflict", a message and current_version.
                 const d = rawDetail as { errors?: unknown; message?: unknown };
@@ -312,6 +330,15 @@ export const api = {
 
     getDevice(token: string, id: string) {
         return request<DeviceDetail>(`/api/v1/devices/${id}`, token);
+    },
+
+    // Lets the device enroll again with a new profile during the next 24 hours.
+    allowReenrollment(token: string, id: string) {
+        return request<{ device: Device; reenrollment_allowed_until: string }>(
+            `/api/v1/devices/${id}/allow-reenrollment`,
+            token,
+            {method: "POST"},
+        );
     },
 
     // Delete device (admin only). 409 if enrolled or holds escrowed secrets (retryable with discardSecrets).
@@ -891,9 +918,19 @@ export const api = {
     getEnrollment(token: string) {
         return request<EnrollmentDetails>("/api/v1/enrollment", token);
     },
-    // Same-origin download path (through the proxy) for the enrollment profile.
-    enrollmentDownloadPath(tenantId: string, enrollToken: string) {
-        return `/api/proxy/api/v1/enroll/${encodeURIComponent(tenantId)}/${encodeURIComponent(enrollToken)}`;
+    listEnrollmentLinks(token: string) {
+        return request<{ links: EnrollmentLink[] }>("/api/v1/enrollment/links", token);
+    },
+    createEnrollmentLink(token: string, body: EnrollmentLinkCreate) {
+        return request<EnrollmentLink>("/api/v1/enrollment/links", token, {
+            method: "POST",
+            body: JSON.stringify(body),
+        });
+    },
+    revokeEnrollmentLink(token: string, id: string) {
+        return request<EnrollmentLink>(`/api/v1/enrollment/links/${encodeURIComponent(id)}`, token, {
+            method: "DELETE",
+        });
     },
 
     // POST-SCEP check-ins that never became a device (diagnostic only).
@@ -1227,6 +1264,9 @@ export interface Device {
         created_at: string | null;
         completed_at: string | null;
     } | null;
+    // End of the window in which this device may enroll again with a new profile (detail endpoint only).
+    reenrollment_allowed_until?: string | null;
+    identity_sha256?: string | null;
 }
 
 export interface DeviceDetail {
@@ -1343,15 +1383,37 @@ export interface EnrollmentDetails {
     scep_name: string;
     topic: string | null;
     hostname: string;
-    enroll_url: string | null;
-    token: string;
     configured: boolean;
     missing: string[];
+    // Settings that are set but cannot be used, and one sentence on why enrollment is not ready.
+    broken: string[];
+    reason: string;
     // Entered by admin (not live introspection); days_remaining goes negative if expired.
     apns_cert_expires_at: string | null;
     apns_days_remaining: number | null;
     dep_token_expires_at: string | null;
     dep_days_remaining: number | null;
+}
+
+// A manual enrollment link. url is null when the controller has no public URL configured or cannot decrypt the token.
+export interface EnrollmentLink {
+    id: string;
+    tenant_id: string;
+    label: string | null;
+    created_by: string;
+    created_at: string | null;
+    expires_at: string | null;
+    // null means no limit.
+    max_downloads: number | null;
+    downloads: number;
+    revoked_at: string | null;
+    url: string | null;
+}
+
+export interface EnrollmentLinkCreate {
+    label?: string;
+    expires_in_days: 1 | 7 | 30;
+    max_downloads?: number;
 }
 
 // POST-SCEP check-in that could not be turned into or matched to a device.
@@ -1792,7 +1854,7 @@ export interface FlowRunDetail extends FlowRunSummary {
     flow_source?: FlowSource;
 }
 
-// == flows.yaml document shape (authored by the visual editor) ==
+// == flows.yaml document (authored by the visual editor) ==
 
 export interface FlowNode {
     id: string;

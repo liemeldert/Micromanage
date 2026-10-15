@@ -45,7 +45,7 @@ async def main():
     await Tortoise.generate_schemas()
 
     import controller.api.routes.auth as api_auth
-    from controller.models.tenant import Tenant, User, AuditLog
+    from controller.models.tenant import Tenant, User, AuditLog, UserMFA
     from controller.auth.dependencies import Principal
     from controller.api.routes.auth import (LoginRequest, MFAVerifyRequest, MFAConfirmRequest, MFADisableRequest,
                                             MFAEnrollRequest)
@@ -72,9 +72,15 @@ async def main():
     check("no secret is returned", "secret" not in status)
 
     print("3) enroll re-authenticates, then returns secret and uri")
-    for label, req in (("no body", None), ("wrong password", MFAEnrollRequest(password="nope"))):
+    from pydantic import ValidationError
+    try:
+        MFAEnrollRequest()
+        check("an enroll body without a password does not validate", False)
+    except ValidationError:
+        check("an enroll body without a password does not validate", True)
+    for label, password in (("an empty password", ""), ("a wrong password", "nope")):
         try:
-            await api_auth.enroll_mfa(req, admin_principal)
+            await api_auth.enroll_mfa(MFAEnrollRequest(password=password), admin_principal)
             check(f"enroll with {label} is refused", False)
         except HTTPException as e:
             check(f"enroll with {label} is refused", e.status_code == 401)
@@ -165,6 +171,44 @@ async def main():
     audit_disable = await AuditLog.filter(action="user.mfa_disable").first()
     check("audit log written for mfa_disable", audit_disable is not None)
     check("audit log contains no password", "password" not in (audit_disable.detail or {}))
+
+    print("15) enroll and disable share the sign-in limiter")
+    from controller.auth.ratelimit import login_limiter
+    u2 = await User.create(tenant=tenant, email="throttled@t1", role="member",
+                           password_hash=hash_password("Password123!"))
+    throttled = Principal(tenant=tenant, user=u2, email="throttled@t1", role="member")
+    codes = []
+    for _ in range(login_limiter.max_attempts + 1):
+        try:
+            await api_auth.enroll_mfa(MFAEnrollRequest(password="wrong"), throttled)
+            codes.append(200)
+        except HTTPException as e:
+            codes.append(e.status_code)
+    check("enroll answers 401 up to the limit, then 429",
+          codes[:-1] == [401] * login_limiter.max_attempts and codes[-1] == 429, codes)
+    try:
+        await api_auth.enroll_mfa(MFAEnrollRequest(password="Password123!"), throttled)
+        check("the right password is refused too while throttled", False)
+    except HTTPException as e:
+        check("the right password is refused too while throttled", e.status_code == 429)
+    try:
+        await api_auth.disable_mfa(MFADisableRequest(password="Password123!"), throttled)
+        check("disable is throttled on the same key", False)
+    except HTTPException as e:
+        check("disable is throttled on the same key", e.status_code == 429)
+
+    print("16) an externally authenticated tenant cannot enroll or disable")
+    ext = await Tenant.create(id="ext", name="External", auth_config={"provider": "oidc"})
+    u3 = await User.create(tenant=ext, email="sso@ext", role="admin")
+    sso = Principal(tenant=ext, user=u3, email="sso@ext", role="admin")
+    for label, call in (("enroll", api_auth.enroll_mfa(MFAEnrollRequest(password="x"), sso)),
+                        ("disable", api_auth.disable_mfa(MFADisableRequest(password="x"), sso))):
+        try:
+            await call
+            check(f"{label} is refused with 400", False)
+        except HTTPException as e:
+            check(f"{label} is refused with 400", e.status_code == 400, e.detail)
+    check("no MFA row was started for the external user", not await UserMFA.filter(user_id=u3.id).exists())
 
     time.time = _real_time
     await Tortoise.close_connections()

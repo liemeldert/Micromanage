@@ -21,7 +21,7 @@ import controller.api.routes.config as config_routes  # noqa: E402
 import controller.api.runtime as api_services  # noqa: E402
 from controller.auth.dependencies import Principal  # noqa: E402
 from controller.models.tenant import Tenant, User, AuditLog  # noqa: E402
-from tests._verify_harness import make_check, seed_config_dir
+from tests._verify_harness import make_check, seed_config_dir, status_of
 
 PASS, FAIL = [], []
 
@@ -38,13 +38,7 @@ MINIMAL = {
 check = make_check(FAIL, PASS)
 
 
-async def status_of(coro):
-    """Run an endpoint coroutine, returning its HTTP status (200 on success)."""
-    try:
-        await coro
-        return 200
-    except HTTPException as exc:
-        return exc.status_code
+
 
 
 async def detail_of(coro):

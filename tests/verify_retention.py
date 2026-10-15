@@ -140,7 +140,7 @@ async def main():
         task_manager.logger.removeHandler(capture)
 
     check("it reports what it deleted, per table",
-          result == {"tasks": 6, "alerts": 2, "flow_runs": 6, "audit_log": 0})
+          result == {"tasks": 6, "alerts": 2, "flow_runs": 6, "audit_log": 0, "enrollment_links": 0})
 
     for tenant_id in ("t1", "t2"):
         r = rows[tenant_id]

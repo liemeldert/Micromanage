@@ -247,6 +247,24 @@ _AUX_DDL = [
     'ALTER TABLE "tenants" ADD COLUMN IF NOT EXISTS "profile_signing_key_enc" TEXT NULL',
     'ALTER TABLE "tenants" ADD COLUMN IF NOT EXISTS "profile_signing_chain_pem" TEXT NULL',
     'ALTER TABLE "tenants" ADD COLUMN IF NOT EXISTS "profile_signing_cert_expires_at" TIMESTAMPTZ NULL',
+    # Enrollment identity
+    'ALTER TABLE "devices" ADD COLUMN IF NOT EXISTS "reenrollment_allowed_until" TIMESTAMPTZ NULL',
+    'ALTER TABLE "devices" ADD COLUMN IF NOT EXISTS "erase_acked_at" TIMESTAMPTZ NULL',
+    'ALTER TABLE "devices" ADD COLUMN IF NOT EXISTS "push_token_enc" TEXT NULL',
+    'ALTER TABLE "devices" ADD COLUMN IF NOT EXISTS "identity_sha256" VARCHAR(64) NULL',
+    'ALTER TABLE "devices" ADD COLUMN IF NOT EXISTS "identity_pem" TEXT NULL',
+    'ALTER TABLE "devices" ADD COLUMN IF NOT EXISTS "bootstrap_token_enc" TEXT NULL',
+    'ALTER TABLE "scep_challenges" ADD COLUMN IF NOT EXISTS "origin" VARCHAR(16) NOT NULL DEFAULT \'manual\'',
+    'ALTER TABLE "scep_challenges" ADD COLUMN IF NOT EXISTS "previous_pem" TEXT NULL',
+    # unique open renewal challenge per device
+    'CREATE UNIQUE INDEX IF NOT EXISTS idx_scep_challenges_open_renewal ON scep_challenges (device_id) '
+    'WHERE device_id IS NOT NULL AND consumed_at IS NULL',
+    # Retention reads challenges by expiry, identity.judge by bound udid, and ADE minting by tenant and serial.
+    'CREATE INDEX IF NOT EXISTS "idx_scep_challenges_expires" ON "scep_challenges" (expires_at)',
+    'CREATE INDEX IF NOT EXISTS "idx_scep_challenges_bound_udid" ON "scep_challenges" (bound_udid) '
+    'WHERE bound_udid IS NOT NULL',
+    'CREATE INDEX IF NOT EXISTS "idx_scep_challenges_tenant_serial" ON "scep_challenges" (tenant_id, serial) '
+    'WHERE serial IS NOT NULL',
 ]
 
 # Best-effort DDL: applied where possible, logged and skipped where not. For constraints that existing data might
@@ -274,6 +292,12 @@ _IN_SCHEMA_LOCK: ContextVar[bool] = ContextVar(
 )
 
 
+def is_postgres(conn=None) -> bool:
+    """Whether conn, or the default connection, is a Postgres connection."""
+    conn = conn if conn is not None else Tortoise.get_connection("default")
+    return getattr(conn.capabilities, "dialect", None) == "postgres"
+
+
 @asynccontextmanager
 async def _schema_lock(conn):
     """Hold _AUX_DDL_LOCK_KEY on one pinned connection for the whole block, yielding it (None where there are no
@@ -290,7 +314,7 @@ async def _schema_lock(conn):
         )
     token = _IN_SCHEMA_LOCK.set(True)
     try:
-        if getattr(conn.capabilities, "dialect", None) != "postgres":
+        if not is_postgres(conn):
             # sqlite has no advisory locks and no second process to race. Does not make the module portable;
             # both DDL lists are still Postgres-only.
             yield None
@@ -370,7 +394,18 @@ async def init_schema():
             if schema_sql:
                 await execute(schema_sql)
         await _apply_aux_ddl(execute, log)
+        if pinned is not None:
+            await _run_identity_cutover(log)
         await _record_schema_state(log, pinned)
+
+
+async def _run_identity_cutover(log) -> None:
+    """The one-time identity cutover, under the schema lock held by caller."""
+    from controller.services import identity
+    try:
+        await identity.run_cutover()
+    except Exception:
+        log.exception("identity cutover failed; it runs again at the next start")
 
 
 def schema_fingerprint() -> str:

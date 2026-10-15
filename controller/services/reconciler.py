@@ -186,40 +186,54 @@ APP_UNCONFIRMED_ERROR = (
 )
 
 
+async def fail_tasks(tasks: List[Dict[str, Any]], error: str, now: Optional[datetime] = None, *,
+                     locked: bool = False) -> None:
+    """Fail tasks (rows with id, type and tenant_id) and the deployments they were installing. locked says the caller
+    holds the device's identity.udid_lock."""
+    if not tasks:
+        return
+    from controller.services import enrollment_links
+
+    now = now or datetime.now(timezone.utc)
+    by_tenant: Dict[str, List[Dict[str, Any]]] = {}
+    for row in tasks:
+        by_tenant.setdefault(str(row["tenant_id"]), []).append(row)
+    for tenant_id, rows in by_tenant.items():
+        ids = [row["id"] for row in rows]
+        # One UPDATE for every row, as they differ only by id. tenant_id stays on the filter.
+        await Task.filter(tenant_id=tenant_id, id__in=ids).update(status="failed", completed_at=now, error=error)
+
+        for task_type, model in (("app_install", AppDeployment),
+                                 ("profile_install", ProfileDeployment)):
+            typed = [row["id"] for row in rows if row["type"] == task_type]
+            if not typed:
+                continue
+            await model.filter(
+                tenant_id=tenant_id, last_task_id__in=typed,
+                status__in=_TIMEOUT_WRITEBACK_STATUSES,
+            ).update(status="failed", last_error=error, updated_at=now)
+
+        erase_ids = [row["id"] for row in rows if row["type"] in enrollment_links.ERASE_TASK_TYPES]
+        if erase_ids:
+            await enrollment_links.expire_rts_challenges(now, task_ids=erase_ids)
+
+    from controller.services import identity
+    await identity.fail_renewal_tasks([row["id"] for row in tasks], now=now, locked=locked)
+
+
 async def _fail_timed_out_tasks(tenant: Tenant) -> int:
-    """Fail tasks that have waited too long for a device response, and the deployment rows they were installing. Only
-    rows whose last_task_id is one of these tasks are touched, so a deployment retried under a newer task keeps its
-    state. A late device response still overwrites this via the webhook."""
+    """Fail tasks that have waited too long for a device response, and the deployment rows they were installing. A late
+    device response still overwrites this via the webhook."""
     now = datetime.now(timezone.utc)
     cutoff = now - timedelta(hours=TASK_TIMEOUT_HOURS)
     stale = await Task.filter(
         tenant=tenant, status__in=["pending", "running"], created_at__lt=cutoff
-    ).values("id", "type")
+    ).values("id", "type", "tenant_id")
     if not stale:
         return 0
-    ids = [row["id"] for row in stale]
-    # One UPDATE, not one per row. After a long outage this can be the whole fleet's worth of queued commands, and the
-    # rows are identical apart from their ids. tenant stays on the filter even though the ids are already tenant-scoped.
-    await Task.filter(tenant=tenant, id__in=ids).update(
-        status="failed",
-        completed_at=now,
-        error=TIMEOUT_ERROR,
-    )
-
-    # The deployment write-back the same way: one statement per model, keyed on the tasks just failed. updated_at is set
-    # explicitly because a queryset update does not fire auto_now, and _needs_deploy measures the retry wait from it.
-    for task_type, model in (("app_install", AppDeployment),
-                             ("profile_install", ProfileDeployment)):
-        typed = [row["id"] for row in stale if row["type"] == task_type]
-        if not typed:
-            continue
-        await model.filter(
-            tenant=tenant, last_task_id__in=typed,
-            status__in=_TIMEOUT_WRITEBACK_STATUSES,
-        ).update(status="failed", last_error=TIMEOUT_ERROR, updated_at=now)
-
-    logger.warning("reconcile[%s]: timed out %d task(s)", tenant.id, len(ids))
-    return len(ids)
+    await fail_tasks(stale, TIMEOUT_ERROR, now)
+    logger.warning("reconcile[%s]: timed out %d task(s)", tenant.id, len(stale))
+    return len(stale)
 
 
 async def _fail_unconfirmed_apps(tenant: Tenant) -> int:

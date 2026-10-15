@@ -1,20 +1,21 @@
 """Tenant resolution, signed tenant claims, serial rekeying, and enrollment attempt logging."""
 import logging
+from datetime import datetime
 from typing import Any, Dict, Optional, Tuple
 
 from controller.models.tenant import Device, EnrollmentAttempt, Tenant
-from controller.services import readiness
 from controller.services.enrollment import verify_tenant_url_token
 from controller.utils.coerce import env_flag
 
 logger = logging.getLogger(__name__)
+
+_MAX_REASONS = 10
 
 # Every value _resolve_tenant can report, in one place so a typo in a caller's comparison is greppable instead of
 # silently falsy.
 TENANT_RESOLUTION_REASONS = (
     "signed",  # ?tenant= carried a valid ?tsig= for that id
     "sole_tenant",  # only one tenant exists, so there is no boundary to cross
-    "legacy_unsigned",  # unsigned claim honoured under MDM_ALLOW_UNSIGNED_TENANT_CLAIM
     "bad_signature",  # a real tenant was claimed without a valid signature
     "unknown_tenant",  # the claimed id matches no tenant row
     "inactive_tenant",  # the claim checks out, but that tenant is deactivated
@@ -34,30 +35,17 @@ def _first_param(url_params: Optional[Dict[str, Any]], key: str) -> Optional[str
     return value if isinstance(value, str) and value else None
 
 
-# Migration escape hatch that accepts the pre-signature ?tenant= again, only for draining enrollments still on old
-# .mobileconfigs. It restores the cross-tenant enrollment hole exactly.
-_allow_unsigned_tenant_claim = readiness.allow_unsigned_tenant_claim
-
-
 def _require_known_serial() -> bool:
     """When true, only a pre-provisioned serial (an ADE placeholder or an existing row) may become a Device. Off by
     default so OTA fleets keep self-registering."""
     return env_flag("MDM_ENROLL_REQUIRE_KNOWN_SERIAL")
 
 
-def _require_signed_tenant_claim() -> bool:
-    """Post-migration hardening: refuse a check-in on a known udid with no verified tenant claim.
-
-    Off by default: a device enrolled before tsig existed has an unsigned ServerURL baked into its profile. Turn on
-    only once the whole fleet is re-enrolled onto signed profiles, or it cuts those devices off."""
-    return env_flag("MDM_REQUIRE_SIGNED_TENANT_CLAIM")
-
-
 async def _resolve_tenant(url_params: Dict[str, Any]) -> Tuple[Optional[Tenant], str]:
     """Map an enrolling device to a tenant. Returns (tenant, reason).
 
-    ?tenant=<id> is a claim, not a fact, honoured only with a matching ?tsig= unless MDM_ALLOW_UNSIGNED_TENANT_CLAIM is
-    set. Only reached for an unknown udid.
+    ?tenant=<id> is honoured only with a matching ?tsig=. Only reached for a legacy identity
+    certificate on an unknown udid; a challenge certificate takes its tenant from the challenge row.
     """
     tid = _first_param(url_params, "tenant")
     tsig = _first_param(url_params, "tsig")
@@ -74,22 +62,9 @@ async def _resolve_tenant(url_params: Dict[str, Any]) -> Tuple[Optional[Tenant],
         # Deactivated: fall through, so a single-tenant install still resolves via sole_tenant instead of having signed
         # check-ins fail while unsigned ones succeed.
 
-    elif tid and _allow_unsigned_tenant_claim() and claimed is not None and claimed.is_active:
-        logger.warning(
-            "webhook: honouring UNSIGNED tenant claim %r "
-            "(MDM_ALLOW_UNSIGNED_TENANT_CLAIM is set; this reopens cross-tenant enrollment)",
-            tid,
-        )
-        return claimed, "legacy_unsigned"
-
     tenants = await Tenant.all().limit(2)
     if len(tenants) == 1:
         return tenants[0], "sole_tenant"
-
-    if _allow_unsigned_tenant_claim():
-        fallback = await Tenant.get_or_none(id="default", is_active=True)
-        if fallback:
-            return fallback, "legacy_unsigned"
 
     if tid:
         # Only an existing tenant id can be an attack; a claim for one that was never here could not have been granted
@@ -124,7 +99,8 @@ async def _rekey_serial(device: Device, reported: str,
                         topic: Optional[str] = None) -> bool:
     """Audit a device row's serial change, and say whether it may be written.
 
-    False when another row in the tenant already holds reported. An unenrolled placeholder holding it is not a conflict.
+    False when another row in the tenant already holds reported. An unenrolled placeholder holding it is not a conflict,
+    unless it carries an ABM assignment and the device's identity came from a manual enrollment.
     """
     tenant = await Tenant.get_or_none(id=device.tenant_id)
     siblings = [
@@ -139,13 +115,29 @@ async def _rekey_serial(device: Device, reported: str,
             "webhook: refusing to re-key device %s from serial=%r to %r: device %s in the same tenant already holds it",
             device.id, device.serial_number, reported, blockers[0].id,
         )
-        await _log_attempt(
+        await log_attempt(
             "serial_conflict", tenant=tenant, udid=device.udid,
             serial_number=reported, topic=topic,
             detail={"held_by_device": str(blockers[0].id),
                     "old_serial": device.serial_number},
         )
         return False
+    assigned = [row for row in siblings if getattr(row, "dep_server_id", None)]
+    if assigned:
+        from controller.services import identity
+
+        if await identity.enrollment_origin(device) == "manual":
+            logger.error(
+                "webhook: refusing to merge ADE placeholder %s (serial=%r) into manually enrolled device %s",
+                assigned[0].id, reported, device.id,
+            )
+            await log_attempt(
+                "serial_conflict", tenant=tenant, udid=device.udid,
+                serial_number=reported, topic=topic,
+                detail={"held_by_device": str(assigned[0].id), "old_serial": device.serial_number,
+                        "reason": "ade_placeholder"},
+            )
+            return False
     for stub in siblings:
         if getattr(stub, "dep_server_id", None) and not getattr(device, "dep_server_id", None):
             device.dep_server_id = stub.dep_server_id
@@ -228,7 +220,7 @@ async def _refuse_conflicting_claim(
         )
         # Recorded against the row's own tenant, a database fact, not the caller's claim. No audit row: AuditLog has
         # no dedupe and a hostile device would re-trigger this every check-in; EnrollmentAttempt does dedupe.
-        await _log_attempt(
+        await log_attempt(
             "bad_tenant_claim",
             tenant=await Tenant.get_or_none(id=device.tenant_id),
             udid=udid,
@@ -241,43 +233,10 @@ async def _refuse_conflicting_claim(
             },
         )
         return True
-
-    # Opt-in hardening for a fully re-enrolled fleet. Own outcome, separate from bad_tenant_claim: that one is always
-    # an attack, this one almost always means an old profile still in the field.
-    if claimed is None and _require_signed_tenant_claim():
-        if _allow_unsigned_tenant_claim():
-            # The two flags contradict each other; the migration-in-progress one wins, since cutting off exactly the
-            # devices ALLOW_UNSIGNED was set for is the worse surprise.
-            logger.warning(
-                "webhook: MDM_REQUIRE_SIGNED_TENANT_CLAIM and MDM_ALLOW_UNSIGNED_TENANT_CLAIM are both set; that's "
-                "contradictory (one assumes the fleet migration is finished, the other that it isn't). "
-                "MDM_ALLOW_UNSIGNED_TENANT_CLAIM wins: the unsigned check-in for udid=%s is still accepted.",
-                udid,
-            )
-            return False
-        logger.warning(
-            "webhook: refusing check-in for udid=%s: no verified tenant claim (MDM_REQUIRE_SIGNED_TENANT_CLAIM is "
-            "set); most likely a device still carrying a pre-signature profile that needs re-enrolling",
-            udid,
-        )
-        requested = _first_param(url_params, "tenant")
-        await _log_attempt(
-            "unsigned_tenant_claim",
-            tenant=await Tenant.get_or_none(id=device.tenant_id),
-            udid=udid,
-            serial_number=device.serial_number,
-            topic=topic,
-            detail={
-                "reason": "no_verified_claim",
-                "requested_tenant": requested[:100] if requested else None,
-                "reported_serial": (info.get("SerialNumber") or "")[:64] or None,
-            },
-        )
-        return True
     return False
 
 
-async def _log_attempt(
+async def log_attempt(
     outcome: str,
     *,
     tenant: Optional[Tenant] = None,
@@ -285,12 +244,14 @@ async def _log_attempt(
     serial_number: Optional[str] = None,
     topic: Optional[str] = None,
     detail: Optional[Dict[str, Any]] = None,
+    dedupe_on: Optional[str] = None,
+    since: Optional[datetime] = None,
 ) -> None:
-    """Record a webhook check-in dropped without matching a device row, as an EnrollmentAttempt.
+    """Record a refused check-in, challenge or enrollment request as an EnrollmentAttempt. Best-effort.
 
-    Best-effort; the webhook returns 200 either way. tenant must be a row the caller looked up, never an id off the
-    request, since anyone can put ?tenant=<victim> on the ServerURL. An unresolved id belongs in detail only.
-    """
+    tenant must be a row the caller looked up, not the id from the request. Without a udid, dedupe_on names the detail
+    key that identifies the repeated row, and since bounds the scan to rows created at or after it."""
+    serial_number = serial_number[:20] if serial_number else None
     try:
         # One row per (tenant, udid, outcome), updated in place with a repeat count. Tenant is part of the key, not
         # just the payload.
@@ -299,11 +260,23 @@ async def _log_attempt(
             query.filter(tenant_id=tenant.id) if tenant is not None
             else query.filter(tenant_id__isnull=True)
         )
-        existing = await query.first() if udid else None
+        existing = None
+        if udid:
+            existing = await query.first()
+        elif dedupe_on and (detail or {}).get(dedupe_on) is not None:
+            # sqlite has no JSON filter, so the key is matched here.
+            if since is not None:
+                query = query.filter(created_at__gte=since)
+            existing = next((row for row in await query.order_by("-created_at").all()
+                             if (row.detail or {}).get(dedupe_on) == detail[dedupe_on]), None)
         if existing is not None:
             merged = dict(existing.detail or {})
+            reasons = list(merged.get("reasons") or ([merged["reason"]] if merged.get("reason") else []))
             merged.update(detail or {})
             merged["count"] = int(merged.get("count", 1)) + 1
+            if (detail or {}).get("reason"):
+                # Every reason the merged attempts carried, not only the last, bounded to the newest ten.
+                merged["reasons"] = (reasons + [detail["reason"]])[-_MAX_REASONS:]
             # No tenant reassignment: it is part of the key just matched on, so a row cannot migrate between tenants.
             existing.serial_number = serial_number
             existing.topic = topic

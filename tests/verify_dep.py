@@ -218,21 +218,25 @@ def _mkcert(cn, issuer_cn=None, issuer_key=None, ca=False):
     return b.sign(issuer_key or key, hashes.SHA256()), key
 
 
-def _synthetic_apple_cms_der(serial, anchor_path, tamper=False, untrusted=False):
+def _synthetic_apple_cms_der(serial, anchor_path, tamper=False, untrusted=False, udid=None):
     """The raw CMS SignedData DER a token-based ADE device POSTs as its request body: a MachineInfo plist signed by a
     synthetic root->intermediate->device chain, with the root written out as an anchor PEM (unless untrusted)."""
     import base64 as _b64
     return _b64.b64decode(
-        _synthetic_apple_cms(serial, anchor_path, tamper=tamper, untrusted=untrusted))
+        _synthetic_apple_cms(serial, anchor_path, tamper=tamper, untrusted=untrusted, udid=udid))
 
 
-def _synthetic_apple_cms(serial, anchor_path, tamper=False, untrusted=False):
+def _synthetic_apple_cms(serial, anchor_path, tamper=False, untrusted=False, inter_cn="Test iPhone Device CA",
+                         udid=None):
     """Build a base64 x-apple-aspen-deviceinfo header signed by a synthetic root->intermediate->device chain, and write
     the root as an anchor PEM (unless untrusted). Returns the base64 header string."""
     root, rk = _mkcert("Test Apple Root CA", ca=True)
-    inter, ik = _mkcert("Test iPhone Device CA", "Test Apple Root CA", rk, ca=True)
-    leaf, lk = _mkcert(serial, "Test iPhone Device CA", ik)
-    mi = _pl_dumps({"SERIAL": serial, "PRODUCT": "Mac14,2"})
+    inter, ik = _mkcert(inter_cn, "Test Apple Root CA", rk, ca=True)
+    leaf, lk = _mkcert(serial, inter_cn, ik)
+    info = {"SERIAL": serial, "PRODUCT": "Mac14,2"}
+    if udid:
+        info["UDID"] = udid
+    mi = _pl_dumps(info)
     builder = pkcs7.PKCS7SignatureBuilder().set_data(mi).add_signer(leaf, lk, hashes.SHA256())
     for c in (inter, root):
         builder = builder.add_certificate(c)
@@ -544,7 +548,15 @@ async def main():
     # 7b) ADE endpoint: requires the per-tenant token, pre-stamps enrollment_source
     print("7b) ADE enroll endpoint requires the per-tenant token")
     os.environ["MDM_TOPIC"] = "com.apple.mgmt.External.test"
-    os.environ["SCEP_CHALLENGE"] = "test-challenge"
+    # The checks up to 7c send unsigned MachineInfo, so the signature check is off until 7c turns it on.
+    os.environ["DEP_ADE_REQUIRE_APPLE_SIGNATURE"] = "false"
+    # Enrollment readiness needs the step-ca webhook secret on disk and the identity cutover stamped.
+    secret_file = base / "scep_webhook_secret"
+    secret_file.write_text("dmVyaWZ5LWRlcC1zZWNyZXQ=")
+    os.environ["SCEP_WEBHOOK_SECRET_FILE"] = str(secret_file)
+    from controller.models.tenant import EnrollmentAttempt, IdentityCutover, ScepChallenge
+    from controller.utils.timeutil import utcnow
+    await IdentityCutover.create(id=1, cutover_at=utcnow(), snapshot_done=True)
     # The ServerURL and the SCEP URL are built from this when neither is set outright. Without it enrollment is refused
     # rather than issuing a profile with no host in it.
     os.environ["MDM_HOSTNAME"] = "mdm.example.test"
@@ -599,6 +611,15 @@ async def main():
     ade_dev2 = await Device.get(tenant=tenant, serial_number="ADE-1")
     check("ADE endpoint stamped enrollment_source=ade",
           (ade_dev2.attributes or {}).get("enrollment_source") == "ade")
+    ade_row = await ScepChallenge.filter(serial="ADE-1").first()
+    check("ADE endpoint minted a challenge bound to the serial, with no udid since nothing verified",
+          ade_row is not None and ade_row.origin == "ade" and ade_row.expected_udid is None
+          and ade_row.consumed_at is None)
+    check("...recording the requesting address", ade_row is not None and ade_row.remote_addr == "203.0.113.7")
+    _ade_scep = next(p for p in _pl_loads(resp.body)["PayloadContent"]
+                     if p["PayloadType"] == "com.apple.security.scep")["PayloadContent"]
+    check("...and the profile asks for that row's subject",
+          ade_row is not None and _ade_scep["Subject"] == [[["CN", ade_row.subject_cn]]])
 
     # ADE profile carries tenant signature just like OTA; webhook verifies it.
     from urllib.parse import parse_qs as _parse_qs, urlparse as _urlparse
@@ -617,35 +638,59 @@ async def main():
     from controller.services import dep_verify
     anchor_path = _tf.mktemp(suffix=".pem")
     os.environ["DEP_APPLE_ANCHOR_CERTS"] = anchor_path
+    os.environ["DEP_APPLE_DEVICE_CA_NAMES"] = "Test iPhone Device CA"
     dep_verify._anchors.cache_clear()
 
     hdr_ok = _synthetic_apple_cms("VER-OK", anchor_path)
-    dep_verify._anchors.cache_clear()  # anchor file now written
+    dep_verify._anchors.cache_clear()  # the anchor file is written
     import base64 as _b64
-    content, verified, detail = dep_verify.verify_cms(_b64.b64decode(hdr_ok))
+    content, verified, detail, signature = dep_verify.verify_cms(_b64.b64decode(hdr_ok))
     check("valid CMS chain verifies", verified)
     check("verified CMS yields the MachineInfo", _pl_loads(bytes(content)).get("SERIAL") == "VER-OK")
+    check("...and the SignerInfo signature", isinstance(signature, bytes) and len(signature) > 0)
+    _c, v_trail, _d_trail, _s = dep_verify.verify_cms(_b64.b64decode(hdr_ok) + b"\x00")
+    check(f"trailing bytes after the CMS are refused ({_d_trail})", not v_trail)
 
     hdr_tampered = _synthetic_apple_cms("VER-BAD", anchor_path, tamper=True)
     dep_verify._anchors.cache_clear()
-    _c, v_t, _d = dep_verify.verify_cms(_b64.b64decode(hdr_tampered))
+    _c, v_t, _d, _s = dep_verify.verify_cms(_b64.b64decode(hdr_tampered))
     check("tampered CMS rejected", not v_t)
+    check("...with no signature returned", _s is None)
 
     hdr_untrusted = _synthetic_apple_cms("VER-EVIL", anchor_path, untrusted=True)
     dep_verify._anchors.cache_clear()
-    _c, v_u, _d = dep_verify.verify_cms(_b64.b64decode(hdr_untrusted))
+    _c, v_u, _d_u, _s = dep_verify.verify_cms(_b64.b64decode(hdr_untrusted))
     check("CMS not chaining to an Apple anchor rejected", not v_u)
+    check(f"...with the chain detail ({_d_u})", _d_u == "not chained to an Apple anchor")
 
     # Every signature here verifies and the anchor is ours; the only fault is that the signer's issuer is a real device
     # certificate rather than a CA. Accepting it lets one device's identity forge MachineInfo for the whole fleet.
     hdr_forged = _leaf_signed_cms("VER-FORGED", anchor_path)
     dep_verify._anchors.cache_clear()
-    _c, v_f, _d_f = dep_verify.verify_cms(_b64.b64decode(hdr_forged))
+    _c, v_f, _d_f, _s = dep_verify.verify_cms(_b64.b64decode(hdr_forged))
     check(f"CMS signed by a cert an Apple LEAF issued rejected ({_d_f})", not v_f)
+    check("...and refused inside the chain walk", _d_f == "not chained to an Apple anchor")
+
+    # Any certificate under the pinned root chains, so the signer's issuer CN has to be an allowed device CA as well.
+    hdr_dev_ca = _synthetic_apple_cms("VER-DEVCA", anchor_path, inter_cn="Test Apple Developer CA")
+    dep_verify._anchors.cache_clear()
+    _c, v_dc, _d_dc, _s = dep_verify.verify_cms(_b64.b64decode(hdr_dev_ca))
+    check(f"CMS whose signer a non-device CA under the anchor issued rejected ({_d_dc})",
+          not v_dc and "Test Apple Developer CA" in _d_dc)
+
+    hdr_default = _synthetic_apple_cms("VER-DEFAULT", anchor_path)
+    dep_verify._anchors.cache_clear()
+    os.environ.pop("DEP_APPLE_DEVICE_CA_NAMES", None)
+    try:
+        _c, v_def, _d_def, _s = dep_verify.verify_cms(_b64.b64decode(hdr_default))
+        check(f"the default device CA list refuses the test chain ({_d_def})",
+              not v_def and "Test iPhone Device CA" in _d_def)
+    finally:
+        os.environ["DEP_APPLE_DEVICE_CA_NAMES"] = "Test iPhone Device CA"
 
     # Endpoint enforcement: DEP_ADE_REQUIRE_APPLE_SIGNATURE=true means verify CMS signature in the request body.
     os.environ["DEP_ADE_REQUIRE_APPLE_SIGNATURE"] = "true"
-    body_ok = _synthetic_apple_cms_der("VER-BODY", anchor_path)
+    body_ok = _synthetic_apple_cms_der("VER-BODY", anchor_path, udid="00008112-000A1B2C3D4E5F60")
     dep_verify._anchors.cache_clear()
     await Device.create(tenant=tenant, udid=None, serial_number="VER-BODY",
                         device_model="Mac", os_version="", enrollment_state="pending",
@@ -663,6 +708,81 @@ async def main():
     check("...and the body's serial pre-stamped the placeholder as verified ADE",
           (body_dev.attributes or {}).get("enrollment_source") == "ade"
           and (body_dev.attributes or {}).get("ade_signature_verified") is True)
+    verified_row = await ScepChallenge.filter(serial="VER-BODY").first()
+    check("a verified MachineInfo mints a challenge bound to its serial and UDID",
+          verified_row is not None and verified_row.expected_udid == "00008112-000A1B2C3D4E5F60")
+    try:
+        await dep_api.ade_enroll("default", good, FakeReq({}, body=body_ok))
+        check("a replayed MachineInfo is refused", False)
+    except HTTPException as ex:
+        check("a replayed MachineInfo is refused with the signature 403",
+              ex.status_code == 403 and ex.detail == "Device signature verification failed")
+    replay = await EnrollmentAttempt.filter(outcome="machineinfo_replay").first()
+    check("...and recorded as a machineinfo_replay attempt against the tenant and UDID",
+          replay is not None and replay.tenant_id == "default"
+          and replay.udid == "00008112-000A1B2C3D4E5F60" and replay.serial_number == "VER-BODY")
+    check("...and mints nothing", await ScepChallenge.filter(serial="VER-BODY").count() == 1)
+
+    async def ade_body_status(body):
+        try:
+            await dep_api.ade_enroll("default", good, FakeReq({}, body=body))
+            return 200
+        except HTTPException as ex:
+            return ex.status_code if ex.detail == "Device signature verification failed" else ex.detail
+
+    # An appended byte fails the strict DER parse, so it never verifies and cannot pass as a new MachineInfo.
+    check("a replay with one appended byte is refused", await ade_body_status(body_ok + b"\x00") == 403)
+    check("...and mints nothing", await ScepChallenge.filter(serial="VER-BODY").count() == 1)
+    # A re-encoding that still verifies (an extra certificate) carries the same content and signature.
+    from asn1crypto import cms as _asn1_cms
+    _ci = _asn1_cms.ContentInfo.load(body_ok)
+    _certs = list(_ci["content"]["certificates"])
+    _ci["content"]["certificates"] = _asn1_cms.CertificateSet(_certs + [_certs[0]])
+    body_recoded = _ci.dump(force=True)
+    _c, v_rec, _d_rec, _s = dep_verify.verify_cms(body_recoded)
+    check(f"a MachineInfo with an extra certificate still verifies ({_d_rec})",
+          v_rec and body_recoded != body_ok)
+    check("...and is refused as a replay", await ade_body_status(body_recoded) == 403)
+    replay = await EnrollmentAttempt.filter(outcome="machineinfo_replay", udid="00008112-000A1B2C3D4E5F60").first()
+    check("...recorded as a second machineinfo_replay attempt",
+          replay is not None and (replay.detail or {}).get("count") == 2)
+    check("...and mints nothing", await ScepChallenge.filter(serial="VER-BODY").count() == 1)
+
+    body_second = _synthetic_apple_cms_der("VER-BODY", anchor_path, udid="00008112-000A1B2C3D4E5F60")
+    dep_verify._anchors.cache_clear()
+    check("a second, distinct verified MachineInfo for the same serial gets a profile",
+          await ade_body_status(body_second) == 200)
+    check("...and mints its own challenge", await ScepChallenge.filter(serial="VER-BODY").count() == 2)
+
+    # A failed mint records nothing, so the device can retry with the same MachineInfo.
+    await Device.create(tenant=tenant, udid=None, serial_number="VER-RETRY", device_model="Mac", os_version="",
+                        enrollment_state="pending", dep_server_id=server.id, attributes={}, groups=[], tags=[])
+    body_retry = _synthetic_apple_cms_der("VER-RETRY", anchor_path, udid="00008112-000A1B2C3D4E5F61")
+    dep_verify._anchors.cache_clear()
+    real_issue = enroll_svc.issue_profile
+
+    async def failing_issue(*args, **kwargs):
+        raise RuntimeError("step-ca down")
+
+    enroll_svc.issue_profile = failing_issue
+    try:
+        await dep_api.ade_enroll("default", good, FakeReq({}, body=body_retry))
+        retry_first = 200
+    except RuntimeError:
+        retry_first = "error"
+    finally:
+        enroll_svc.issue_profile = real_issue
+    check("a mint that fails raises its own error", retry_first == "error")
+    check("...and the same MachineInfo is accepted on retry", await ade_body_status(body_retry) == 200)
+    check("...once", await ade_body_status(body_retry) == 403)
+    retry_digest = next(reversed(dep_api._SEEN_MACHINE_INFO))
+    dep_api._SEEN_MACHINE_INFO[retry_digest] -= enroll_svc.enrollment_links.ADE_LIFETIME.total_seconds() + 1
+    check("a recorded MachineInfo older than ADE_LIFETIME is accepted again", await ade_body_status(body_retry) == 200)
+
+    body_no_udid = _synthetic_apple_cms_der("VER-BODY", anchor_path)
+    dep_verify._anchors.cache_clear()
+    check("a verified MachineInfo without a UDID is refused", await ade_body_status(body_no_udid) == 403)
+    check("...and mints nothing", await ScepChallenge.filter(serial="VER-BODY").count() == 2)
 
     body_bad = _synthetic_apple_cms_der("VER-BODYBAD", anchor_path, tamper=True)
     dep_verify._anchors.cache_clear()
@@ -673,7 +793,7 @@ async def main():
         check("enforced: tampered POST body -> 403", ex.status_code == 403)
 
     # Failed body verification is not retried against the header.
-    hdr_ok2 = _synthetic_apple_cms("VER-ENF", anchor_path)
+    hdr_ok2 = _synthetic_apple_cms("VER-ENF", anchor_path, udid="00008112-000A1B2C3D4E5F62")
     dep_verify._anchors.cache_clear()
     try:
         await dep_api.ade_enroll(
@@ -715,8 +835,9 @@ async def main():
     check(f"...after reading no more than the cap ({chunked.streamed} bytes)",
           0 < chunked.streamed <= dep_api._MACHINE_INFO_MAX_BYTES + FakeReq.CHUNK
           and chunked.streamed < len(huge))
-    os.environ.pop("DEP_ADE_REQUIRE_APPLE_SIGNATURE", None)
+    os.environ["DEP_ADE_REQUIRE_APPLE_SIGNATURE"] = "false"
     os.environ.pop("DEP_APPLE_ANCHOR_CERTS", None)
+    os.environ.pop("DEP_APPLE_DEVICE_CA_NAMES", None)
     dep_verify._anchors.cache_clear()
 
     # Serial sanitization: reject control chars and oversized values.
@@ -727,6 +848,10 @@ async def main():
           dep_api._clean_serial("A" * (dep_api._SERIAL_MAX + 1)) == "")
     check("an ordinary serial still passes, trimmed",
           dep_api._clean_serial("  C02X1234ABCD  ") == "C02X1234ABCD")
+    check("a UDID of non-ASCII digits is not usable", dep_api._clean_udid("\u0661\u0662\u0663\u0664") == "")
+    check("...nor one with a comma", dep_api._clean_udid("00008112-000A,1B2C") == "")
+    check("...while an ordinary one passes, trimmed",
+          dep_api._clean_udid(" 00008112-000A1B2C3D4E5F60 ") == "00008112-000A1B2C3D4E5F60")
 
     # Enforcement off: unverified request must not downgrade a prior verified signature.
     await Device.create(tenant=tenant, udid=None, serial_number="ADE-KEEP",
@@ -740,6 +865,61 @@ async def main():
     kept_ade = await Device.get(tenant=tenant, serial_number="ADE-KEEP")
     check("an unverified request cannot downgrade a recorded verification",
           (kept_ade.attributes or {}).get("ade_signature_verified") is True)
+
+    # Signature checking off: a profile only for a serial DEP lists in this tenant that is not enrolled, or that
+    # carries a live re-enrollment allowance, and at most one per serial per minute.
+    from datetime import timedelta as _td
+    from controller.auth.ratelimit import SlidingWindowLimiter
+
+    def unsigned_for(serial):
+        return FakeReq({}, body=b"cms-prefix" + _pl_dumps({"SERIAL": serial, "PRODUCT": "iPhone15,2"})
+                       + b"cms-suffix")
+
+    async def ade_status(serial):
+        try:
+            await dep_api.ade_enroll("default", good, unsigned_for(serial))
+            return 200
+        except HTTPException as ex:
+            return ex.status_code if ex.detail == "Device signature verification failed" else ex.detail
+
+    dep_api._unverified_serial_limiter = SlidingWindowLimiter(max_attempts=1, window_seconds=60)
+    dep_api._unverified_address_limiter = SlidingWindowLimiter(max_attempts=10, window_seconds=60)
+    check("unsigned: a serial no DEP sync listed is refused", await ade_status("NOT-IN-DEP") == 403)
+    await Device.create(tenant=tenant, udid=None, serial_number="NO-DEP", device_model="iPhone15,2",
+                        os_version="", enrollment_state="pending", attributes={}, groups=[], tags=[])
+    check("unsigned: a serial with a row but no DEP server is refused", await ade_status("NO-DEP") == 403)
+    enrolled_ade = await Device.create(
+        tenant=tenant, udid="UDID-ADE-ENR", serial_number="ADE-ENR", device_model="iPhone15,2", os_version="17.5",
+        enrollment_state="enrolled", dep_server_id=server.id, attributes={}, groups=[], tags=[])
+    check("unsigned: an enrolled DEP serial is refused", await ade_status("ADE-ENR") == 403)
+    enrolled_ade.reenrollment_allowed_until = utcnow() - _td(minutes=1)
+    await enrolled_ade.save(update_fields=["reenrollment_allowed_until"])
+    check("unsigned: ...and so is one whose re-enrollment allowance has lapsed", await ade_status("ADE-ENR") == 403)
+    enrolled_ade.reenrollment_allowed_until = utcnow() + _td(hours=1)
+    await enrolled_ade.save(update_fields=["reenrollment_allowed_until"])
+    check("unsigned: an enrolled DEP serial with a live allowance gets a profile", await ade_status("ADE-ENR") == 200)
+    check("unsigned: a second profile for that serial within the minute is refused",
+          await ade_status("ADE-ENR") == 403)
+    check("...and only one challenge was minted for it", await ScepChallenge.filter(serial="ADE-ENR").count() == 1)
+    await Device.create(tenant=tenant, udid=None, serial_number="ADE-RATE1", device_model="iPhone15,2",
+                        os_version="", enrollment_state="pending", dep_server_id=server.id, attributes={},
+                        groups=[], tags=[])
+    dep_api._unverified_address_limiter = SlidingWindowLimiter(max_attempts=1, window_seconds=60)
+    check("unsigned: the first request from an address is served", await ade_status("ADE-RATE1") == 200)
+    refusals = []
+    real_refusal = enroll_svc.log_token_refusal
+    enroll_svc.log_token_refusal = lambda endpoint, tenant_id, reason, remote=None: refusals.append(reason)
+    try:
+        keep_status = await ade_status("ADE-KEEP")
+    finally:
+        enroll_svc.log_token_refusal = real_refusal
+    check("unsigned: past the per-address limit even an eligible serial is refused", keep_status == 403)
+    check(f"...for the address limit ({refusals})",
+          len(refusals) == 1 and "too many unverified requests from this address" in refusals[0])
+    dep_api._unverified_address_limiter = SlidingWindowLimiter(max_attempts=1, window_seconds=60)
+    check("...and a fresh address limit serves it", await ade_status("ADE-KEEP") == 200)
+    dep_api._unverified_serial_limiter = SlidingWindowLimiter(max_attempts=1, window_seconds=60)
+    dep_api._unverified_address_limiter = SlidingWindowLimiter(max_attempts=10, window_seconds=60)
 
     # 7d) the sync device upsert is one query per SYNC, not per record
     print("7d) first-full-sync upsert reads devices once, not once per record")
@@ -934,7 +1114,7 @@ async def main():
     fake.error_queue = []
 
     # 7f) per-serial assignment results are recorded, not discarded
-    print("7f) FAILED / NOT_ACCESSIBLE / THROTTLED results land on the device row")
+    print("7f) FAILED / NOT_ACCESSIBLE / THROTTLED results are recorded on the device row")
     # Apple answers per serial, and with X-Server-Protocol-Version 9+ a throttled device reports THROTTLED; version 10+
     # adds retry_after_seconds. Only SUCCESS may stamp the profile onto the row.
     res_serials = ["RES-OK", "RES-FAIL", "RES-GONE", "RES-SLOW"]
@@ -1030,7 +1210,7 @@ async def main():
     check("...the cursor is kept, not discarded", server.sync_cursor == "KEEP-ME")
     check("...and no full refetch of the fleet is triggered",
           ("POST", "/server/devices") not in exh_calls)
-    # cursor_fetched_at dates the cursor, not the sync tick (so 7-day age check can fire).
+    # cursor_fetched_at dates the cursor, not the sync tick (so the 7-day age check applies).
     check("...and a tick that got no new cursor does not restamp its age",
           abs((server.cursor_fetched_at - stamped_at).total_seconds()) < 1)
 

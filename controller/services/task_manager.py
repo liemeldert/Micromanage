@@ -5,6 +5,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Dict, Optional
 
 from controller.models.tenant import Alert, AuditLog, Device, FlowRun, Task, Tenant
+from controller.services import identity
 
 logger = logging.getLogger(__name__)
 
@@ -63,11 +64,13 @@ class TaskManager:
 
         except asyncio.CancelledError:
             await task.update_progress(task.progress, 'cancelled')
+            await identity.fail_renewal_tasks([task.id])
             raise
         except Exception as e:
             logger.error(f"Task {task_id} failed: {e}")
             task.error = str(e)
             await task.update_progress(task.progress, 'failed')
+            await identity.fail_renewal_tasks([task.id])
         finally:
             self.running_tasks.pop(task_id, None)
 
@@ -158,12 +161,16 @@ async def warn_on_audit_log_size(threshold: int = None) -> int:
 
 
 async def run_retention() -> Dict[str, int]:
-    """Run one maintenance pass: delete old tasks, alerts, flow runs; warn on audit log size. Each step is independent."""
-    out = {"tasks": 0, "alerts": 0, "flow_runs": 0, "audit_log": 0}
+    """Run one maintenance pass: delete old tasks, alerts, flow runs, enrollment links and SCEP challenges; warn on
+    audit log size. Each step is independent."""
+    from controller.services import enrollment_links
+
+    out = {"tasks": 0, "alerts": 0, "flow_runs": 0, "audit_log": 0, "enrollment_links": 0}
     for key, fn in (("tasks", TaskManager().cleanup_old_tasks),
                     ("alerts", cleanup_resolved_alerts),
                     ("flow_runs", cleanup_old_flow_runs),
-                    ("audit_log", cleanup_old_audit_log)):
+                    ("audit_log", cleanup_old_audit_log),
+                    ("enrollment_links", enrollment_links.sweep_expired)):
         try:
             out[key] = await fn() or 0
         except Exception:

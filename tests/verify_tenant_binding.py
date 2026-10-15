@@ -11,11 +11,8 @@ from urllib.parse import parse_qs, urlparse
 os.environ["JWT_SECRET"] = "test-secret-for-tenant-binding"
 os.environ["MDM_SERVER_URL"] = "https://mdm.example.test/mdm"
 os.environ["MDM_TOPIC"] = "com.apple.mgmt.External.test"
-os.environ["SCEP_CHALLENGE"] = "test-challenge"
 os.environ["PUBLIC_API_URL"] = "https://mdm.example.test"
-os.environ.pop("MDM_ALLOW_UNSIGNED_TENANT_CLAIM", None)
 os.environ.pop("MDM_ENROLL_REQUIRE_KNOWN_SERIAL", None)
-os.environ.pop("MDM_REQUIRE_SIGNED_TENANT_CLAIM", None)
 # Popped so a shell that already has this set does not turn the "unset" checks into no-ops.
 os.environ.pop("MDM_EMBED_CA_CERT_PATH", None)
 
@@ -27,15 +24,21 @@ from controller.models.tenant import (  # noqa: E402
 )
 from controller.services import enrollment as enroll  # noqa: E402
 from controller.services.webhook_handler import (  # noqa: E402
-    WebhookHandler, _resolve_tenant, _first_param, _log_attempt,
+    WebhookHandler, _resolve_tenant, _first_param, log_attempt,
 )
-from tests._verify_harness import make_check
+from tests._verify_harness import install_identity_stub, make_check
 
 PASS, FAIL = [], []
+STUB = None
 SECRET = os.environ["JWT_SECRET"]
 
 
 check = make_check(FAIL, PASS)
+
+
+# Builder arguments for the profile tests; nothing here validates them against a challenge row.
+CHALLENGE = "test-challenge"
+SUBJECT_CN = "mm 00000000-0000-0000-0000-000000000000"
 
 
 class StubTenant:
@@ -114,7 +117,7 @@ def test_tokens():
 
 def test_profile_shape():
     print("2) The generated profile ships a signed, encoded tenant claim")
-    profile = enroll.build_enrollment_profile(StubTenant("alpha", "Alpha Inc"))
+    profile = enroll.build_enrollment_profile(StubTenant("alpha", "Alpha Inc"), CHALLENGE, SUBJECT_CN)
     url = _mdm_payload(profile)["ServerURL"]
     q = parse_qs(urlparse(url).query)
     check("ServerURL carries a tenant", q.get("tenant") == ["alpha"])
@@ -167,7 +170,7 @@ def test_embedded_ca_payload(unset_profile):
             fh.write(pem)
         try:
             os.environ["MDM_EMBED_CA_CERT_PATH"] = pem_path
-            p = enroll.build_enrollment_profile(StubTenant("alpha", "Alpha Inc"))
+            p = enroll.build_enrollment_profile(StubTenant("alpha", "Alpha Inc"), CHALLENGE, SUBJECT_CN)
             roots = [x for x in p["PayloadContent"]
                      if x["PayloadType"] == "com.apple.security.root"]
             check("set: exactly one com.apple.security.root payload is added",
@@ -180,7 +183,7 @@ def test_embedded_ca_payload(unset_profile):
                   len(roots) == 1 and isinstance(roots[0].get("PayloadContent"), bytes))
             # The dict is not what installs on a device; the plist bytes are.
             shipped = plistlib.loads(
-                enroll.build_enrollment_mobileconfig(StubTenant("alpha", "Alpha Inc")))
+                enroll.build_enrollment_mobileconfig(StubTenant("alpha", "Alpha Inc"), CHALLENGE, SUBJECT_CN))
             check("...and the DER survives into the shipped .mobileconfig",
                   [x["PayloadContent"] for x in shipped["PayloadContent"]
                    if x["PayloadType"] == "com.apple.security.root"] == [der])
@@ -190,7 +193,7 @@ def test_embedded_ca_payload(unset_profile):
             os.environ["MDM_EMBED_CA_CERT_PATH"] = os.path.join(tmp, "absent.crt")
             raised, p = None, None
             try:
-                p = enroll.build_enrollment_profile(StubTenant("alpha", "Alpha Inc"))
+                p = enroll.build_enrollment_profile(StubTenant("alpha", "Alpha Inc"), CHALLENGE, SUBJECT_CN)
             except Exception as exc:  # noqa: BLE001 - the point is that none escapes
                 raised = exc
             check("a path that does not exist raises nothing", raised is None)
@@ -204,7 +207,7 @@ def test_embedded_ca_payload(unset_profile):
             os.environ["MDM_EMBED_CA_CERT_PATH"] = junk_path
             raised, p = None, None
             try:
-                p = enroll.build_enrollment_profile(StubTenant("alpha", "Alpha Inc"))
+                p = enroll.build_enrollment_profile(StubTenant("alpha", "Alpha Inc"), CHALLENGE, SUBJECT_CN)
             except Exception as exc:  # noqa: BLE001
                 raised = exc
             check("a file with no certificate in it raises nothing", raised is None)
@@ -214,7 +217,7 @@ def test_embedded_ca_payload(unset_profile):
             os.environ.pop("MDM_EMBED_CA_CERT_PATH", None)
 
     check("unset again: later profiles are back to the SCEP + MDM pair",
-          _payload_types(enroll.build_enrollment_profile(StubTenant("alpha")))
+          _payload_types(enroll.build_enrollment_profile(StubTenant("alpha"), CHALLENGE, SUBJECT_CN))
           == _BASE_PAYLOADS)
 
 
@@ -254,25 +257,6 @@ async def test_resolve_multi_tenant():
     t, why = await _resolve_tenant({"tenant": "never-existed"})
     check("an unsigned claim for a tenant that never existed is not called an attack",
           t is None and why == "unknown_tenant")
-
-
-async def test_migration_switch():
-    print("4) MDM_ALLOW_UNSIGNED_TENANT_CLAIM reopens the old behaviour, bounded")
-    os.environ["MDM_ALLOW_UNSIGNED_TENANT_CLAIM"] = "true"
-    try:
-        t, why = await _resolve_tenant({"tenant": "b"})
-        check("legacy mode honours an unsigned claim",
-              t is not None and t.id == "b" and why == "legacy_unsigned")
-        t, why = await _resolve_tenant({})
-        check("legacy mode restores the 'default' fallback",
-              t is not None and t.id == "default" and why == "legacy_unsigned")
-        t, why = await _resolve_tenant({"tenant": "a", "tsig": enroll.tenant_url_token("a")})
-        check("legacy mode still prefers a valid signature",
-              t is not None and t.id == "a" and why == "signed")
-    finally:
-        os.environ.pop("MDM_ALLOW_UNSIGNED_TENANT_CLAIM", None)
-    t, why = await _resolve_tenant({"tenant": "b"})
-    check("unsetting the switch re-closes the hole", t is None and why == "bad_signature")
 
 
 async def test_resolve_sole_tenant():
@@ -345,7 +329,7 @@ async def test_existing_fleet_untouched():
 
     This proves no security property (test 10 covers that).
     """
-    print("7) Already-enrolled devices are untouched (the load-bearing claim)")
+    print("7) Already-enrolled devices are untouched (the main claim)")
     handler = WebhookHandler()
     tenant_a = await Tenant.get(id="a")
     await Device.create(tenant=tenant_a, udid="UDID-LIVE", serial_number="SN-LIVE",
@@ -687,12 +671,12 @@ async def test_attempt_log_is_tenant_scoped():
     b = await Tenant.get(id="b")
 
     # Dedupe keyed on (tenant, udid, outcome); global lookup would let b overwrite a's records.
-    await _log_attempt("no_serial", tenant=a, udid="UDID-SHARED",
-                       serial_number="SN-A", topic="mdm.Authenticate",
-                       detail={"owner": "a"})
-    await _log_attempt("no_serial", tenant=b, udid="UDID-SHARED",
-                       serial_number="SN-B", topic="mdm.TokenUpdate",
-                       detail={"owner": "b"})
+    await log_attempt("no_serial", tenant=a, udid="UDID-SHARED",
+                      serial_number="SN-A", topic="mdm.Authenticate",
+                      detail={"owner": "a"})
+    await log_attempt("no_serial", tenant=b, udid="UDID-SHARED",
+                      serial_number="SN-B", topic="mdm.TokenUpdate",
+                      detail={"owner": "b"})
     rows = await EnrollmentAttempt.filter(udid="UDID-SHARED", outcome="no_serial").all()
     check("the same (udid, outcome) in two tenants keeps two rows", len(rows) == 2)
     row_a = await EnrollmentAttempt.filter(
@@ -709,8 +693,8 @@ async def test_attempt_log_is_tenant_scoped():
           row_a.detail.get("count") == 1 and row_b.detail.get("count") == 1)
 
     # Dedupe still works within one tenant, which is what bounds the table.
-    await _log_attempt("no_serial", tenant=a, udid="UDID-SHARED",
-                       serial_number="SN-A", topic="mdm.Connect", detail={"owner": "a"})
+    await log_attempt("no_serial", tenant=a, udid="UDID-SHARED",
+                      serial_number="SN-A", topic="mdm.Connect", detail={"owner": "a"})
     rows = await EnrollmentAttempt.filter(udid="UDID-SHARED", outcome="no_serial").all()
     row_a = await EnrollmentAttempt.filter(
         udid="UDID-SHARED", outcome="no_serial", tenant_id="a").first()
@@ -718,8 +702,8 @@ async def test_attempt_log_is_tenant_scoped():
           len(rows) == 2 and row_a.detail.get("count") == 2)
 
     # Tenant-less rows dedupe among themselves, never merge into a tenant's row.
-    await _log_attempt("no_tenant", tenant=None, udid="UDID-SHARED", detail={"owner": None})
-    await _log_attempt("no_tenant", tenant=None, udid="UDID-SHARED", detail={"owner": None})
+    await log_attempt("no_tenant", tenant=None, udid="UDID-SHARED", detail={"owner": None})
+    await log_attempt("no_tenant", tenant=None, udid="UDID-SHARED", detail={"owner": None})
     orphans = await EnrollmentAttempt.filter(
         udid="UDID-SHARED", outcome="no_tenant", tenant_id__isnull=True).all()
     check("unscoped rows dedupe among themselves",
@@ -750,99 +734,53 @@ async def test_tsig_is_a_bearer_token():
           not enroll.verify_tenant_url_token("b", sig_a))
 
 
-async def test_require_signed_tenant_claim():
-    print("16) MDM_REQUIRE_SIGNED_TENANT_CLAIM: opt-in refusal of unsigned known-udid check-ins")
+async def test_challenge_tenant():
+    print("16) A challenge certificate takes its tenant from the challenge row")
+    from datetime import datetime, timedelta, timezone
+    from hashlib import sha256
+
+    from controller.models.tenant import ScepChallenge
+    from controller.services import enrollment_links
+    from controller.services.nanomdm_store import Identity
+
     handler = WebhookHandler()
     await _fresh_fleet()
-    sig_a = enroll.tenant_url_token("a")
+    beta = await Tenant.get(id="b")
 
-    # Flag off (default): unsigned known-udid check-ins work (backward compat).
-    before = await EnrollmentAttempt.all().count()
+    async def consumed(udid):
+        row, _, cn = await enrollment_links.mint_challenge(
+            beta, serial=f"SN-{udid}", lifetime=enrollment_links.ADE_LIFETIME)
+        spki = sha256(f"spki:{row.id}".encode()).hexdigest()
+        await ScepChallenge.filter(id=row.id).update(consumed_at=datetime.now(timezone.utc), spki_hash=spki)
+        STUB.set_identity(udid, Identity(cert_sha256=sha256(f"cert:{row.id}".encode()).hexdigest(),
+                                         spki_sha256=spki, subject_cn=cn,
+                                         not_after=datetime.now(timezone.utc) + timedelta(days=365)))
+        return row
+
+    # A valid signed claim for tenant a does not move a device whose challenge tenant b minted.
+    await consumed("UDID-ROW-B")
     dev = await handler._upsert_device(
-        "UDID-TARGET", {}, {"SerialNumber": "SN-TARGET", "OSVersion": "16.0"},
-        topic="mdm.Connect")
-    row = await Device.get_or_none(udid="UDID-TARGET")
-    check("flag off: an unsigned known-udid check-in is still accepted", dev is not None)
-    check("flag off: ...and its facts are updated as before", row.os_version == "16.0")
-    check("flag off: no enrollment attempt is logged",
-          await EnrollmentAttempt.all().count() == before)
+        "UDID-ROW-B", {"tenant": "a", "tsig": enroll.tenant_url_token("a")},
+        {"SerialNumber": "SN-UDID-ROW-B"}, topic="mdm.Authenticate")
+    check("the device is created in the row's tenant, not the claimed one",
+          dev is not None and dev.tenant_id == "b")
 
-    os.environ["MDM_REQUIRE_SIGNED_TENANT_CLAIM"] = "true"
-    try:
-        # Flag on, no claim: refused before any attacker-supplied field reaches the row.
-        dev = await handler._upsert_device(
-            "UDID-TARGET", {},
-            {"SerialNumber": "SN-ATTACKER", "DeviceName": "renamed",
-             "ProductName": "MacAttack1,1", "OSVersion": "1.0"},
-            topic="mdm.Connect")
-        row = await Device.get_or_none(udid="UDID-TARGET")
-        check("flag on: an unsigned known-udid check-in is refused", dev is None)
-        check("flag on: the row's serial is NOT mutated", row.serial_number == "SN-TARGET")
-        check("flag on: the row's hostname is NOT mutated", row.hostname == "target-mac")
-        check("flag on: the row's model is NOT mutated", row.device_model == "Mac14,2")
-        check("flag on: the row's os_version is NOT mutated", row.os_version == "16.0")
-
-        attempts = await EnrollmentAttempt.filter(outcome="unsigned_tenant_claim").all()
-        check("flag on: exactly one unsigned_tenant_claim attempt is logged",
-              len(attempts) == 1)
-        if attempts:
-            a = attempts[0]
-            check("...scoped to the row's OWN tenant, a database fact", a.tenant_id == "a")
-            check("...distinct outcome from the forged-signature case",
-                  a.outcome == "unsigned_tenant_claim" != "bad_tenant_claim")
-            check("...reason says 'no claim', not 'forged claim'",
-                  a.detail.get("reason") == "no_verified_claim")
-            check("...records the attacker-reported serial", a.detail.get("reported_serial") == "SN-ATTACKER")
-
-        # Unsigned claim naming own tenant still refused; id in detail only, never in FK.
-        dev = await handler._upsert_device(
-            "UDID-TARGET", {"tenant": "a"}, {"SerialNumber": "SN-TARGET"},
-            topic="mdm.Connect")
-        check("flag on: unsigned claim naming the device's own tenant is still refused",
-              dev is None)
-        attempts = await EnrollmentAttempt.filter(outcome="unsigned_tenant_claim").all()
-        check("...dedupes to the same row rather than flooding the table",
-              len(attempts) == 1 and attempts[0].detail.get("count") == 2)
-        check("...the unverified id goes into detail, never into the tenant FK",
-              attempts[0].detail.get("requested_tenant") == "a" and attempts[0].tenant_id == "a")
-
-        # Flag on, signed: correctly re-enrolled device unaffected.
-        dev = await handler._upsert_device(
-            "UDID-TARGET", {"tenant": "a", "tsig": sig_a},
-            {"SerialNumber": "SN-TARGET", "OSVersion": "16.1"}, topic="mdm.Connect")
-        row = await Device.get_or_none(udid="UDID-TARGET")
-        check("flag on: a signed check-in is accepted", dev is not None)
-        check("...and updates facts normally", row.os_version == "16.1")
-        check("...without adding another attempt row",
-              len(await EnrollmentAttempt.filter(outcome="unsigned_tenant_claim").all()) == 1)
-
-        # Both flags set: contradiction, but ALLOW wins (see webhook_handler).
-        os.environ["MDM_ALLOW_UNSIGNED_TENANT_CLAIM"] = "true"
-        try:
-            before_count = attempts[0].detail.get("count") if attempts else 0
-            dev = await handler._upsert_device(
-                "UDID-TARGET", {}, {"SerialNumber": "SN-TARGET", "OSVersion": "16.2"},
-                topic="mdm.Connect")
-            row = await Device.get_or_none(udid="UDID-TARGET")
-            check("both flags set: MDM_ALLOW_UNSIGNED_TENANT_CLAIM wins, check-in accepted",
-                  dev is not None)
-            check("...and facts are updated normally", row.os_version == "16.2")
-            after = await EnrollmentAttempt.filter(outcome="unsigned_tenant_claim").all()
-            after_count = after[0].detail.get("count") if after else 0
-            check("...no new unsigned_tenant_claim attempt is logged",
-                  after_count == before_count)
-        finally:
-            os.environ.pop("MDM_ALLOW_UNSIGNED_TENANT_CLAIM", None)
-    finally:
-        os.environ.pop("MDM_REQUIRE_SIGNED_TENANT_CLAIM", None)
-
-    # Flag restored off: unsigned check-ins resume working, unaffected by anything above.
+    # A challenge from tenant b cannot bind onto tenant a's row.
+    before = "ab" * 32
+    await Device.filter(udid="UDID-TARGET").update(identity_sha256=before)
+    challenge = await consumed("UDID-TARGET")
+    refused_sha = STUB.overrides["UDID-TARGET"].cert_sha256
     dev = await handler._upsert_device(
-        "UDID-TARGET", {}, {"SerialNumber": "SN-TARGET", "OSVersion": "16.3"},
-        topic="mdm.Connect")
-    row = await Device.get_or_none(udid="UDID-TARGET")
-    check("flag restored off: unsigned check-ins work again",
-          dev is not None and row.os_version == "16.3")
+        "UDID-TARGET", {}, {"SerialNumber": "SN-UDID-TARGET"}, topic="mdm.Authenticate")
+    row = await Device.get(udid="UDID-TARGET")
+    await challenge.refresh_from_db()
+    check("a challenge from another tenant is refused on a known row", dev is None and row.tenant_id == "a")
+    check("...its certificate is parked", ("park", "UDID-TARGET", refused_sha) in STUB.calls)
+    check("...the challenge row stays unbound and the device keeps its identity",
+          challenge.bound_udid is None and challenge.cert_sha256 is None and row.identity_sha256 == before)
+    attempts = await EnrollmentAttempt.filter(udid="UDID-TARGET", outcome="bad_identity").all()
+    check("...and recorded as a tenant mismatch",
+          len(attempts) == 1 and attempts[0].detail.get("reason") == "tenant_mismatch")
 
 
 async def main():
@@ -852,9 +790,11 @@ async def main():
     await Tortoise.init(db_url="sqlite://:memory:",
                         modules={"models": ["controller.models.tenant"]})
     await Tortoise.generate_schemas()
+    # Every udid without an override holds a legacy certificate that is in the snapshot.
+    global STUB
+    STUB = install_identity_stub()
 
     await test_resolve_multi_tenant()
-    await test_migration_switch()
     await test_resolve_sole_tenant()
     await test_upsert_end_to_end()
     await test_existing_fleet_untouched()
@@ -866,7 +806,7 @@ async def main():
     await test_inactive_tenant()
     await test_attempt_log_is_tenant_scoped()
     await test_tsig_is_a_bearer_token()
-    await test_require_signed_tenant_claim()
+    await test_challenge_tenant()
 
     await Tortoise.close_connections()
     print(f"\nRESULT: {'PASS' if not FAIL else 'FAIL'} ({len(PASS)} passed, {len(FAIL)} failed)")

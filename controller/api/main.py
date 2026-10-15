@@ -2,6 +2,7 @@
 import asyncio
 import logging
 import os
+import re
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -69,12 +70,37 @@ app.add_middleware(
 )
 
 
+# The enrollment link token and the ADE URL token are credentials carried in the request path.
+_ENROLL_PATH_RE = re.compile(r"^(/api/v1/enroll/)[^/?]+|^(/api/v1/dep/enroll/[^/?]+/)[^/?]+")
+
+
+def _redact_enroll_path(path: str) -> str:
+    return _ENROLL_PATH_RE.sub(lambda m: (m.group(1) or m.group(2)) + "[redacted]", path)
+
+
+class EnrollPathFilter(logging.Filter):
+    """Replaces the credential segments of enrollment paths in uvicorn access log records."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        args = record.args
+        if isinstance(args, tuple) and len(args) >= 3 and isinstance(args[2], str):
+            record.args = args[:2] + (_redact_enroll_path(args[2]),) + args[3:]
+        return True
+
+
+def install_access_log_filter() -> None:
+    access = logging.getLogger("uvicorn.access")
+    if not any(isinstance(f, EnrollPathFilter) for f in access.filters):
+        access.addFilter(EnrollPathFilter())
+
+
 @app.on_event("startup")
 async def _readiness_boot_check():
     """Log readiness warnings, and stop the process on a fatal one.
 
     Uses os._exit rather than raising; an unset DATABASE_URL is fatal too, since register_tortoise runs soon after.
     """
+    install_access_log_filter()
     readiness.log_boot_warnings()
     fatal = readiness.boot_error() or database_url_error()
     if fatal:

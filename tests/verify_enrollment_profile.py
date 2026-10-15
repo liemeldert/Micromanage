@@ -7,30 +7,36 @@ import os
 import plistlib
 import subprocess
 import tempfile
+import uuid
 from urllib.parse import parse_qs, urlparse
 
 os.environ["JWT_SECRET"] = "test-secret-for-enrollment-profile"
 os.environ["MDM_TOPIC"] = "com.apple.mgmt.External.11111111-2222-3333-4444-555555555555"
 os.environ["MDM_SERVER_URL"] = "https://mdm.example.test/mdm"
 os.environ["SCEP_URL"] = "https://mdm.example.test/scep/mdm_device_scep"
-os.environ["SCEP_CHALLENGE"] = "challenge-that-must-not-leak"
 os.environ["PUBLIC_API_URL"] = "https://mdm.example.test"
 os.environ["MDM_HOSTNAME"] = "mdm.example.test"
 os.environ.pop("MDM_EMBED_CA_CERT_PATH", None)
+# Enrollment readiness needs a webhook secret on disk.
+_SECRET_DIR = tempfile.mkdtemp()
+os.environ["SCEP_WEBHOOK_SECRET_FILE"] = os.path.join(_SECRET_DIR, "scep_webhook_secret")
+with open(os.environ["SCEP_WEBHOOK_SECRET_FILE"], "w") as _fh:
+    _fh.write("dmVyaWZ5LXNjZXAtd2ViaG9vay1zZWNyZXQ=")
 
 from cryptography import x509  # noqa: E402
 from cryptography.hazmat.primitives import hashes, serialization  # noqa: E402
 from cryptography.hazmat.primitives.asymmetric import rsa  # noqa: E402
 from cryptography.x509.oid import NameOID  # noqa: E402
 
-from controller.services import enrollment as enroll, readiness  # noqa: E402
+from controller.services import enrollment as enroll, identity, readiness  # noqa: E402
 from tests._verify_harness import make_check
 
 PASS, FAIL = [], []
 
 TOPIC = os.environ["MDM_TOPIC"]
 SCEP_URL = os.environ["SCEP_URL"]
-CHALLENGE = os.environ["SCEP_CHALLENGE"]
+CHALLENGE = "challenge-under-test"
+SUBJECT = f"mm {uuid.uuid4()}"
 
 
 check = make_check(FAIL, PASS)
@@ -56,7 +62,7 @@ def payload_types(profile):
 
 def shipped(tenant):
     """The profile as a device receives it: serialized, then parsed back."""
-    return plistlib.loads(enroll.build_enrollment_mobileconfig(tenant))
+    return plistlib.loads(enroll.build_enrollment_mobileconfig(tenant, CHALLENGE, SUBJECT))
 
 
 def self_signed_ca(path):
@@ -86,7 +92,7 @@ def self_signed_ca(path):
 def test_top_level():
     print("1) The .mobileconfig parses and the outer payload is a Configuration")
     tenant = StubTenant("acme", "Acme Inc")
-    raw = enroll.build_enrollment_mobileconfig(tenant)
+    raw = enroll.build_enrollment_mobileconfig(tenant, CHALLENGE, SUBJECT)
     check("build_enrollment_mobileconfig returns bytes", isinstance(raw, bytes))
 
     parsed = None
@@ -127,16 +133,14 @@ def test_scep_payload():
     check("the SCEP URL is the configured one", inner.get("URL") == SCEP_URL)
     check("the SCEP name defaults to the bundled provisioner",
           inner.get("Name") == "mdm_device_scep")
-    check("the challenge is the configured one", inner.get("Challenge") == CHALLENGE)
+    check("the challenge is the one passed in", inner.get("Challenge") == CHALLENGE)
     subject = inner.get("Subject")
-    check("the subject names the tenant's device",
-          isinstance(subject, list) and subject[0][0][0] == "CN"
-          and subject[0][0][1].startswith("acme MDM Device "))
+    check("the subject CN is the one passed in",
+          isinstance(subject, list) and subject == [[["CN", SUBJECT]]])
 
     other_scep = payload(shipped(StubTenant("acme", "Acme Inc")), "com.apple.security.scep")
-    other_subject = (other_scep.get("PayloadContent") or {}).get("Subject") if other_scep else None
-    check("successive profiles get distinct subjects",
-          other_subject is not None and other_subject != subject)
+    check("successive profiles get distinct SCEP payload UUIDs",
+          other_scep is not None and other_scep.get("PayloadUUID") != scep.get("PayloadUUID"))
     check("the key is a 2048-bit RSA key",
           inner.get("Keysize") == 2048 and inner.get("Key Type") == "RSA")
     # 5 = digitalSignature | keyEncipherment. step-ca encrypts the issued certificate back to the device key, so a
@@ -173,6 +177,14 @@ def test_mdm_payload():
           "com.apple.mdm.bootstraptoken" in (mdm.get("ServerCapabilities") or []))
     check("the identity certificate is the SCEP payload's",
           mdm.get("IdentityCertificateUUID") == scep.get("PayloadUUID"))
+    expected_uuid = str(uuid.uuid5(uuid.NAMESPACE_URL, "micromanage-mdm-acme")).upper()
+    check("the MDM PayloadUUID is derived from the tenant id", mdm.get("PayloadUUID") == expected_uuid)
+    again = payload(shipped(StubTenant("acme", "Acme Inc")), "com.apple.mdm")
+    check("...and is identical across builds, so a re-pushed profile updates the installed payload",
+          again is not None and again.get("PayloadUUID") == expected_uuid)
+    other_tenant = payload(shipped(StubTenant("other", "Other Inc")), "com.apple.mdm")
+    check("...and differs between tenants",
+          other_tenant is not None and other_tenant.get("PayloadUUID") != expected_uuid)
     check("all access rights are requested", mdm.get("AccessRights") == 8191)
     check("the device checks out when the profile is removed",
           mdm.get("CheckOutWhenRemoved") is True)
@@ -203,6 +215,16 @@ def test_embedded_ca(tmp):
               root.get("PayloadDisplayName") == "Acme Inc Certificate Authority")
         check("readiness holds nothing against a CA path that reads cleanly",
               enroll.embedded_ca_error() is None)
+        expected_root = str(uuid.uuid5(uuid.NAMESPACE_URL, "micromanage-root-acme")).upper()
+        check("its PayloadUUID is derived from the tenant id", root.get("PayloadUUID") == expected_root)
+        again = payload(shipped(StubTenant("acme", "Acme Inc")), "com.apple.security.root")
+        check("...and is identical across builds, so a re-pushed profile matches it by identifier and UUID",
+              again is not None and again.get("PayloadUUID") == expected_root
+              and again.get("PayloadIdentifier") == root.get("PayloadIdentifier"))
+        other_root = payload(shipped(StubTenant("other", "Other Inc")), "com.apple.security.root")
+        check("...and differs between tenants and from the MDM payload's",
+              other_root is not None and other_root.get("PayloadUUID") != expected_root
+              and payload(parsed, "com.apple.mdm").get("PayloadUUID") != expected_root)
     finally:
         os.environ.pop("MDM_EMBED_CA_CERT_PATH", None)
 
@@ -214,7 +236,7 @@ def test_challenge_is_not_repeated(tmp):
     os.environ["MDM_EMBED_CA_CERT_PATH"] = pem_path
     try:
         tenant = StubTenant("acme", "Acme Inc")
-        raw = enroll.build_enrollment_mobileconfig(tenant)
+        raw = enroll.build_enrollment_mobileconfig(tenant, CHALLENGE, SUBJECT)
         check("the challenge is in the shipped bytes exactly once",
               raw.count(CHALLENGE.encode()) == 1)
 
@@ -228,10 +250,6 @@ def test_challenge_is_not_repeated(tmp):
         outer_only = {k: v for k, v in parsed.items() if k != "PayloadContent"}
         check("it is not in the outer Configuration payload",
               CHALLENGE not in repr(outer_only))
-
-        # The download token belongs to the URL that fetches this file, not to the file itself.
-        check("the enrollment download token is not in the profile either",
-              enroll.enrollment_token("acme").encode() not in raw)
     finally:
         os.environ.pop("MDM_EMBED_CA_CERT_PATH", None)
 
@@ -289,7 +307,7 @@ def test_cms_signing():
 
     # 1. Unsigned fallback when unconfigured
     t_unsigned = StubTenant("t-unsigned", "Unsigned Tenant")
-    unsigned_bytes = enroll.build_enrollment_mobileconfig(t_unsigned)
+    unsigned_bytes = enroll.build_enrollment_mobileconfig(t_unsigned, CHALLENGE, SUBJECT)
     check("unsigned profile starts with xml header", unsigned_bytes.startswith(b"<?xml"))
     parsed_unsigned = plistlib.loads(unsigned_bytes)
     check("unsigned profile parses as plist", isinstance(parsed_unsigned, dict))
@@ -357,7 +375,7 @@ def test_cms_signing():
     t_signed.profile_signing_key_enc = encrypted_key
     t_signed.profile_signing_chain_pem = chain_pem
 
-    signed_bytes = enroll.build_enrollment_mobileconfig(t_signed)
+    signed_bytes = enroll.build_enrollment_mobileconfig(t_signed, CHALLENGE, SUBJECT)
     check("signed profile is not raw xml", not signed_bytes.startswith(b"<?xml"))
     check("signed profile starts with DER sequence byte", signed_bytes[0] == 0x30)
 
@@ -390,7 +408,7 @@ def test_cms_signing():
     moved.profile_signing_cert_pem = leaf_cert_pem
     moved.profile_signing_key_enc = encrypted_key
     check("a signing key copied to another tenant does not sign, and the profile is served unsigned",
-          enroll.build_enrollment_mobileconfig(moved).startswith(b"<?xml"))
+          enroll.build_enrollment_mobileconfig(moved, CHALLENGE, SUBJECT).startswith(b"<?xml"))
 
     print("8) Importing a signing certificate")
     import asyncio
@@ -514,12 +532,14 @@ def test_cms_signing():
     lapsed.profile_signing_key_enc = crypto_secrets.encrypt(leaf_key_pem, aad=profile_signing._key_binding("t-lapsed"))
     check("status flags an expired certificate", profile_signing.info(lapsed)["expired"] is True)
     check("an expired certificate is not used to sign, and the profile is served unsigned",
-          enroll.build_enrollment_mobileconfig(lapsed).startswith(b"<?xml"))
+          enroll.build_enrollment_mobileconfig(lapsed, CHALLENGE, SUBJECT).startswith(b"<?xml"))
     check("an imported certificate signs the profile",
-          enroll.build_enrollment_mobileconfig(imported)[0] == 0x30)
+          enroll.build_enrollment_mobileconfig(imported, CHALLENGE, SUBJECT)[0] == 0x30)
 
 
 def main():
+    # No database here; the cutover state readiness reads is set by hand.
+    identity.set_cutover_cache(True)
     test_top_level()
     test_scep_payload()
     test_mdm_payload()

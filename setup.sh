@@ -70,7 +70,6 @@ cmd_env() {
   local jwt_sec; jwt_sec=$(openssl rand -hex 32)
   local wh_sec;  wh_sec=$(openssl rand -hex 32)
   local ca_pass; ca_pass=$(openssl rand -hex 20)
-  local scep_ch; scep_ch=$(openssl rand -hex 20)
 
   sed -i.bak \
     -e "s/changeme_strong_password/${db_pass}/" \
@@ -78,7 +77,6 @@ cmd_env() {
     -e "s/changeme_long_random_secret/${jwt_sec}/" \
     -e "s/changeme_webhook_secret/${wh_sec}/" \
     -e "s/changeme_stepca_password/${ca_pass}/" \
-    -e "s/changeme_scep_challenge/${scep_ch}/" \
     .env && rm -f .env.bak
   _gen_shared_secrets
   _gen_encryption_key
@@ -512,7 +510,8 @@ cmd_up() {
   local mdm_port; mdm_port=$(grep -E '^MDM_PORT=' .env 2>/dev/null | tail -1 | cut -d= -f2)
   echo -e "  MDM front:  ${GRN}http://localhost:${mdm_port:-443}/mdm${NC} (devices; everything else there is 404)"
   echo -e "  NanoMDM:    ${GRN}http://localhost:9000${NC} (loopback only: /mdm, /v1/ and /version)"
-  echo -e "  step-ca:    ${GRN}https://localhost:9443${NC}"
+  local scep_name; scep_name=$(grep -E '^SCEP_NAME=' .env 2>/dev/null | tail -1 | cut -d= -f2)
+  echo -e "  SCEP:       ${GRN}https://localhost:9443/scep/${scep_name:-mdm_device_scep}${NC} (scep-front, devices)"
 }
 
 # full interactive setup --------------------------------------------------------
@@ -577,14 +576,12 @@ cmd_dev() {
     local jwt_sec; jwt_sec=$(openssl rand -hex 32)
     local wh_sec;  wh_sec=$(openssl rand -hex 32)
     local ca_pass; ca_pass=$(openssl rand -hex 20)
-    local scep_ch; scep_ch=$(openssl rand -hex 20)
     sed -i.bak \
       -e "s/changeme_strong_password/${db_pass}/" \
       -e "s/changeme_random_api_key/${api_key}/" \
       -e "s/changeme_long_random_secret/${jwt_sec}/" \
       -e "s/changeme_webhook_secret/${wh_sec}/" \
       -e "s/changeme_stepca_password/${ca_pass}/" \
-      -e "s/changeme_scep_challenge/${scep_ch}/" \
       .env && rm -f .env.bak
     _gen_shared_secrets
     _gen_encryption_key
@@ -616,12 +613,12 @@ cmd_dev() {
   echo
 
   # Start infrastructure services (step-ca issues the device certs NanoMDM validates)
-  info "Starting infrastructure services (postgres, step-ca, nanomdm, nanomdm-front, controller)..."
+  info "Starting infrastructure services (postgres, step-ca, scep-front, nanomdm, nanomdm-front, controller)..."
   info "Devices reach NanoMDM at http://localhost:8443/mdm"
   docker compose \
     -f docker-compose.prod.yml \
     -f docker-compose.dev.yml \
-    up -d postgres step-ca nanomdm nanomdm-front controller
+    up -d postgres step-ca scep-front nanomdm nanomdm-front controller
   echo
   ok "Infrastructure is up!"
   echo

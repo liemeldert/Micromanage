@@ -32,7 +32,7 @@ from controller.auth import passwords as pw  # noqa: E402
 from controller.auth.dependencies import Principal  # noqa: E402
 from controller.auth.tokens import decode_session_token  # noqa: E402
 from controller.models.tenant import AuditLog, Tenant, User  # noqa: E402
-from tests._verify_harness import make_check
+from tests._verify_harness import make_check, status_of
 
 PASS, FAIL = [], []
 TENANT_ID = "t1"
@@ -42,12 +42,6 @@ REDACTED = "***redacted***"
 check = make_check(FAIL, PASS)
 
 
-async def status_of(coro):
-    try:
-        await coro
-        return 200
-    except HTTPException as exc:
-        return exc.status_code
 
 
 PROFILES = {
@@ -180,7 +174,7 @@ async def main():
     check("so is the nested EAP password",
           p0[0]["EAPClientConfiguration"]["UserPassword"] == "eap-secret")
     check("and the SCEP challenge", p0[1]["PayloadContent"]["Challenge"] == "scep-secret")
-    check("the edit that was actually made landed", p0[0]["SSID_STR"] == "CampusNet-5G")
+    check("the edit that was made is kept", p0[0]["SSID_STR"] == "CampusNet-5G")
     check("no sentinel reached the file", REDACTED not in (tdir / "profiles.yaml").read_text())
 
     print("4) reordered payloads do not swap secrets")

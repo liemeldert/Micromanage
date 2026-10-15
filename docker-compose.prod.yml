@@ -14,45 +14,178 @@ services:
       retries: 5
     restart: unless-stopped
 
-  # On first boot, initialises an RSA CA chain (SCEP needs an RSA intermediate to decrypt the enrollment pkcsPKIEnvelope
-  # as step ca init only makes ECDSA) and registers the SCEP provisioner devices enroll against.
-  step-ca:
-    # Pinned because step-ca issues every device identity cert, and an unannounced image change could break SCEP
-    # enrollment. To bump, take the new stable tag from https://github.com/smallstep/certificates/releases and confirm
-    # it exists on Docker Hub.
+  stepca-volumes-init:
     image: smallstep/step-ca:0.30.2
+    user: "0:0"
+    entrypoint: [ "sh", "-ec" ]
+    command:
+      - |
+        chown 1000:1000 /stepca-certs /stepca-tls /stepca-webhook
+        chmod 0755 /stepca-certs
+        chmod 0700 /stepca-tls /stepca-webhook
+    volumes:
+      - stepca_certs:/stepca-certs
+      - stepca_tls:/stepca-tls
+      - stepca_webhook:/stepca-webhook
+    restart: "no"
+
+  # On first boot, initialises an RSA CA chain (SCEP needs an RSA intermediate to decrypt the enrollment pkcsPKIEnvelope
+  # as step ca init only makes ECDSA) and registers the SCEP provisioner devices enroll against. Every boot re-runs the
+  # admin API setup and the certificate mints.
+  step-ca:
+    image: smallstep/step-ca:0.30.2
+    init: true
     environment:
       STEPCA_NAME: ${STEPCA_NAME:-MicromanageCA}
       STEPCA_PASSWORD: ${STEPCA_PASSWORD:?set STEPCA_PASSWORD}
       MDM_HOSTNAME: ${MDM_HOSTNAME:?set MDM_HOSTNAME}
       SCEP_NAME: ${SCEP_NAME:-mdm_device_scep}
-      SCEP_CHALLENGE: ${SCEP_CHALLENGE:?set SCEP_CHALLENGE}      # must match the controller's SCEP_CHALLENGE
     volumes:
       - step_ca_data:/home/step
+      - stepca_certs:/stepca-certs
+      - stepca_tls:/stepca-tls
+      - stepca_webhook:/stepca-webhook
+    depends_on:
+      stepca-volumes-init:
+        condition: service_completed_successfully
     entrypoint: [ "sh", "-ec" ]
     command:
       - |
         export STEPPATH=/home/step
-        PW="$$STEPPATH/password"
-        if [ ! -f "$$STEPPATH/config/ca.json" ]; then
-          echo "step-ca: first-run init with an RSA chain for SCEP..."
+        PW="$$STEPPATH/password"; CFG="$$STEPPATH/config/ca.json"; TPL="$$STEPPATH/templates"
+        ROOT="$$STEPPATH/certs/root_ca.crt"; ROOT_KEY="$$STEPPATH/secrets/root_ca_key"
+        INT="$$STEPPATH/certs/intermediate_ca.crt"; INT_KEY="$$STEPPATH/secrets/intermediate_ca_key"
+        CERTS=/stepca-certs; TLS=/stepca-tls; WH=/stepca-webhook
+        log() { echo "step-ca: $$*"; }
+        rand() { head -c 32 /dev/urandom | base64 | tr -d '\n/+='; }
+        if [ ! -f "$$CFG" ]; then
+          log "first-run init with an RSA chain for SCEP"
           printf '%s' "$$STEPCA_PASSWORD" > "$$PW"
           step ca init --name "$$STEPCA_NAME" --dns "step-ca,localhost,$$MDM_HOSTNAME" \
-            --provisioner admin --password-file "$$PW" --provisioner-password-file "$$PW" \
-            --address :9000 --acme
-          step certificate create "$$STEPCA_NAME Root CA" "$$STEPPATH/certs/root_ca.crt" "$$STEPPATH/secrets/root_ca_key" \
+            --provisioner admin --password-file "$$PW" --provisioner-password-file "$$PW" --address :9000
+          step certificate create "$$STEPCA_NAME Root CA" "$$ROOT" "$$ROOT_KEY" \
             --profile root-ca --kty RSA --size 2048 --password-file "$$PW" --force
-          step certificate create "$$STEPCA_NAME Intermediate CA" "$$STEPPATH/certs/intermediate_ca.crt" "$$STEPPATH/secrets/intermediate_ca_key" \
-            --profile intermediate-ca --ca "$$STEPPATH/certs/root_ca.crt" --ca-key "$$STEPPATH/secrets/root_ca_key" \
+          step certificate create "$$STEPCA_NAME Intermediate CA" "$$INT" "$$INT_KEY" \
+            --profile intermediate-ca --ca "$$ROOT" --ca-key "$$ROOT_KEY" \
             --kty RSA --size 2048 --password-file "$$PW" --ca-password-file "$$PW" --force
-          step ca provisioner add "$$SCEP_NAME" --type SCEP --challenge "$$SCEP_CHALLENGE" \
-            --encryption-algorithm-identifier 2 --x509-default-dur 8760h --x509-max-dur 8760h \
-            --ca-config "$$STEPPATH/config/ca.json"
-          echo "step-ca: init complete (RSA chain + SCEP provisioner '$$SCEP_NAME')"
+          step ca provisioner add "$$SCEP_NAME" --type SCEP --challenge "$$(rand)" \
+            --encryption-algorithm-identifier 2 --x509-default-dur 8760h --x509-max-dur 8760h --ca-config "$$CFG"
+          log "init complete (RSA chain and SCEP provisioner $$SCEP_NAME)"
         fi
-        exec step-ca "$$STEPPATH/config/ca.json" --password-file "$$PW"
-    ports:
-      - "${STEPCA_PORT:-9443}:9000" # CA + SCEP endpoint (devices reach this for identity)
+
+        set +e
+        # The SCEP challenges in ca.json are replaced with a random value, since ca.json stops being read once the
+        # admin API is up
+        if [ "$$(jq -r '.authority.enableAdmin // false' "$$CFG")" != true ]; then
+          cp "$$CFG" "$$CFG.pre-admin.bak" && jq --arg c "$$(rand)" '.authority.enableAdmin = true
+            | (.authority.provisioners[]? | select(.type == "SCEP") | .challenge) = $$c' "$$CFG" > "$$CFG.tmp" \
+            && mv "$$CFG.tmp" "$$CFG" && log "admin API enabled (backup: $$CFG.pre-admin.bak)" \
+            || log "ERROR: could not enable the admin API"
+        fi
+
+        mkdir -p "$$TPL"
+        cat > "$$TPL/scep-front.tpl" <<'EOF' || log "ERROR: could not write the scep-front template"
+        {"subject": {{ toJson .Subject }}, "sans": {{ toJson .SANs }},
+         "keyUsage": ["digitalSignature", "keyEncipherment"], "extKeyUsage": ["serverAuth"]}
+        EOF
+        # Device identities keep the CSR subject, carry no SANs and are client certificates only.
+        cat > "$$TPL/scep-device.tpl" <<'EOF' || log "ERROR: could not write the device certificate template"
+        {"subject": {{ toJson .Subject }},
+         "keyUsage": ["digitalSignature", "keyEncipherment"], "extKeyUsage": ["clientAuth"]}
+        EOF
+
+        # 397 days, re-minted with 30 days left, when MDM_HOSTNAME is not among its SANs or when it does not chain to
+        # the current root.
+        tls_current() {
+          [ -s "$$TLS/scep-front.key" ] && [ -s "$$TLS/scep-front.crt" ] \
+            && ! step certificate needs-renewal "$$TLS/scep-front.crt" --expires-in 720h >/dev/null 2>&1 \
+            && step certificate verify "$$TLS/scep-front.crt" --roots "$$ROOT" >/dev/null 2>&1 \
+            && step certificate inspect "$$TLS/scep-front.crt" --format json 2>/dev/null \
+              | jq -e --arg h "$$MDM_HOSTNAME" '.extensions.subject_alt_name.dns_names | index($$h)' >/dev/null
+        }
+        mint_tls() {
+          step certificate create scep-front "$$TLS/scep-front.crt.new" "$$TLS/scep-front.key.new" \
+            --template "$$TPL/scep-front.tpl" --san scep-front --san "$$MDM_HOSTNAME" --san localhost \
+            --kty RSA --size 2048 --not-after 9528h --ca "$$INT" --ca-key "$$INT_KEY" --ca-password-file "$$PW" \
+            --no-password --insecure --bundle --force >/dev/null \
+            && mv "$$TLS/scep-front.key.new" "$$TLS/scep-front.key" \
+            && mv "$$TLS/scep-front.crt.new" "$$TLS/scep-front.crt" \
+            && log "minted the scep-front certificate (scep-front reloads it within 6 hours, or restart it)" \
+            || log "ERROR: could not mint the scep-front certificate"
+        }
+        tls_current || mint_tls
+
+        cp "$$ROOT" "$$CERTS/root_ca.crt.new" && cp "$$INT" "$$CERTS/intermediate_ca.crt.new" \
+          && chmod 0644 "$$CERTS/root_ca.crt.new" "$$CERTS/intermediate_ca.crt.new" \
+          && mv "$$CERTS/root_ca.crt.new" "$$CERTS/root_ca.crt" \
+          && mv "$$CERTS/intermediate_ca.crt.new" "$$CERTS/intermediate_ca.crt" \
+          || log "ERROR: could not copy the CA certificates to $$CERTS"
+
+        # Admin API work runs once the CA answers. Double fork, so tini (init: true) reaps it. Changes are checked
+        # against the running CA's provisioner list, since ca.json stops being authoritative once the admin API is on.
+        ( (
+          umask 077
+          # One-time admin work in its own subshell, so an early exit still leaves the daily certificate check.
+          (
+            ADM="--ca-url https://localhost:9000 --root $$ROOT --admin-provisioner admin --admin-subject step"
+            # A nonexistent --ca-config turns an unreachable admin API into an error instead of an edit to ca.json.
+            ADM="$$ADM --admin-password-file $$PW --ca-config /nonexistent/ca.json"
+            provs() { curl -sf --cacert "$$ROOT" "https://localhost:9000/provisioners?limit=100"; }
+            scep() { provs | jq -c --arg n "$$SCEP_NAME" '.provisioners[] | select(.name == $$n)'; }
+            i=0
+            until step ca health --ca-url https://localhost:9000 --root "$$ROOT" >/dev/null 2>&1; do
+              i=$$((i + 1))
+              [ "$$i" -ge 90 ] && { log "ERROR: CA not healthy after 180s, admin setup skipped"; exit 0; }
+              sleep 2
+            done
+
+            # The running CA redacts the challenge in its provisioner list, so the exit status is the only check.
+            step ca provisioner update "$$SCEP_NAME" --challenge "$$(rand)" $$ADM >/dev/null \
+              && log "static challenge rotated" || log "ERROR: could not rotate the static challenge"
+
+            for p in $$(provs | jq -r '.provisioners[] | select(.type == "ACME") | .name'); do
+              step ca provisioner remove "$$p" $$ADM >/dev/null
+              provs | jq -e --arg p "$$p" 'any(.provisioners[]; .name == $$p) | not' >/dev/null \
+                && log "removed ACME provisioner $$p" || log "ERROR: ACME provisioner $$p is still present"
+            done
+
+            tpl() { scep | jq -r '.options.x509.template // empty'; }
+            if [ "$$(tpl)" != "$$(cat "$$TPL/scep-device.tpl")" ]; then
+              step ca provisioner update "$$SCEP_NAME" --x509-template "$$TPL/scep-device.tpl" $$ADM >/dev/null
+              [ "$$(tpl)" = "$$(cat "$$TPL/scep-device.tpl")" ] && log "device certificate template installed" \
+                || log "ERROR: the device certificate template did not reach the running CA"
+            fi
+
+            # Re-added when the secret file is missing or the stored id is not the CA's, as after a restored volume.
+            cur=$$(scep | jq -r '(.options.webhooks // [])[] | select(.name == "controller") | .id')
+            if [ -n "$$cur" ] && { [ ! -s "$$WH/scep_webhook_secret" ] \
+                || [ "$$(cat "$$WH/scep_webhook_id" 2>/dev/null)" != "$$cur" ]; }; then
+              step ca provisioner webhook remove "$$SCEP_NAME" controller $$ADM >/dev/null && cur= \
+                || log "ERROR: could not remove the webhook whose secret is missing"
+            fi
+            if [ -z "$$cur" ]; then
+              out=$$(step ca provisioner webhook add "$$SCEP_NAME" controller --kind SCEPCHALLENGE \
+                --url https://scep-front:8081/webhook/scep-challenge $$ADM)
+              id=$$(printf '%s\n' "$$out" | sed -n 's/^Webhook ID: //p')
+              sec=$$(printf '%s\n' "$$out" | sed -n 's/^Secret: //p')
+              if [ -n "$$id" ] && [ -n "$$sec" ]; then
+                printf '%s' "$$id" > "$$WH/scep_webhook_id.tmp" \
+                  && printf '%s' "$$sec" > "$$WH/scep_webhook_secret.tmp" \
+                  && mv "$$WH/scep_webhook_id.tmp" "$$WH/scep_webhook_id" \
+                  && mv "$$WH/scep_webhook_secret.tmp" "$$WH/scep_webhook_secret" && log "webhook attached" \
+                  || log "ERROR: could not write the webhook secret"
+              else
+                log "ERROR: webhook add printed no id or secret"
+              fi
+            fi
+            scep | jq -e --arg id "$$(cat "$$WH/scep_webhook_id" 2>/dev/null)" \
+              '[(.options.webhooks // [])[] | select(.id == $$id and .kind == "SCEPCHALLENGE")] | length == 1' \
+              >/dev/null && log "webhook verified on $$SCEP_NAME" \
+              || log "ERROR: no SCEPCHALLENGE webhook matching the stored id"
+          )
+          while sleep 1d; do tls_current || mint_tls; done
+        ) & )
+        exec step-ca "$$CFG" --password-file "$$PW"
     healthcheck:
       test: [ "CMD", "step", "ca", "health", "--ca-url", "https://localhost:9000" ]
       interval: 15s
@@ -98,7 +231,7 @@ services:
     environment:
       NANOMDM_API_KEY: ${NANOMDM_API_KEY:?set NANOMDM_API_KEY}
     volumes:
-      - step_ca_data:/stepca:ro   # read step-ca's CA certs to validate device identity certs
+      - stepca_certs:/stepca-certs:ro
       - nanomdm_data:/var/lib/nanomdm
     ports:
       # Loopback only. NanoMDM 0.9.0 serves /mdm, the basic-auth /v1/* management API and /version on one listener (see
@@ -120,10 +253,10 @@ services:
       -storage pgsql
       -storage-dsn "postgres://postgres:${DB_PASSWORD}@postgres:5432/nanomdm?sslmode=disable"
       -storage-options delete=1
-      -ca /stepca/certs/root_ca.crt
-      -intermediate /stepca/certs/intermediate_ca.crt
+      -ca /stepca-certs/root_ca.crt
+      -intermediate /stepca-certs/intermediate_ca.crt
       -api "${NANOMDM_API_KEY}"
-      -webhook-url "http://controller:8000/webhook/mdm?secret=${WEBHOOK_SECRET:?set WEBHOOK_SECRET}"
+      -webhook-url "http://controller:8000/webhook/mdm"
       -webhook-hmac-key "${WEBHOOK_HMAC_KEY:-${WEBHOOK_SECRET}}"
       -dm "http://controller:8000/ddm/"
       -dm-send-hmac-key "${DDM_HMAC_SECRET:-${WEBHOOK_SECRET}}"
@@ -146,6 +279,41 @@ services:
       # nanomdm being recreated underneath it rather than holding a dead address.
       nanomdm:
         condition: service_started
+    restart: unless-stopped
+
+  # TLS front for step-ca, published on STEPCA_PORT. It serves only the SCEP provisioner's path to devices and, on an
+  # unpublished port, step-ca's challenge webhook to the controller. It reloads nginx every 6 hours to pick up a
+  # certificate step-ca has re-minted.
+  scep-front:
+    image: nginx:1.27-alpine
+    init: true
+    entrypoint: [ "sh", "-c" ]
+    command:
+      - |
+        (while sleep 6h; do nginx -s reload || echo "scep-front: ERROR: nginx reload failed"; done) &
+        exec /docker-entrypoint.sh nginx -g "daemon off;"
+    environment:
+      SCEP_NAME: ${SCEP_NAME:-mdm_device_scep}
+      # Compose turns $$ into $, so nginx's template step substitutes SCEP_NAME and leaves nginx's own variables.
+      NGINX_ENVSUBST_FILTER: "^SCEP_NAME$$"
+    volumes:
+      # Needs the repo on disk, as nanomdm-front does.
+      - ./deploy/scep-front.conf.template:/etc/nginx/templates/default.conf.template:ro
+      - stepca_certs:/stepca-certs:ro
+      - stepca_tls:/stepca-tls:ro
+    ports:
+      - "${STEPCA_PORT:-9443}:9443" # SCEP endpoint devices reach for their identity certificate
+    depends_on:
+      step-ca:
+        condition: service_healthy
+    # A GetCACaps request through the whole path, so a missing template or an unreachable step-ca shows as unhealthy.
+    healthcheck:
+      test: [ "CMD", "curl", "-fsk", "-o", "/dev/null",
+              "https://localhost:9443/scep/${SCEP_NAME:-mdm_device_scep}?operation=GetCACaps" ]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
     restart: unless-stopped
 
   # Off by default. Enable with --profile direct-nanomdm (or COMPOSE_PROFILES=direct-nanomdm) when your own proxy needs
@@ -226,20 +394,23 @@ services:
       WEBHOOK_HMAC_KEY: ${WEBHOOK_HMAC_KEY:-}
       CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS:-https://${MDM_HOSTNAME}}
       PUBLIC_API_URL: ${PUBLIC_API_URL:?set PUBLIC_API_URL}
+      # Addresses uvicorn takes X-Forwarded-For from; set it to the TLS proxy's address.
+      FORWARDED_ALLOW_IPS: ${FORWARDED_ALLOW_IPS:-127.0.0.1}
       # Enrollment profile generation
       MDM_HOSTNAME: ${MDM_HOSTNAME}
       MDM_TOPIC: ${MDM_TOPIC:-}
       MDM_SERVER_URL: ${MDM_SERVER_URL:-}
       SCEP_URL: ${SCEP_URL:-}
       SCEP_NAME: ${SCEP_NAME:-mdm_device_scep}
-      SCEP_CHALLENGE: ${SCEP_CHALLENGE:-}
-      # Migration escape hatch: accept the old, unsigned ?tenant= on the MDM ServerURL. Leave false. See .env.example.
-      MDM_ALLOW_UNSIGNED_TENANT_CLAIM: ${MDM_ALLOW_UNSIGNED_TENANT_CLAIM:-false}
+      # Written by step-ca when it attaches the challenge webhook.
+      SCEP_WEBHOOK_SECRET_FILE: ${SCEP_WEBHOOK_SECRET_FILE:-/stepca-webhook/scep_webhook_secret}
+      SCEP_WEBHOOK_ID_FILE: ${SCEP_WEBHOOK_ID_FILE:-/stepca-webhook/scep_webhook_id}
+      STEPCA_URL: ${STEPCA_URL:-https://step-ca:9000}
+      STEPCA_ROOT_FILE: ${STEPCA_ROOT_FILE:-/stepca-certs/root_ca.crt}
+      IDENTITY_RENEW_DAYS: ${IDENTITY_RENEW_DAYS:-30}
+      IDENTITY_RENEW_INTERVAL_HOURS: ${IDENTITY_RENEW_INTERVAL_HOURS:-24}
       # Only let pre-provisioned (ADE/placeholder) serials become devices.
       MDM_ENROLL_REQUIRE_KNOWN_SERIAL: ${MDM_ENROLL_REQUIRE_KNOWN_SERIAL:-false}
-      # Post-migration hardening: refuse a known device's check-in if it carries no tenant+tsig at all. Leave false
-      # until the whole fleet is re-enrolled onto post-fix profiles. See .env.example.
-      MDM_REQUIRE_SIGNED_TENANT_CLAIM: ${MDM_REQUIRE_SIGNED_TENANT_CLAIM:-false}
       # First-run admin (set on first deploy so you can log in, then remove)
       CONTROLLER_BOOTSTRAP_ADMIN_EMAIL: ${CONTROLLER_BOOTSTRAP_ADMIN_EMAIL:-}
       CONTROLLER_BOOTSTRAP_ADMIN_PASSWORD: ${CONTROLLER_BOOTSTRAP_ADMIN_PASSWORD:-}
@@ -260,11 +431,10 @@ services:
       DEP_BASE_URL: ${DEP_BASE_URL:-}
       # X-Server-Protocol-Version DEP requests send; nanodep's default. Override only if Apple moves the number.
       DEP_SERVER_PROTOCOL_VERSION: ${DEP_SERVER_PROTOCOL_VERSION:-7}
-      DEP_ADE_REQUIRE_APPLE_SIGNATURE: ${DEP_ADE_REQUIRE_APPLE_SIGNATURE:-false}
+      DEP_ADE_REQUIRE_APPLE_SIGNATURE: ${DEP_ADE_REQUIRE_APPLE_SIGNATURE:-true}
       DEP_APPLE_ANCHOR_CERTS: ${DEP_APPLE_ANCHOR_CERTS:-}
+      DEP_APPLE_DEVICE_CA_NAMES: ${DEP_APPLE_DEVICE_CA_NAMES:-}
       DDM_HMAC_SECRET: ${DDM_HMAC_SECRET:-}
-      # Tuning. Raise the pool and the task cap together: the reconcile fan-out is bounded by MDM_MAX_CONCURRENT_TASKS,
-      # and each running task needs a connection. Flow runs are the heaviest thing retention deletes.
       DB_POOL_MAX_SIZE: ${DB_POOL_MAX_SIZE:-20}
       DB_POOL_MIN_SIZE: ${DB_POOL_MIN_SIZE:-2}
       MDM_MAX_CONCURRENT_TASKS: ${MDM_MAX_CONCURRENT_TASKS:-25}
@@ -295,6 +465,8 @@ services:
       AUDIT_LOG_SIZE_WARNING_ROWS: ${AUDIT_LOG_SIZE_WARNING_ROWS:-100000}
     volumes:
       - yaml_configs:/app/yaml-configs
+      - stepca_certs:/stepca-certs:ro
+      - stepca_webhook:/stepca-webhook:ro
     ports:
       - "${CONTROLLER_PORT:-8001}:8001" # device-facing: app manifests + enrollment download
     depends_on:
@@ -327,4 +499,7 @@ volumes:
   postgres_data:
   nanomdm_data:
   step_ca_data:
+  stepca_certs:
+  stepca_tls:
+  stepca_webhook:
   yaml_configs:

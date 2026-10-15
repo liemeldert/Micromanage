@@ -13,7 +13,7 @@ from controller.api.routes.enrollment import (
     list_unattributed_enrollment_attempts,
 )
 from controller.services.webhook_handler import WebhookHandler
-from tests._verify_harness import make_check
+from tests._verify_harness import install_identity_stub, make_check
 
 PASS, FAIL = [], []
 
@@ -23,6 +23,8 @@ check = make_check(FAIL, PASS)
 async def main():
     await Tortoise.init(db_url="sqlite://:memory:", modules={"models": ["controller.models.tenant"]})
     await Tortoise.generate_schemas()
+    # Every udid without an override holds a legacy certificate that is in the snapshot.
+    stub = install_identity_stub()
 
     handler = WebhookHandler()
 
@@ -94,6 +96,26 @@ async def main():
     after2 = await EnrollmentAttempt.all().count()
     check("repeat check-in for a known device still resolves", dev2 is not None)
     check("repeat check-in for a known device logs no attempt", after2 == before2)
+
+    # 3b. Identity refusals are attempts on the device's own tenant: an unreadable certificate, and one whose Subject
+    # names neither a challenge nor the legacy form.
+    from datetime import datetime, timedelta, timezone
+    from controller.services.nanomdm_store import Identity
+
+    stub.set_identity("UDID-OK", None)
+    check("an unreadable identity drops the Authenticate",
+          await handler._upsert_device("UDID-OK", {}, {"SerialNumber": "SN-OK"}, topic="mdm.Authenticate") is None)
+    stub.set_identity("UDID-OK", Identity(cert_sha256="f" * 64, spki_sha256="e" * 64, subject_cn="someone else",
+                                          not_after=datetime.now(timezone.utc) + timedelta(days=1)))
+    check("an unknown Subject drops the Authenticate",
+          await handler._upsert_device("UDID-OK", {}, {"SerialNumber": "SN-OK"}, topic="mdm.Authenticate") is None)
+    listed = await list_enrollment_attempts(skip=0, limit=100, outcome=None, principal=Principal(
+        tenant=tenant, user=None, email="admin@t1", role="admin"))
+    outcomes = {(a["udid"], a["outcome"], (a["detail"] or {}).get("reason")) for a in listed["attempts"]}
+    check("the tenant's list carries the identity_unreadable attempt",
+          ("UDID-OK", "identity_unreadable", None) in outcomes)
+    check("...and the bad_identity attempt with its reason",
+          ("UDID-OK", "bad_identity", "unknown_cn") in outcomes)
 
     # 4. GET /api/v1/enrollment-attempts is tenant-scoped.
     other_tenant = await Tenant.create(id="t2", name="Tenant Two")

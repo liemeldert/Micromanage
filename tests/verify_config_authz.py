@@ -11,7 +11,6 @@ import tempfile
 from pathlib import Path
 
 import yaml
-from fastapi import HTTPException
 from tortoise import Tortoise
 
 # The YAML base goes into the environment before any import, so every reader sees the temp tree from the first access,
@@ -28,7 +27,7 @@ from controller.auth import MEMBER_WRITABLE_CONFIG_TYPES  # noqa: E402
 from controller.auth.dependencies import Principal, require_admin  # noqa: E402
 from controller.models.tenant import Tenant, User, AuditLog  # noqa: E402
 from controller.utils.yaml_validator import TenantConfig  # noqa: E402
-from tests._verify_harness import make_check, seed_config_dir
+from tests._verify_harness import make_check, seed_config_dir, status_of
 
 PASS, FAIL = [], []
 
@@ -49,13 +48,7 @@ MINIMAL = {
 check = make_check(FAIL, PASS)
 
 
-async def status_of(coro):
-    """Run an endpoint coroutine, returning its HTTP status (200 on success)."""
-    try:
-        await coro
-        return 200
-    except HTTPException as exc:
-        return exc.status_code
+
 
 
 async def main():

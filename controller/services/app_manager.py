@@ -19,9 +19,8 @@ from controller.services.scoping import (
 
 logger = logging.getLogger(__name__)
 
-# S3 settings that decide which object store we talk to and whose credentials sign the request. Resolved as an
-# all-or-nothing block, never field by field, or a tenant could name a bucket and get the operator's keys pointed
-# at it. prefix is excluded.
+# S3 settings that choose the object store and whose credentials sign the request. They resolve as one block, so a
+# tenant cannot name a bucket and use the operator's keys. prefix and shared_prefix are excluded.
 TENANT_S3_KEYS = (
     "bucket", "access_key_id", "secret_access_key", "session_token",
     "endpoint_url", "region", "use_ssl", "path_style",
@@ -42,13 +41,30 @@ class S3ConfigError(RuntimeError):
     """
 
 
-def _is_set(value: Any) -> bool:
+def is_set(value: Any) -> bool:
     """Whether an author supplied this setting. False counts; None and a blank string do not."""
     if value is None:
         return False
     if isinstance(value, str):
         return bool(value.strip())
     return True
+
+
+def uses_own_bucket(s3_config: Any) -> bool:
+    """Whether an S3 config declares the tenant's own object store, as opposed to the server's shared bucket."""
+    return isinstance(s3_config, dict) and any(is_set(s3_config.get(k)) for k in TENANT_S3_KEYS)
+
+
+def effective_s3_prefix(s3_config: Any) -> str:
+    """The key prefix in use: prefix on a tenant's own bucket, shared_prefix on the server's shared bucket."""
+    if not isinstance(s3_config, dict):
+        return ""
+    if uses_own_bucket(s3_config):
+        return str(s3_config.get("prefix") or "")
+    if "shared_prefix" in s3_config:
+        return str(s3_config.get("shared_prefix") or "")
+    # A config without shared_prefix keeps the operator's value in prefix; update_tenant drops a shared-mode prefix.
+    return str(s3_config.get("prefix") or "")
 
 
 def _as_bool(value: Any, default: bool) -> bool:
@@ -128,9 +144,9 @@ def resolve_s3_settings(tenant: Tenant) -> S3Settings:
             "mapping of S3 settings, or clear it entirely so the tenant uses "
             "the server's own bucket and credentials."
         )
-    prefix = str(s3_config.get("prefix") or "")
+    prefix = effective_s3_prefix(s3_config)
 
-    declared = [k for k in TENANT_S3_KEYS if _is_set(s3_config.get(k))]
+    declared = [k for k in TENANT_S3_KEYS if is_set(s3_config.get(k))]
     if not declared:
         return S3Settings(
             bucket=os.getenv("AWS_S3_BUCKET"),
@@ -147,7 +163,7 @@ def resolve_s3_settings(tenant: Tenant) -> S3Settings:
             source="environment",
         )
 
-    missing = [k for k in REQUIRED_TENANT_S3_KEYS if not _is_set(s3_config.get(k))]
+    missing = [k for k in REQUIRED_TENANT_S3_KEYS if not is_set(s3_config.get(k))]
     if missing:
         raise _incomplete_config_error(tenant.id, declared, missing)
 
@@ -156,11 +172,11 @@ def resolve_s3_settings(tenant: Tenant) -> S3Settings:
         access_key_id=str(s3_config["access_key_id"]).strip(),
         secret_access_key=str(s3_config["secret_access_key"]).strip(),
         session_token=(str(s3_config["session_token"]).strip()
-                       if _is_set(s3_config.get("session_token")) else None),
+                       if is_set(s3_config.get("session_token")) else None),
         region=(str(s3_config["region"]).strip()
-                if _is_set(s3_config.get("region")) else DEFAULT_S3_REGION),
+                if is_set(s3_config.get("region")) else DEFAULT_S3_REGION),
         endpoint_url=(str(s3_config["endpoint_url"]).strip()
-                      if _is_set(s3_config.get("endpoint_url")) else None),
+                      if is_set(s3_config.get("endpoint_url")) else None),
         use_ssl=_as_bool(s3_config.get("use_ssl"), DEFAULT_S3_USE_SSL),
         path_style=_as_bool(s3_config.get("path_style"), DEFAULT_S3_PATH_STYLE),
         prefix=prefix,
@@ -302,8 +318,7 @@ class AppManager:
         return scoped
 
     def _get_s3_prefix(self) -> str:
-        s3_config = self.tenant.s3_config or {}
-        return str(s3_config.get('prefix') or '')
+        return effective_s3_prefix(self.tenant.s3_config or {})
 
     def _build_s3_key(self, app_s3_key: str) -> str:
         """The object key for an apps.yaml key: the tenant prefix in front of it."""

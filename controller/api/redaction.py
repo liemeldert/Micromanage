@@ -284,22 +284,66 @@ def _restore_profile_secrets(tenant_id: str, config_data: Dict[str, Any]) -> Non
                     profile[key] = restored
 
 
+def _redact_declarations_config(config: Dict[str, Any]) -> Dict[str, Any]:
+    """Return a copy of declarations.yaml with secret payload values redacted, by the same key rule as profiles.yaml."""
+    cfg = dict(config or {})
+    declarations = cfg.get("declarations")
+    if not isinstance(declarations, list):
+        return cfg
+    out = []
+    for declaration in declarations:
+        if isinstance(declaration, dict) and declaration.get("payload") not in (None, "", [], {}):
+            declaration = {**declaration,
+                           "payload": profile_manager._redact_value(declaration["payload"], "payload", [])}
+        out.append(declaration)
+    cfg["declarations"] = out
+    return cfg
+
+
+def _restore_declaration_secrets(tenant_id: str, config_data: Dict[str, Any]) -> None:
+    """Before saving declarations.yaml, replace any redacted payload value with the value currently on disk (matched by
+    declaration id)."""
+    incoming = config_data.get("declarations")
+    if not isinstance(incoming, list):
+        return
+    doc = _read_stored_doc(tenant_id, "declarations.yaml", "declarations: could not read existing declarations for %s")
+    stored: Dict[str, Dict[str, Any]] = {}
+    stored_list = doc.get("declarations") if isinstance(doc, dict) else None
+    for declaration in stored_list if isinstance(stored_list, list) else []:
+        if isinstance(declaration, dict) and declaration.get("id"):
+            stored[str(declaration["id"])] = declaration
+    for declaration in incoming:
+        if not isinstance(declaration, dict) or "payload" not in declaration:
+            continue
+        prior = stored.get(str(declaration.get("id"))) or {}
+        restored = _restore_redacted(declaration["payload"], prior.get("payload"))
+        if restored is _DROP:
+            declaration.pop("payload", None)
+        else:
+            declaration["payload"] = restored
+
+
 _CONFIG_REDACTORS = {
+    "declarations": _redact_declarations_config,
     "dispatcher": _redact_dispatcher_config,
     "flows": _redact_flows_config,
     "profiles": _redact_profiles_config,
 }
 
 _SECRET_RESTORERS = {
+    "declarations": _restore_declaration_secrets,
     "dispatcher": _restore_dispatcher_secrets,
     "flows": _restore_flow_secrets,
     "profiles": _restore_profile_secrets,
 }
 
+# Admins read these as authored; everyone reads dispatcher.yaml and flows.yaml redacted.
+_ADMIN_UNREDACTED = frozenset({"declarations", "profiles"})
+
 
 def config_redactor(config_type: str, is_admin: bool) -> Optional[Callable[[Dict[str, Any]], Dict[str, Any]]]:
-    """The redactor for a config type's document read by this caller, or None. Admins read profiles.yaml as authored."""
-    if config_type == "profiles" and is_admin:
+    """The redactor for a config type's document read by this caller, or None."""
+    if config_type in _ADMIN_UNREDACTED and is_admin:
         return None
     return _CONFIG_REDACTORS.get(config_type)
 

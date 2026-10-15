@@ -15,8 +15,8 @@ from controller.api.redaction import _REDACTED, _redact_s3_config, _restore_tena
 from controller.api import runtime
 from controller.auth.dependencies import Principal, get_current_principal, require_admin
 from controller.services import filevault_escrow
-from controller.services.app_manager import (AppManager, S3ConfigError, TENANT_S3_KEYS, _is_set,
-                                             resolve_s3_settings)
+from controller.services.app_manager import (AppManager, S3ConfigError, is_set, resolve_s3_settings,
+                                             uses_own_bucket)
 from controller.services.audit import record_audit
 from controller.services.tenant_config import tenant_dir as _tenant_dir
 from controller.utils.yaml_validator import payload_identifier_prefix_error
@@ -111,22 +111,18 @@ async def update_tenant(update: TenantUpdate, admin: Principal = Depends(require
                 detail="S3 access key ID and secret access key must be set together",
             )
         # A secret that still holds the redaction sentinel keeps its stored value.
-        merged = _restore_tenant_s3_secrets(tenant.s3_config, update.s3_config)
-        # With no bucket of its own the tenant shares the server's, and the key prefix is all that separates tenants
-        # there, so the operator sets it (tenant_cli) and a tenant admin cannot move it.
-        if not any(_is_set(merged.get(k)) for k in TENANT_S3_KEYS):
-            old_prefix = str((tenant.s3_config or {}).get("prefix") or "")
-            if "prefix" not in merged and old_prefix:
-                # A client that only edits other keys keeps the operator's prefix rather than clearing it.
-                merged["prefix"] = old_prefix
-            new_prefix = str(merged.get("prefix") or "")
-            if new_prefix != old_prefix:
-                raise HTTPException(
-                    status_code=400,
-                    detail="The storage prefix cannot be changed while this tenant uses the server's shared bucket; "
-                           "it is set by the operator (tenant_cli tenant set-s3-prefix). Configure a bucket and "
-                           "credentials of your own to control the layout yourself.",
-                )
+        stored_s3 = tenant.s3_config if isinstance(tenant.s3_config, dict) else {}
+        merged = _restore_tenant_s3_secrets(stored_s3, update.s3_config)
+        # shared_prefix belongs to the operator (tenant_cli tenant set-s3-prefix), so the stored value is kept whatever
+        # the request carries. A shared-bucket config from before that key moves its prefix across.
+        merged.pop("shared_prefix", None)
+        if "shared_prefix" in stored_s3:
+            merged["shared_prefix"] = stored_s3["shared_prefix"]
+        elif not uses_own_bucket(stored_s3) and is_set(stored_s3.get("prefix")):
+            merged["shared_prefix"] = stored_s3["prefix"]
+        # On the shared bucket only shared_prefix places the keys, so a prefix sent along with it is dropped.
+        if not uses_own_bucket(merged):
+            merged.pop("prefix", None)
         tenant.s3_config = merged
         try:
             resolve_s3_settings(tenant)

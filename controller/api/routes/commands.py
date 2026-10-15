@@ -1,4 +1,5 @@
 """Device command execution endpoints."""
+import logging
 import re
 from typing import Any, Dict, List, Optional
 
@@ -11,15 +12,26 @@ from controller.api.ids import get_owned_or_404
 from controller.auth import DESTRUCTIVE_COMMANDS, ROLE_ADMIN
 from controller.auth.dependencies import Principal, get_current_principal
 from controller.models.tenant import Device, Task, Tenant
-from controller.services import readiness
+from controller.services import enrollment_links, readiness
 from controller.services.app_manager import AppManager
 from controller.services.audit import record_device_command
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
 
 # Cap on how much of a transport failure's text a response or an audit row carries. The text is whatever the transport
 # said, which on a bad day is a whole HTML error page.
 _SEND_FAILURE_MAX_CHARS = 300
+
+
+async def _discard_rts_challenge(row, task_id: Optional[str] = None) -> None:
+    """Drop a Return to Service challenge whose erase was not sent, logging any failure so the caller's error stands."""
+    if row is None:
+        return
+    try:
+        await runtime.enrollment_svc.discard_challenge(row, task_id=task_id)
+    except Exception:
+        logger.exception("Return to Service: could not discard challenge %s", getattr(row, "id", "?"))
 
 
 class CommandRequest(BaseModel):
@@ -205,6 +217,7 @@ async def send_device_command(
                     detail="Macs require a 6-digit PIN for this command (needed to unlock afterwards)",
                 )
         rts_payload = None
+        rts_challenge = None
         rts_warnings: List[tuple] = []
         if command.command_type == "erase" and _truthy(params.get("return_to_service")):
             attrs = device.attributes or {}
@@ -223,13 +236,14 @@ async def send_device_command(
                     detail=f"Return to Service requires {platform} {floor} or later "
                            f"(device reports {device.os_version or 'unknown'}).",
                 )
+            await readiness.warm_enroll_state()
             enroll_info = runtime.enrollment_svc.enrollment_details(tenant)
             if not enroll_info.get("configured"):
+                names = readiness.settings_to_check(enroll_info)
                 raise HTTPException(
                     status_code=400,
-                    detail="Enrollment isn't fully configured, so the re-enrollment profile "
-                           "can't be built (check: "
-                           f"{readiness.settings_to_check(enroll_info)}).",
+                    detail="Enrollment isn't fully configured, so the re-enrollment profile can't be built"
+                           + (f" (check: {names})." if names else "."),
                 )
             wifi_ssid = (params.get("wifi_ssid") or "").strip()
             rts_warnings = _rts_warnings(attrs, wifi_ssid)
@@ -242,15 +256,17 @@ async def send_device_command(
                             "warning_codes": [code for code, _w in rts_warnings],
                             "requires_confirmation": True},
                 )
-            rts_payload = {
-                "enrollment_profile": runtime.enrollment_svc.build_enrollment_mobileconfig(tenant),
-                "wifi_profile": runtime.enrollment_svc.build_wifi_mobileconfig(
-                    wifi_ssid,
-                    password=params.get("wifi_password") or None,
-                    hidden=_truthy(params.get("wifi_hidden")),
-                    org=tenant.name,
-                ) if wifi_ssid else None,
-            }
+            wifi_profile = runtime.enrollment_svc.build_wifi_mobileconfig(
+                wifi_ssid,
+                password=params.get("wifi_password") or None,
+                hidden=_truthy(params.get("wifi_hidden")),
+                org=tenant.name,
+            ) if wifi_ssid else None
+            # Created last, unusable until the erase is dispatched, and deleted on every path that does not dispatch it.
+            rts_challenge, enrollment_profile = await runtime.enrollment_svc.mint_profile(
+                tenant, serial=device.serial_number, expected_udid=device.udid, origin="rts",
+                lifetime=enrollment_links.RTS_LIFETIME, usable_from=enrollment_links.RTS_PENDING_FROM)
+            rts_payload = {"enrollment_profile": enrollment_profile, "wifi_profile": wifi_profile}
 
         from controller.services.device_commands import (
             CommandError, CommandSendError, dispatch_catalog_command,
@@ -272,6 +288,8 @@ async def send_device_command(
                 caller_audits=True,
             )
         except CommandSendError as exc:
+            # With a task id the erase may already be queued, so the challenge is linked and expired, not deleted.
+            await _discard_rts_challenge(rts_challenge, getattr(exc, "task_id", None))
             # The attempt is audited whether or not it reached the device, and both the answer and the row carry what
             # the transport said, not just that something went wrong.
             reason = await _send_failure_reason(exc, tenant)
@@ -283,7 +301,13 @@ async def send_device_command(
             audited = True
             raise HTTPException(status_code=502, detail=detail)
         except CommandError as exc:
+            await _discard_rts_challenge(rts_challenge)
             raise HTTPException(status_code=400, detail=str(exc))
+        except Exception:
+            await _discard_rts_challenge(rts_challenge)
+            raise
+        if rts_challenge is not None:
+            await runtime.enrollment_svc.activate_rts_challenge(rts_challenge, outcome["task_id"])
 
         await record_device_command(
             principal, device, command.command_type, params=params,

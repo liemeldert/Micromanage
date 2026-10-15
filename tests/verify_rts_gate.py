@@ -1,12 +1,9 @@
-"""E2E checks for Return to Service on POST /api/v1/devices/{id}/command.
+"""Return to Service on POST /api/v1/devices/{id}/command, with the MDM connector and the profile issuer stubbed.
 
 Run: PYTHONPATH=. ./.venv/bin/python tests/verify_rts_gate.py
-
-ReturnToService is the dictionary in Apple's EraseDevice command that has the device re-enroll itself after the wipe:
 https://raw.githubusercontent.com/apple/device-management/release/mdm/commands/device.erase.yaml
-The MDM connector and the enrollment profile builder are stand-ins, so only the refusal logic and the payload handed to
-the connector are under test.
 """
+import inspect
 import os
 
 from cryptography.fernet import Fernet
@@ -27,11 +24,14 @@ class FakeConnector:
     """Stand-in for MDMConnector: records what was sent, never uses the network."""
 
     last_erase = None
+    fail = False
 
     def __init__(self, *a, **k):
         pass
 
     async def erase_device(self, udid, pin=None, return_to_service=None):
+        if FakeConnector.fail:
+            raise RuntimeError("transport down")
         FakeConnector.last_erase = {"udid": udid, "pin": pin,
                                     "return_to_service": return_to_service}
         return {"command_uuid": "u-erase-1"}
@@ -40,10 +40,21 @@ class FakeConnector:
         pass
 
 
+class FakeChallenge:
+    """Stand-in for a ScepChallenge row."""
+
+    def __init__(self, kwargs):
+        self.kwargs = kwargs
+
+
 class FakeEnrollment:
     """Stand-in for services.enrollment: configured, and cheap to build."""
 
     configured = True
+    minted = []
+    activated = []
+    discarded = []
+    discard_fails = False
 
     @staticmethod
     def enrollment_details(tenant):
@@ -51,11 +62,27 @@ class FakeEnrollment:
                 "missing": [] if FakeEnrollment.configured else ["MDM_TOPIC"]}
 
     @staticmethod
-    def build_enrollment_mobileconfig(tenant):
-        return b"<enrollment-profile>"
+    async def mint_profile(tenant, **mint):
+        row = FakeChallenge(dict(mint))
+        FakeEnrollment.minted.append(row)
+        return row, b"<enrollment-profile>"
 
     @staticmethod
-    def build_wifi_mobileconfig(ssid, password=None, hidden=False, org=None):
+    async def issue_profile(tenant, **mint):
+        return (await FakeEnrollment.mint_profile(tenant, **mint))[1]
+
+    @staticmethod
+    async def activate_rts_challenge(row, task_id):
+        FakeEnrollment.activated.append((row, task_id))
+
+    @staticmethod
+    async def discard_challenge(row, task_id=None):
+        FakeEnrollment.discarded.append((row, task_id))
+        if FakeEnrollment.discard_fails:
+            raise RuntimeError("database gone")
+
+    @staticmethod
+    def build_wifi_mobileconfig(ssid, password=None, hidden=False, encryption=None, org=None):
         return f"<wifi:{ssid}>".encode()
 
 
@@ -72,6 +99,19 @@ async def main():
     from controller.models.tenant import Tenant, User, Device
     from controller.api.device_summary import _rts_floor
     from controller.api.routes.commands import CommandRequest, send_device_command
+    from controller.services import enrollment as real_enrollment, enrollment_links
+
+    def same_parameters(fake, real):
+        shape = [(p.name, p.kind, p.default is inspect.Parameter.empty)
+                 for p in inspect.signature(real).parameters.values()]
+        return shape == [(p.name, p.kind, p.default is inspect.Parameter.empty)
+                         for p in inspect.signature(fake).parameters.values()]
+
+    print("0) the stand-in matches the real enrollment service")
+    for name in ("mint_profile", "issue_profile", "activate_rts_challenge", "discard_challenge",
+                 "enrollment_details", "build_wifi_mobileconfig"):
+        check(f"{name} takes the real function's parameters",
+              same_parameters(getattr(FakeEnrollment, name), getattr(real_enrollment, name)))
 
     tenant = await Tenant.create(id="t1", name="Test Tenant")
     admin_user = await User.create(tenant=tenant, email="admin@t1", role="admin")
@@ -125,6 +165,18 @@ async def main():
     check("the named network became the Wi-Fi profile",
           (FakeConnector.last_erase or {}).get("return_to_service", {})
           .get("wifi_profile") == b"<wifi:Lab>")
+    minted = FakeEnrollment.minted[-1] if FakeEnrollment.minted else None
+    check("the challenge is bound to the device's serial and udid and not usable yet",
+          minted is not None and minted.kwargs.get("serial") == "IPHONE-U"
+          and minted.kwargs.get("expected_udid") == "UDID-IPHONE-U"
+          and minted.kwargs.get("usable_from") is enrollment_links.RTS_PENDING_FROM)
+    check("...with the Return to Service origin and lifetime",
+          minted is not None and minted.kwargs.get("origin") == "rts"
+          and minted.kwargs.get("lifetime") == enrollment_links.RTS_LIFETIME)
+    check("...and it is linked to the erase task once the erase is sent",
+          minted is not None and isinstance(body, dict)
+          and (minted, body.get("task_id")) in FakeEnrollment.activated
+          and not any(row is minted for row, _task in FakeEnrollment.discarded))
 
     supervised = await device("IPHONE-S", "iPhone15,2", "17.5", IsSupervised=True)
     status, _ = await erase(supervised, wifi_ssid="Lab")
@@ -247,8 +299,51 @@ async def main():
     check("erase without return_to_service sends no RTS payload",
           (FakeConnector.last_erase or {}).get("return_to_service") is None)
 
-    # 8. An unconfigured enrollment cannot build the profile the device needs.
-    print("8) enrollment has to be configured")
+    # 8. A send that fails leaves no usable challenge behind.
+    print("8) a failed send leaves no usable challenge")
+    FakeConnector.fail = True
+    minted_before = len(FakeEnrollment.minted)
+    try:
+        status, _ = await erase(supervised, wifi_ssid="Lab")
+    finally:
+        FakeConnector.fail = False
+    failed_row = FakeEnrollment.minted[-1] if len(FakeEnrollment.minted) > minted_before else None
+    failed_task = next((task for row, task in FakeEnrollment.discarded if row is failed_row), None)
+    check("the failed send answers 502", status == 502)
+    check("...and its challenge is discarded with the erase task's id, never activated",
+          failed_row is not None and failed_task is not None
+          and not any(row is failed_row for row, _task in FakeEnrollment.activated))
+
+    FakeConnector.fail = True
+    FakeEnrollment.discard_fails = True
+    try:
+        status, detail = await erase(supervised, wifi_ssid="Lab")
+    finally:
+        FakeConnector.fail = False
+        FakeEnrollment.discard_fails = False
+    check("a discard that fails leaves the send failure's 502 in place",
+          status == 502 and "Failed to send command" in str(detail))
+
+    from controller.models.tenant import ScepChallenge
+    from controller.utils.timeutil import as_utc, utcnow
+    row, _challenge, _cn = await enrollment_links.mint_challenge(
+        tenant, serial="IPHONE-S", expected_udid="UDID-IPHONE-S", origin="rts",
+        lifetime=enrollment_links.RTS_LIFETIME, usable_from=enrollment_links.RTS_PENDING_FROM)
+    await real_enrollment.discard_challenge(row, task_id=failed_task)
+    kept = await ScepChallenge.get_or_none(id=row.id)
+    check("the real discard with a task id keeps the challenge, linked to the task and expired",
+          kept is not None and str(kept.task_id) == str(failed_task) and as_utc(kept.expires_at) <= utcnow())
+    row, _challenge, _cn = await enrollment_links.mint_challenge(
+        tenant, serial="IPHONE-S", expected_udid="UDID-IPHONE-S", origin="rts",
+        lifetime=enrollment_links.RTS_LIFETIME, usable_from=enrollment_links.RTS_PENDING_FROM)
+    await real_enrollment.discard_challenge(row)
+    check("...and without one deletes it", not await ScepChallenge.filter(id=row.id).exists())
+    minted_before = len(FakeEnrollment.minted)
+    await erase(appletv17, wifi_ssid="Lab")
+    check("a refused erase mints no challenge", len(FakeEnrollment.minted) == minted_before)
+
+    # 9. An unconfigured enrollment cannot build the profile the device needs.
+    print("9) enrollment has to be configured")
     FakeEnrollment.configured = False
     try:
         status, detail = await erase(supervised, wifi_ssid="Lab")

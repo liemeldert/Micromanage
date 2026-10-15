@@ -47,37 +47,6 @@ def _touch_heartbeat() -> None:
         logger.warning("could not touch heartbeat file %s", HEARTBEAT_FILE, exc_info=True)
 
 
-async def backfill_bootstrap_tokens() -> None:
-    """One-time read-only backfill querying NanoMDM to mark devices with escrowed bootstrap tokens."""
-    import asyncpg
-    from controller.models.tenant import Device
-    from controller.services.nanomdm_store import _nanomdm_dsn
-
-    try:
-        dsn = _nanomdm_dsn()
-    except Exception as exc:
-        logger.warning("backfill_bootstrap_tokens: cannot resolve NanoMDM DSN: %s", exc)
-        return
-    try:
-        conn = await asyncpg.connect(dsn)
-    except Exception as exc:
-        logger.warning("backfill_bootstrap_tokens: cannot connect to NanoMDM database: %s", exc)
-        return
-    try:
-        query = "SELECT id FROM devices WHERE bootstrap_token_b64 IS NOT NULL AND bootstrap_token_b64 <> ''"
-        rows = await conn.fetch(query)
-        ids = [row["id"] for row in rows if row.get("id")]
-        if ids:
-            updated = await Device.filter(udid__in=ids, enrollment_state="enrolled").update(
-                bootstrap_token_escrowed=True
-            )
-            logger.info("backfill_bootstrap_tokens: marked %d device(s) as bootstrap_token_escrowed", updated)
-    except Exception as exc:
-        logger.warning("backfill_bootstrap_tokens: query failed: %s", exc)
-    finally:
-        await conn.close()
-
-
 class MDMController:
     # Java and its consequences to society
     def __init__(self):
@@ -87,10 +56,12 @@ class MDMController:
 
     @staticmethod
     async def warn_nanomdm_storage() -> None:
-        """Log when NanoMDM keeps completed command results, which carry escrowed secrets in the clear."""
-        warning = await readiness.check_nanomdm_storage()
-        if warning:
-            logger.warning("readiness: %s", warning)
+        """Log when NanoMDM keeps completed command results, which carry escrowed secrets in the clear, and when its
+        database lacks a column the controller uses."""
+        for check in (readiness.check_nanomdm_storage, readiness.check_nanomdm_schema):
+            warning = await check()
+            if warning:
+                logger.warning("readiness: %s", warning)
 
     async def start(self):
         """Start the MDM controller."""
@@ -98,7 +69,6 @@ class MDMController:
         await init_db()
 
         await self._bootstrap_admin()
-        await backfill_bootstrap_tokens()
         await self.warn_nanomdm_storage()
         self.scheduler.add_job(self.warn_nanomdm_storage, 'interval', hours=1, max_instances=1, coalesce=True)
 
@@ -122,6 +92,12 @@ class MDMController:
         # Retention sweep: aged-out tasks, resolved alerts, finished flow runs, audit log cleanup (daily).
         self.scheduler.add_job(self.retention_tick, 'interval', hours=int(os.getenv('RETENTION_INTERVAL_HOURS', '24')),
                                max_instances=1, coalesce=True, )
+        # Identity certificate renewal (daily) and the identity reconciler (every minute, and once at boot).
+        self.scheduler.add_job(self.identity_renew_tick, 'interval',
+                               hours=int(os.getenv('IDENTITY_RENEW_INTERVAL_HOURS', '24')), max_instances=1,
+                               coalesce=True, )
+        self.scheduler.add_job(self.identity_reconcile_tick, 'interval', minutes=1, max_instances=1, coalesce=True,
+                               next_run_time=datetime.now(), )
         self.scheduler.start()
         # Liveness for the container healthcheck: this process serves no HTTP, so it touches a file instead
         # (deploy/healthcheck.py reads it).
@@ -183,6 +159,27 @@ class MDMController:
         (off by default), and warn if the audit log has grown past its size threshold."""
         from controller.services.task_manager import run_retention
         await run_retention()
+
+    async def identity_renew_tick(self):
+        """Send renewal profiles to enrolled devices whose identity certificate is legacy or close to expiry."""
+        from controller.services import identity_renewal
+        counts = await identity_renewal.scan_and_renew()
+        if counts["pushed"] or counts["failed"] or counts["blocked"]:
+            logger.info("identity renewal: %d due, %d sent, %d failed, %d skipped for extra associations",
+                        counts["due"], counts["pushed"], counts["failed"], counts["blocked"])
+
+    async def identity_reconcile_tick(self):
+        """Run the identity cutover if it has not happened, then Judge udids holding certificates outside their
+        allowed set."""
+        from controller.services import identity_renewal
+        counts = await identity_renewal.reconcile_once()
+        if any(counts.values()):
+            # A device waiting for its own Authenticate stays a candidate every minute, so that case stays at debug.
+            level = logging.INFO if (counts["accepted"] or counts["refused"] or counts["errors"]) else logging.DEBUG
+            logger.log(level, "identity reconciler: %d judged, %d accepted, %d refused, %d unchanged, %d errors, "
+                              "%d bootstrap token(s) written back, %d sealed",
+                       counts["judged"], counts["accepted"], counts["refused"], counts["unapplied"],
+                       counts["errors"], counts["bootstrap_restored"], counts["bootstrap_captured"])
 
     async def _bootstrap_admin(self):
         """Seed local admin from env vars (CONTROLLER_BOOTSTRAP_ADMIN_EMAIL/PASSWORD) on first boot if configured."""
@@ -312,7 +309,13 @@ class MDMController:
             tenant.allowed_users = tcfg['allowed_users']
             fields.append('allowed_users')
         if isinstance(tcfg.get('s3'), dict):
-            tenant.s3_config = tcfg['s3']
+            s3 = dict(tcfg['s3'])
+            # shared_prefix is set through tenant_cli only, so the database value outlives what the file says.
+            s3.pop('shared_prefix', None)
+            stored = tenant.s3_config if isinstance(tenant.s3_config, dict) else {}
+            if 'shared_prefix' in stored:
+                s3['shared_prefix'] = stored['shared_prefix']
+            tenant.s3_config = s3
             fields.append('s3_config')
         if isinstance(tcfg.get('device_naming'), dict):
             tenant.device_naming = tcfg['device_naming']

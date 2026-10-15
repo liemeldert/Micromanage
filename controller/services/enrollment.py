@@ -17,7 +17,7 @@ from typing import Any, Dict, Optional, Tuple
 from urllib.parse import quote
 
 from controller.auth.tokens import _secret as _jwt_secret, AuthConfigError
-from controller.services import readiness
+from controller.services import enrollment_links, readiness
 from controller.utils import compare
 from controller.utils.timeutil import as_utc
 
@@ -27,8 +27,8 @@ _token_eq = compare.constant_time_eq
 
 
 def enrollment_token(tenant_id: str) -> str:
-    """The per-tenant token the unauthenticated enrollment endpoints require. Raises AuthConfigError when JWT_SECRET is
-    unset or the shipped placeholder, since anyone could then compute the token and fetch the SCEP challenge.
+    """The per-tenant token in the ADE enrollment URL. Raises AuthConfigError when JWT_SECRET is unset or the shipped
+    placeholder, since anyone could then compute the token.
     """
     return hmac.new(
         _jwt_secret().encode(), f"enroll:{tenant_id}".encode(), sha256
@@ -79,8 +79,8 @@ def verify_tenant_url_token(tenant_id: str, token: str) -> bool:
 
 def log_token_refusal(endpoint: str, tenant_id: str, reason: str,
                       remote_addr: Optional[str]) -> None:
-    """Record why an unauthenticated device endpoint refused a caller. The three device-facing endpoints answer the same
-    404 for an unknown tenant and a wrong token, so this log line is the only record of which it was.
+    """Record why an unauthenticated device endpoint refused a caller. Those endpoints answer one 404 for every refusal,
+    so this log line is the only record of the reason.
     """
     logger.warning(
         "%s: refused (tenant=%s, remote=%s): %s",
@@ -109,9 +109,6 @@ def _hostname() -> Optional[str]:
     """
     return os.getenv("MDM_HOSTNAME") or None
 
-
-def _scep_name() -> str:
-    return os.getenv("SCEP_NAME", "mdm_device_scep")
 
 
 def _mdm_server_url() -> Optional[str]:
@@ -143,15 +140,11 @@ def _scep_url() -> Optional[str]:
     if explicit:
         return explicit
     host = _hostname()
-    return f"https://{host}/scep/{_scep_name()}" if host else None
+    return f"https://{host}/scep/{readiness.scep_name()}" if host else None
 
 
 def _topic() -> str:
     return os.getenv("MDM_TOPIC", "")
-
-
-def _scep_challenge() -> str:
-    return os.getenv("SCEP_CHALLENGE", "")
 
 
 # The armour around a certificate in a PEM file. Only the first block is read; see _embed_ca_der.
@@ -209,18 +202,9 @@ def _days_remaining(expires_at: Optional[datetime]) -> Optional[int]:
 
 
 def enrollment_details(tenant) -> Dict[str, Any]:
-    """Non-secret enrollment details for the console, without the SCEP challenge. configured and missing come from
-    readiness.check('enroll'), the same source the readiness endpoint reports and the download refuses on.
+    """Non-secret enrollment details for the console. configured and missing come from readiness.check('enroll'), the
+    same source the readiness endpoint reports and the download refuses on.
     """
-    public = readiness.public_api_url()
-    try:
-        token = enrollment_token(tenant.id)
-    except AuthConfigError:
-        # No token means no working enrollment link, so none is returned rather than a URL that can never authenticate.
-        # The readiness predicate reports JWT_SECRET for the same reason.
-        token = None
-    enroll_url = f"{public}/api/v1/enroll/{tenant.id}/{token}" if public and token else None
-
     status = readiness.check(readiness.ENROLL)
     missing = list(status.missing)
 
@@ -232,11 +216,9 @@ def enrollment_details(tenant) -> Dict[str, Any]:
         "organization": tenant.name,
         "mdm_server_url": _mdm_server_url(),
         "scep_url": _scep_url(),
-        "scep_name": _scep_name(),
+        "scep_name": readiness.scep_name(),
         "topic": _topic() or None,
         "hostname": _hostname(),
-        "enroll_url": enroll_url,
-        "token": token,
         "configured": status.ready,
         "missing": missing,
         # Set-but-broken settings, kept apart from "missing": an admin shouldn't be told to set what's already set.
@@ -290,26 +272,30 @@ def _extract_plist(data: bytes) -> Optional[Dict[str, Any]]:
     return None
 
 
-def parse_machine_info(header_value: Optional[str]) -> Tuple[Dict[str, Any], bool]:
-    """Parse and verify the CMS-signed MachineInfo in the aspen-deviceinfo header. Returns (machine_info, verified) and
-    never raises; an unverifiable header gives verified=False with whatever MachineInfo could be extracted.
+def parse_machine_info(header_value: Optional[str]) -> Tuple[Dict[str, Any], bool, Optional[str]]:
+    """Parse and verify the CMS-signed MachineInfo in the aspen-deviceinfo header. Returns (machine_info, verified,
+    digest). An unverifiable header gives verified=False with whatever MachineInfo could be extracted.
+    digest is the sha256 hex of the signed content followed by the signature, set only when verified.
     """
     if not header_value:
-        return {}, False
+        return {}, False, None
     try:
         raw = base64.b64decode(header_value, validate=False)
     except Exception:
         logger.warning("ADE: x-apple-aspen-deviceinfo header is not valid base64")
-        return {}, False
+        return {}, False, None
 
     verified = False
+    digest: Optional[str] = None
     info: Dict[str, Any] = {}
     try:
         from controller.services.dep_verify import verify_cms
 
-        content, verified, detail = verify_cms(raw)
+        content, verified, detail, signature = verify_cms(raw)
         if content:
             info = _extract_plist(bytes(content)) or {}
+        if verified:
+            digest = sha256(bytes(content) + bytes(signature or b"")).hexdigest()
         # detail carries the signer's issuer name (and any exception text) off the same unverified header.
         logger.info("ADE: machine-info verification: %s", _loggable(detail))
     except Exception:
@@ -324,10 +310,21 @@ def parse_machine_info(header_value: Optional[str]) -> Tuple[Dict[str, Any], boo
         logger.info("ADE: machine-info SERIAL=%s PRODUCT=%s VERSION=%s verified=%s",
                     _loggable(info.get("SERIAL")), _loggable(info.get("PRODUCT")),
                     _loggable(info.get("OS_VERSION")), verified)
-    return info, verified
+    return info, verified, digest
 
 
-def build_enrollment_profile(tenant) -> Dict[str, Any]:
+def mdm_payload_uuid(tenant_id: str) -> str:
+    """The MDM payload's PayloadUUID, stable per tenant so a re-pushed profile updates the installed payload."""
+    return str(uuid.uuid5(uuid.NAMESPACE_URL, f"micromanage-mdm-{tenant_id}")).upper()
+
+
+def root_payload_uuid(tenant_id: str) -> str:
+    """The embedded root certificate payload's PayloadUUID, stable per tenant like the MDM payload's."""
+    return str(uuid.uuid5(uuid.NAMESPACE_URL, f"micromanage-root-{tenant_id}")).upper()
+
+
+def build_enrollment_profile(tenant, challenge: str, subject_cn: str) -> Dict[str, Any]:
+    """The enrollment profile for one minted SCEP challenge and the Subject CN it is bound to."""
     scep_uuid = str(uuid.uuid4()).upper()
     org = tenant.name or tenant.id
     profile: Dict[str, Any] = {
@@ -350,9 +347,9 @@ def build_enrollment_profile(tenant) -> Dict[str, Any]:
                 "PayloadContent": {
                     # Empty rather than None, as in _server_url_for: plistlib cannot represent None.
                     "URL": _scep_url() or "",
-                    "Name": _scep_name(),
-                    "Subject": [[["CN", f"{tenant.id} MDM Device {uuid.uuid4().hex}"]]],
-                    "Challenge": _scep_challenge(),
+                    "Name": readiness.scep_name(),
+                    "Subject": [[["CN", subject_cn]]],
+                    "Challenge": challenge,
                     "Keysize": 2048,
                     "Key Type": "RSA",
                     # 5 = digitalSignature(1) | keyEncipherment(4). step-ca's SCEP flow encrypts the issued
@@ -366,7 +363,7 @@ def build_enrollment_profile(tenant) -> Dict[str, Any]:
                 "PayloadType": "com.apple.mdm",
                 "PayloadVersion": 1,
                 "PayloadIdentifier": f"com.micromanage.{tenant.id}.enroll.mdm",
-                "PayloadUUID": str(uuid.uuid4()).upper(),
+                "PayloadUUID": mdm_payload_uuid(tenant.id),
                 "PayloadDisplayName": "Mobile Device Management",
                 "IdentityCertificateUUID": scep_uuid,
                 "ServerURL": _server_url_for(tenant.id),
@@ -387,7 +384,7 @@ def build_enrollment_profile(tenant) -> Dict[str, Any]:
                 "PayloadType": "com.apple.security.root",
                 "PayloadVersion": 1,
                 "PayloadIdentifier": f"com.micromanage.{tenant.id}.enroll.root",
-                "PayloadUUID": str(uuid.uuid4()).upper(),
+                "PayloadUUID": root_payload_uuid(tenant.id),
                 "PayloadDisplayName": f"{org} Certificate Authority",
                 "PayloadContent": ca_der,
             }
@@ -395,9 +392,9 @@ def build_enrollment_profile(tenant) -> Dict[str, Any]:
     return profile
 
 
-def build_enrollment_mobileconfig(tenant) -> bytes:
+def build_enrollment_mobileconfig(tenant, challenge: str, subject_cn: str) -> bytes:
     """The enrollment profile, CMS-signed when the tenant has a signing certificate, otherwise unsigned."""
-    plist_bytes = plistlib.dumps(build_enrollment_profile(tenant))
+    plist_bytes = plistlib.dumps(build_enrollment_profile(tenant, challenge, subject_cn))
     from controller.services import profile_signing
     if not profile_signing.is_configured(tenant):
         return plist_bytes
@@ -411,6 +408,38 @@ def build_enrollment_mobileconfig(tenant) -> bytes:
         logger.exception("enrollment: signing the profile failed for tenant %s; serving it unsigned",
                          getattr(tenant, "id", "unknown"))
         return plist_bytes
+
+
+async def mint_profile(tenant, **mint) -> Tuple[Any, bytes]:
+    """Mint a challenge with enrollment_links.mint_challenge's keyword arguments and build the profile carrying it.
+    Returns (challenge row, profile bytes)."""
+    row, challenge, subject_cn = await enrollment_links.mint_challenge(tenant, **mint)
+    return row, build_enrollment_mobileconfig(tenant, challenge, subject_cn)
+
+
+async def issue_profile(tenant, **mint) -> bytes:
+    """The profile bytes from mint_profile, for issuers that never touch the row again."""
+    return (await mint_profile(tenant, **mint))[1]
+
+
+async def activate_rts_challenge(row, task_id: str) -> None:
+    """Link a Return to Service challenge to its erase task and make it usable from now. A failure is logged and leaves
+    the challenge unusable."""
+    try:
+        await enrollment_links.link_task(row, task_id)
+        await enrollment_links.activate_challenge(row, enrollment_links.RTS_LIFETIME)
+    except Exception:
+        logger.exception("Return to Service: could not activate challenge %s for task %s", row.id, task_id)
+
+
+async def discard_challenge(row, task_id: Optional[str] = None) -> None:
+    """Delete a challenge whose profile was never sent. With a task id, whose command may have been queued, link the
+    challenge to that task and expire it instead."""
+    if task_id:
+        await enrollment_links.link_task(row, task_id)
+        await enrollment_links.expire_challenge(row)
+        return
+    await row.delete()
 
 
 def build_wifi_profile(

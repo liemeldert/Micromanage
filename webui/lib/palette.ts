@@ -56,8 +56,7 @@ export interface PaletteDestination {
     icon: TablerIcon;
     // The sidebar section this page belongs to. Ungrouped pages sit at the top level of the nav, in table order.
     group?: NavGroupId;
-    // Sidebar label for when the group already names the subject: "Flows > Editor" rather than
-    // "Flows > Flows". The palette keeps the full label, where the entry stands alone.
+    // Sidebar label for when the group already names the subject
     navLabel?: string;
     // One short line under the label in the palette. Not shown in the sidebar.
     description?: string;
@@ -65,11 +64,7 @@ export interface PaletteDestination {
     keywords?: string[];
     // Rendered in the sidebar nav. Entries without it are reached from another page's content or from the palette.
     sidebar?: boolean;
-    // The page refuses non-admins, so neither the sidebar nor the palette offers it to them.
-    // Hidden rather than greyed out.
     adminOnly?: boolean;
-    // Only reachable when the raw YAML view is switched on in Settings. The palette honours the
-    // same switch as the sidebar, so it is not a way around it.
     requiresYaml?: boolean;
 }
 
@@ -108,6 +103,7 @@ export const PALETTE_DESTINATIONS: PaletteDestination[] = [
         description: "Manual enrollment profiles and QR codes",
         keywords: ["enroll", "ota", "manual", "qr", "onboard"],
         sidebar: true,
+        adminOnly: true,
     },
     {
         // Distinct from "Enrollment" above, which is the manual profile-install flow. This one is

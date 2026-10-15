@@ -1,5 +1,5 @@
 """Device management, lookup, scope explanation, rename, and tag endpoints."""
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import logging
 from typing import Any, Dict, List, Optional
 
@@ -24,6 +24,7 @@ from controller.models.tenant import (
 )
 from controller.services.audit import record_audit, record_tag_change
 from controller.services.device_tags import write_tags
+from controller.utils.timeutil import as_utc, utcnow
 
 logger = logging.getLogger(__name__)
 
@@ -227,6 +228,10 @@ async def forget_device(
     return {"message": "Device forgotten", "discarded_secret_kinds": discarded_kinds}
 
 
+def _iso(value: Optional[datetime]) -> Optional[str]:
+    return as_utc(value).isoformat() if value is not None else None
+
+
 @router.get("/api/v1/devices/{device_id}")
 async def get_device_details(device_id: str, principal: Principal = Depends(get_current_principal)):
     """One device in full: its summary fields, everything it has reported about itself, its app and profile deployments,
@@ -297,6 +302,8 @@ async def get_device_details(device_id: str, principal: Principal = Depends(get_
             "suggested_name": suggested_name,
             "attributes": attributes,
             "last_task_error": last_task_error,
+            "reenrollment_allowed_until": _iso(device.reenrollment_allowed_until),
+            "identity_sha256": device.identity_sha256,
         },
         "device_profiles": device.installed_profiles or [],
         "device_apps": device.installed_apps or [],
@@ -304,6 +311,22 @@ async def get_device_details(device_id: str, principal: Principal = Depends(get_
         "installed_profiles": [profile.to_dict() for profile in profiles],
         "recent_tasks": [task.to_dict() for task in tasks],
     }
+
+
+REENROLLMENT_WINDOW = timedelta(hours=24)
+
+
+@router.post("/api/v1/devices/{device_id}/allow-reenrollment")
+async def allow_reenrollment(device_id: str, admin: Principal = Depends(require_admin)):
+    """Allow this device to re-enroll with a new enrollment profile during the next 24 hours (admin only).
+    This grace period ends at the first re-enrollment."""
+    device = await get_owned_or_404(Device, device_id, admin.tenant, "Device not found")
+    device.reenrollment_allowed_until = utcnow() + REENROLLMENT_WINDOW
+    await device.save(update_fields=["reenrollment_allowed_until"])
+    until = _iso(device.reenrollment_allowed_until)
+    await record_audit(admin, "device.allow_reenrollment", target_type="device", target_id=str(device.id),
+                       detail={"serial_number": device.serial_number, "until": until})
+    return {"device": _device_summary(device), "reenrollment_allowed_until": until}
 
 
 def _explain_scope(

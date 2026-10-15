@@ -83,32 +83,40 @@ async def tenant_set_s3_prefix(
     nests inside is refused.
     """
     tenant = await _get_tenant(tenant_id)
-    from controller.services.app_manager import TENANT_S3_KEYS, _is_set
+    from controller.services.app_manager import effective_s3_prefix, uses_own_bucket
     value = prefix.strip().lstrip("/")
     if value and not value.endswith("/"):
         value += "/"
+    at_root = []
     for other in await Tenant.all():
         if other.id == tenant.id:
             continue
         cfg = other.s3_config or {}
-        if not isinstance(cfg, dict) or any(_is_set(cfg.get(k)) for k in TENANT_S3_KEYS):
+        if not isinstance(cfg, dict) or uses_own_bucket(cfg):
             continue  # its own bucket, no overlap possible
-        theirs = str(cfg.get("prefix") or "")
+        theirs = effective_s3_prefix(cfg)
         if theirs and not theirs.endswith("/"):
             theirs += "/"
-        # An empty prefix is the bucket root, which holds every other tenant's keys.
-        if value == theirs or not value or not theirs \
-                or value.startswith(theirs) or theirs.startswith(value):
+        if not theirs:
+            # That tenant reads the whole bucket already, so moving this one into a sub-prefix adds no overlap.
+            at_root.append(other.id)
+            if value:
+                continue
+        # An empty value is the bucket root, which holds every other tenant's keys.
+        if value == theirs or not value or value.startswith(theirs) or theirs.startswith(value):
             console.print(f"[red]prefix {value!r} overlaps tenant {other.id!r} ({theirs!r}) in the shared bucket[/red]")
             raise typer.Exit(1)
     cfg = dict(tenant.s3_config or {}) if isinstance(tenant.s3_config, dict) else {}
-    if value:
-        cfg["prefix"] = value
-    else:
+    # An empty value is stored too, so it names the bucket root rather than falling back to a legacy prefix.
+    cfg["shared_prefix"] = value
+    if not uses_own_bucket(cfg):
         cfg.pop("prefix", None)
     tenant.s3_config = cfg
     await tenant.save(update_fields=["s3_config", "updated_at"])
     console.print(f"[green]tenant {tenant.id}: s3 prefix set to {value!r}[/green]")
+    if at_root:
+        console.print(f"[yellow]still at the shared bucket root, and able to read every key there, {tenant.id!r}'s "
+                      f"included: {', '.join(sorted(at_root))}[/yellow]")
 
 
 @tenant_app.command("set-quota")

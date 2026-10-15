@@ -8,8 +8,13 @@ from typing import Any, Dict, List, Optional, Tuple
 import httpx
 from controller.services import readiness
 
-# only characters an Apple UDID (hex, dashed iOS form, or Mac UUID) contains.
-_SINGLE_ENROLLMENT_ID = re.compile(r'^[A-Za-z0-9-]{1,40}$')
+# Apple UDIDs are 40 hex digits, the dashed 25-character iPhone and iPad form, or a UUID on a Mac. NanoMDM splits its
+# /v1/enqueue/{id} path on commas
+_UDID_RE = re.compile(r'[A-Za-z0-9-]{1,40}')
+
+
+def valid_udid(udid: Any) -> bool:
+    return isinstance(udid, str) and _UDID_RE.fullmatch(udid) is not None
 
 logger = logging.getLogger(__name__)
 
@@ -148,7 +153,7 @@ class MDMConnector:
         Every command method below goes through here rather than calling enqueue_command directly.
         """
         # One device per call. NanoMDM reads the path segment as a comma-separated list.
-        if not _SINGLE_ENROLLMENT_ID.match(enrollment_id or ''):
+        if not valid_udid(enrollment_id):
             raise ValueError(f'refusing to enqueue for a malformed enrollment id {str(enrollment_id)[:80]!r}')
         self._require_api_key(f'/v1/enqueue/{enrollment_id}')
         return await self.enqueue_command(
@@ -241,10 +246,12 @@ class MDMConnector:
     async def install_profile(self, device_udid: str, profile_data: Dict[str, Any]) -> Dict[str, Any]:
         # Apple wants Payload as a plist <data> element. plistlib emits <data> for Python bytes and base64s it itself;
         # pre-encoding to a str yields a <string> of base64, which devices reject with a command Error.
-        profile_plist = plistlib.dumps(profile_data)
+        return await self.install_profile_bytes(device_udid, plistlib.dumps(profile_data))
 
+    async def install_profile_bytes(self, device_udid: str, profile: bytes) -> Dict[str, Any]:
+        """InstallProfile with an already serialized, possibly signed, profile."""
         command_dict = {
-            'Payload': profile_plist
+            'Payload': profile
         }
 
         command_plist, command_uuid = self._create_command_plist('InstallProfile', command_dict)
