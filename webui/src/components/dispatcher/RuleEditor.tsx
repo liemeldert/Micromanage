@@ -7,25 +7,20 @@ import {
     Button,
     Divider,
     Group,
-    MultiSelect,
     NavLink,
     NumberInput,
-    Paper,
     ScrollArea,
     Select,
     Stack,
     Switch,
-    TagsInput,
     Text,
     TextInput,
     Tooltip,
-    UnstyledButton,
 } from "@mantine/core";
 import {useMediaQuery} from "@mantine/hooks";
 import {modals} from "@mantine/modals";
 import {notifications} from "@mantine/notifications";
 import {
-    IconAlertTriangle,
     IconDeviceFloppy,
     IconInfoCircle,
     IconListDetails,
@@ -38,37 +33,29 @@ import {
     api,
     type CatalogCommand,
     type Device,
-    type DispatcherAction,
     type DispatcherCheckSpec,
     type DispatcherConfig,
     type DispatcherRule,
     type DispatcherWebhook,
     type Severity,
 } from "../../../lib/api";
-import {type Group as GroupDef, type Scope, useConfigResource, useTagRegistry,} from "../../../lib/config";
+import {type Group as GroupDef, type Scope, useConfigResource, useTagRegistry} from "../../../lib/config";
 import {useAuth} from "../../../lib/auth-context";
+import {SEVERITIES, SEVERITY_COLORS} from "../../../lib/status-labels";
 import {confirmDiscard, useBeforeUnload} from "../../../lib/use-unsaved-changes";
-import {RedactedInput} from "../config/RedactedInput";
 import {ScopeEditor} from "../config/ScopeEditor";
 import {SidebarLayout} from "../layout/SidebarLayout";
 import {GlassCard} from "../ui/GlassCard";
+import {ActionsEditor} from "./ActionsEditor";
+import {CheckPicker} from "./CheckPicker";
+import {plural} from "./rule-summary";
+import {RuleListItem} from "./RuleListItem";
+import {WebhooksSection} from "./WebhooksSection";
 
-const SEVERITIES: Severity[] = ["black", "red", "yellow", "green"];
-// Same triage colours the alert board uses, so a rule reads the same in both places.
-const SEVERITY_COLOR: Record<string, string> = {
-    black: "dark",
-    red: "red",
-    yellow: "yellow",
-    green: "green",
-};
-const REMEDIATION_TYPES = new Set(["install_profiles", "install_apps", "send_command"]);
-const ACTION_TYPES = ["webhook", "assign_tag", "remove_tag", "install_profiles", "install_apps", "send_command"];
-
-// The sidebar selects either one rule or the shared webhook targets, which are
-// config on the same document but not part of any single rule.
+// The sidebar selects one rule or the webhook targets, which share the document but belong to no single rule.
 type Selection = { kind: "rule"; id: string } | { kind: "webhooks" };
 
-const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? "" : "s"}`;
+type Doc = DispatcherConfig & { rules: DispatcherRule[]; webhooks: DispatcherWebhook[] };
 
 // Worst first, and anything the catalog does not know about last.
 const severityRank = (s: string) => {
@@ -76,21 +63,7 @@ const severityRank = (s: string) => {
     return i < 0 ? SEVERITIES.length : i;
 };
 
-// One line of at-a-glance scope for the sidebar. An empty scope means every
-// device here (ScopeEditor is given emptyMatchesAll below).
-function scopeSummary(scope: Record<string, unknown> | undefined): string {
-    const count = (key: string) => (Array.isArray(scope?.[key]) ? (scope![key] as unknown[]).length : 0);
-    const parts: string[] = [];
-    const groups = count("groups");
-    const conditions = count("conditions");
-    const included = count("include_devices");
-    const excluded = count("exclude_devices");
-    if (groups) parts.push(plural(groups, "group"));
-    if (conditions) parts.push(plural(conditions, "condition"));
-    if (included) parts.push(`${included} pinned`);
-    if (excluded) parts.push(`${excluded} excluded`);
-    return parts.length ? parts.join(" · ") : "All devices";
-}
+const swatchColor = (severity: string) => `var(--mantine-color-${SEVERITY_COLORS[severity] ?? "gray"}-6)`;
 
 export function RuleEditor({initialRuleId}: { initialRuleId?: string | null }) {
     const {token, isAdmin} = useAuth();
@@ -98,8 +71,7 @@ export function RuleEditor({initialRuleId}: { initialRuleId?: string | null }) {
         rules: [],
         webhooks: [],
     });
-    // Edited in memory until Save, so the editor keeps what it loaded to know what is unsaved. Null
-    // until the first non-loading render takes a snapshot.
+    // The document as last loaded or saved, serialized, to tell what is unsaved. Null until the first load finishes.
     const [baseline, setBaseline] = useState<string | null>(null);
     const {tagNames} = useTagRegistry();
     const [checks, setChecks] = useState<DispatcherCheckSpec[]>([]);
@@ -115,42 +87,36 @@ export function RuleEditor({initialRuleId}: { initialRuleId?: string | null }) {
 
     useEffect(() => {
         if (!token) return;
+        const ids = (list: unknown) => ((list as { id: string }[] | undefined) ?? []).map((x) => x.id);
         api.getDispatcherCheckCatalog(token).then((c) => setChecks(c.checks)).catch(() => {
         });
         api.getCommandCatalog(token).then((c) => setCommands(c.commands)).catch(() => {
         });
-        api.getConfig(token, "profiles").then((p) => setProfileIds(((p?.profiles as {
-            id: string
-        }[]) ?? []).map((x) => x.id))).catch(() => {
+        api.getConfig(token, "profiles").then((p) => setProfileIds(ids(p?.profiles))).catch(() => {
         });
-        api.getConfig(token, "apps").then((a) => setAppIds(((a?.apps as {
-            id: string
-        }[]) ?? []).map((x) => x.id))).catch(() => {
+        api.getConfig(token, "apps").then((a) => setAppIds(ids(a?.apps))).catch(() => {
         });
         api.getConfig(token, "groups").then((g) => setGroups((g?.groups as GroupDef[]) ?? [])).catch(() => {
         });
-        // Enrolled only, matching the flow editor and the scope-preview endpoint's total. The
-        // dispatcher evaluates enrolled devices, so this scope counter must not quote a wider fleet.
+        // Enrolled only, as the dispatcher evaluates no other devices.
         api.listDevices(token, {state: "enrolled", limit: 500}).then((r) => setDevices(r.devices)).catch(() => {
         });
     }, [token]);
 
     const rules = useMemo(() => data?.rules ?? [], [data]);
     const webhooks = useMemo(() => data?.webhooks ?? [], [data]);
-    // The order the sidebar shows: worst tier first, config order within a tier
-    // (sort is stable). Selection follows this order, not the file's.
+    // Worst tier first and config order within a tier (the sort is stable). Selection follows this order.
     const ordered = useMemo(
         () => [...rules].sort((a, b) => severityRank(a.severity) - severityRank(b.severity)),
         [rules],
     );
 
-    // A selected rule that a reload or a discard took away leaves the selection dangling; drop it and
-    // let the effect below fall back to the first rule.
+    // Clears a selection whose rule a reload or discard removed, and the effect below then selects the first rule.
     useEffect(() => {
         if (selection?.kind === "rule" && !rules.some((r) => r.id === selection.id)) setSelection(null);
     }, [rules, selection]);
-    // The ?rule= deep link only gets the first pick. Marked once a selection is committed, so a discard later falls to
-    // the top of the list instead of back onto the linked rule.
+    // The ?rule= deep link applies to the first selection only, so a later discard selects the top of the list instead
+    // of the linked rule.
     const picked = useRef(false);
     useEffect(() => {
         if (selection) picked.current = true;
@@ -175,35 +141,31 @@ export function RuleEditor({initialRuleId}: { initialRuleId?: string | null }) {
     const checkLabel = useCallback(
         (r: DispatcherRule) => {
             const type = typeof r.check?.type === "string" ? (r.check.type as string) : "";
-            return checks.find((c) => c.type === type)?.label ?? type ?? "No check";
+            return checks.find((c) => c.type === type)?.label ?? (type || "No check");
         },
         [checks],
     );
 
-    const patchRule = useCallback(
-        (patch: Partial<DispatcherRule>) => {
-            setData((prev) => {
-                const next: DispatcherConfig = {
-                    ...prev,
-                    rules: [...(prev?.rules ?? [])],
-                    webhooks: prev?.webhooks ?? []
-                };
-                if (ruleIdx >= 0) next.rules![ruleIdx] = {...next.rules![ruleIdx], ...patch};
-                return next;
-            });
-        },
-        [setData, ruleIdx],
+    const updateDoc = useCallback(
+        (fn: (doc: Doc) => DispatcherConfig) =>
+            setData((prev) => fn({...prev, rules: prev?.rules ?? [], webhooks: prev?.webhooks ?? []})),
+        [setData],
     );
 
-    const setWebhooks = (next: DispatcherWebhook[]) =>
-        setData((prev) => ({...prev, rules: prev?.rules ?? [], webhooks: next}));
+    const patchRule = useCallback(
+        (patch: Partial<DispatcherRule>) =>
+            updateDoc((doc) => ({...doc, rules: doc.rules.map((r, i) => (i === ruleIdx ? {...r, ...patch} : r))})),
+        [updateDoc, ruleIdx],
+    );
+
+    const setWebhooks = (webhooks: DispatcherWebhook[]) => updateDoc((doc) => ({...doc, webhooks}));
 
     const createRule = () => {
         const base = "rule";
         let id = base;
         let n = 1;
         while (rules.some((r) => r.id === id)) id = `${base}-${++n}`;
-        const doc: DispatcherRule = {
+        const created: DispatcherRule = {
             id,
             name: "New rule",
             enabled: true,
@@ -214,33 +176,29 @@ export function RuleEditor({initialRuleId}: { initialRuleId?: string | null }) {
             actions: [],
             auto_resolve: true,
         };
-        setData((prev) => ({...prev, webhooks: prev?.webhooks ?? [], rules: [...(prev?.rules ?? []), doc]}));
+        updateDoc((doc) => ({...doc, rules: [...doc.rules, created]}));
         setQuery("");
         setSelection({kind: "rule", id});
     };
 
     const deleteRule = () => {
         if (!rule) return;
-        const doomed = rule;
-        const idx = ordered.findIndex((r) => r.id === doomed.id);
+        const target = rule;
+        const idx = ordered.findIndex((r) => r.id === target.id);
         modals.openConfirmModal({
             title: "Delete rule",
             children: (
                 <Text size="sm">
-                    Delete <b>{doomed.name}</b>? Alerts it raised stay, but the rule stops evaluating once you
+                    Delete <b>{target.name}</b>? Alerts it raised stay, but the rule stops evaluating once you
                     save.
                 </Text>
             ),
             labels: {confirm: "Delete", cancel: "Cancel"},
             confirmProps: {color: "red"},
             onConfirm: () => {
-                setData((prev) => ({
-                    ...prev,
-                    webhooks: prev?.webhooks ?? [],
-                    rules: (prev?.rules ?? []).filter((r) => r.id !== doomed.id)
-                }));
+                updateDoc((doc) => ({...doc, rules: doc.rules.filter((r) => r.id !== target.id)}));
                 // Select the neighbour that takes the deleted rule's place, so the form does not empty out mid-edit.
-                const rest = ordered.filter((r) => r.id !== doomed.id);
+                const rest = ordered.filter((r) => r.id !== target.id);
                 const next = rest[Math.min(idx, rest.length - 1)];
                 setSelection(next ? {kind: "rule", id: next.id} : null);
             },
@@ -358,7 +316,7 @@ export function RuleEditor({initialRuleId}: { initialRuleId?: string | null }) {
                                                         height: 8,
                                                         borderRadius: "var(--mantine-radius-sm)",
                                                         flexShrink: 0,
-                                                        background: `var(--mantine-color-${SEVERITY_COLOR[tier.severity] ?? "gray"}-6)`,
+                                                        background: swatchColor(tier.severity),
                                                         // The black tier's swatch is the page colour in dark
                                                         // mode, so every dot carries a ring to stay visible.
                                                         boxShadow: "0 0 0 1px var(--mantine-color-dimmed)",
@@ -419,7 +377,7 @@ export function RuleEditor({initialRuleId}: { initialRuleId?: string | null }) {
                 </Stack>
             }>
 
-                {/*  Right: the selected rule, or the shared webhook targets  */}
+                {/* Right: the selected rule or the webhook targets */}
                 <Box>
                     <GlassCard withBorder padding="md" mih={360}>
                         {selection?.kind === "webhooks" ? (
@@ -452,7 +410,7 @@ export function RuleEditor({initialRuleId}: { initialRuleId?: string | null }) {
                                             disabled={!isAdmin}
                                         />
                                         <Tooltip
-                                            label="Close the alert on its own once the device passes the check again."
+                                            label="Resolve the alert once the device passes the check again."
                                             withArrow multiline w={240}>
                                             <Box>
                                                 <Switch
@@ -488,7 +446,7 @@ export function RuleEditor({initialRuleId}: { initialRuleId?: string | null }) {
                                     />
                                     <NumberInput
                                         label="Grace (minutes)"
-                                        description="Anti-flap: alert only after this long"
+                                        description="Alert only once the check has failed this long"
                                         value={rule.grace_minutes ?? 0}
                                         onChange={(v) => patchRule({grace_minutes: typeof v === "number" ? v : 0})}
                                         min={0}
@@ -508,7 +466,7 @@ export function RuleEditor({initialRuleId}: { initialRuleId?: string | null }) {
                                     emptyMatchesAll
                                 />
 
-                                <Divider my="sm" label="Compliance state (creates alert when true)"
+                                <Divider my="sm" label="Compliance check (raises an alert when true)"
                                          labelPosition="left"/>
                                 <CheckPicker checks={checks} value={rule.check ?? {}}
                                              onChange={(check) => patchRule({check})}
@@ -531,342 +489,6 @@ export function RuleEditor({initialRuleId}: { initialRuleId?: string | null }) {
                     </GlassCard>
                 </Box>
             </SidebarLayout>
-        </Stack>
-    );
-}
-
-function RuleListItem({rule, checkLabel, active, onSelect}: {
-    rule: DispatcherRule;
-    checkLabel: string;
-    active: boolean;
-    onSelect: () => void;
-}) {
-    const off = rule.enabled === false;
-    const actions = rule.actions?.length ?? 0;
-    return (
-        <UnstyledButton
-            onClick={onSelect}
-            p="xs"
-            style={{
-                borderRadius: "var(--mantine-radius-sm)",
-                background: active ? "var(--mantine-color-blue-light)" : undefined,
-            }}
-        >
-            <Box style={{minWidth: 0}}>
-                <Text fz="sm" fw={active ? 600 : 500} truncate c={off ? "dimmed" : undefined}>
-                    {rule.name.trim() || rule.id}
-                </Text>
-                <Text fz="xs" c="dimmed" truncate>
-                    {checkLabel}
-                </Text>
-                <Group gap={6} wrap="nowrap" mt={4}>
-                    {off && <Badge size="xs" variant="light" color="gray">off</Badge>}
-                    <Text fz="xs" c="dimmed" truncate>
-                        {scopeSummary(rule.scope)} · {actions ? plural(actions, "action") : "no actions"}
-                    </Text>
-                </Group>
-            </Box>
-        </UnstyledButton>
-    );
-}
-
-let webhookRowSeq = 0;
-const nextRowId = () => `webhook-row-${++webhookRowSeq}`;
-
-function WebhooksSection({webhooks, onChange, disabled}: {
-    webhooks: DispatcherWebhook[];
-    onChange: (w: DispatcherWebhook[]) => void;
-    disabled: boolean
-}) {
-    // A stable row identity: the name is editable and the position is not. Keyed by index, removing a
-    // row would hand its credential fields' local editing state to the row that slides up into it,
-    // which then shows the redaction sentinel as an editable value.
-    const rowIds = useRef<string[]>([]);
-    if (rowIds.current.length !== webhooks.length) {
-        // The list changed underneath this component (first load, or a reload);
-        // add and remove below keep the two in step themselves.
-        rowIds.current = webhooks.map((_, i) => rowIds.current[i] ?? nextRowId());
-    }
-
-    const patch = (i: number, p: Partial<DispatcherWebhook>) => onChange(webhooks.map((w, j) => (i === j ? {...w, ...p} : w)));
-    return (
-        <Stack gap="sm">
-            <Group justify="space-between" align="flex-start" wrap="nowrap">
-                <Box style={{minWidth: 0}}>
-                    <Text fw={600}>Webhook targets</Text>
-                    <Text fz="xs" c="dimmed">
-                        Endpoints any rule can post to through a webhook action. Shared by every rule.
-                    </Text>
-                </Box>
-                <Button variant="light" size="xs" leftSection={<IconPlus size={14}/>} disabled={disabled}
-                        onClick={() => {
-                            rowIds.current = [...rowIds.current, nextRowId()];
-                            onChange([...webhooks, {name: `hook-${webhooks.length + 1}`, url: ""}]);
-                        }}>
-                    Add target
-                </Button>
-            </Group>
-            <Divider my="xs"/>
-            {webhooks.length === 0 ? (
-                <Text fz="xs" c="dimmed">
-                    No webhook targets. Add one to notify Slack, Teams, Discord or any endpoint when a rule
-                    raises an alert.
-                </Text>
-            ) : (
-                <Stack gap="xs">
-                    {webhooks.map((w, i) => (
-                        <Paper key={rowIds.current[i] ?? i} withBorder radius="sm" p="xs">
-                            <Group gap="xs" wrap="nowrap" align="flex-start">
-                                <TextInput placeholder="name" value={w.name}
-                                           onChange={(e) => patch(i, {name: e.currentTarget.value})} w={160}
-                                           disabled={disabled}/>
-                                <RedactedInput
-                                    placeholder="https://hooks.slack.com/…"
-                                    value={w.url ?? ""}
-                                    onChange={(v) => patch(i, {url: v})}
-                                    style={{flex: 1}}
-                                    disabled={disabled}
-                                />
-                                <RedactedInput
-                                    password
-                                    placeholder="HMAC secret (optional)"
-                                    value={w.secret ?? ""}
-                                    onChange={(v) => patch(i, {secret: v})}
-                                    w={200}
-                                    disabled={disabled}
-                                />
-                                <ActionIcon
-                                    variant="subtle"
-                                    color="red"
-                                    disabled={disabled}
-                                    aria-label="Remove webhook target"
-                                    onClick={() =>
-                                        modals.openConfirmModal({
-                                            title: "Remove webhook target",
-                                            children: (
-                                                <Text size="sm">
-                                                    Remove <b>{w.name || "this target"}</b>? Any rule pointing at it
-                                                    stops notifying once you save, and the stored URL and secret are
-                                                    gone.
-                                                </Text>
-                                            ),
-                                            labels: {confirm: "Remove", cancel: "Cancel"},
-                                            confirmProps: {color: "red"},
-                                            onConfirm: () => {
-                                                rowIds.current = rowIds.current.filter((_, j) => j !== i);
-                                                onChange(webhooks.filter((_, j) => j !== i));
-                                            },
-                                        })
-                                    }
-                                >
-                                    <IconTrash size={16}/>
-                                </ActionIcon>
-                            </Group>
-                        </Paper>
-                    ))}
-                    <Text fz="xs" c="dimmed">
-                        The URL and secret are stored on the server and never sent back to this page once
-                        saved. A field marked &quot;set, leave blank to keep&quot; already holds a value;
-                        typing a new one replaces it.
-                    </Text>
-                </Stack>
-            )}
-        </Stack>
-    );
-}
-
-function CheckPicker({checks, value, onChange, profileIds, tagNames, disabled}: {
-    checks: DispatcherCheckSpec[];
-    value: Record<string, unknown>;
-    onChange: (c: Record<string, unknown>) => void;
-    profileIds: string[];
-    tagNames: string[];
-    disabled: boolean
-}) {
-    const spec = checks.find((c) => c.type === value.type);
-    const patch = (p: Record<string, unknown>) => onChange({...value, ...p});
-    return (
-        <Stack gap="xs">
-            <Select
-                label="Check"
-                data={checks.map((c) => ({value: c.type, label: c.label}))}
-                value={typeof value.type === "string" ? value.type : null}
-                onChange={(v) => onChange({type: v ?? undefined})}
-                description={spec?.description}
-                searchable
-                disabled={disabled}
-            />
-            {(spec?.params ?? []).map((p) => {
-                if (p.type === "tags") {
-                    return <TagsInput key={p.name} label={p.label} data={tagNames}
-                                      value={Array.isArray(value[p.name]) ? (value[p.name] as string[]) : []}
-                                      onChange={(v) => patch({[p.name]: v})} disabled={disabled}/>;
-                }
-                if (p.name === "profile_id") {
-                    return <Select key={p.name} label={p.label} data={profileIds}
-                                   value={typeof value[p.name] === "string" ? (value[p.name] as string) : null}
-                                   onChange={(v) => patch({[p.name]: v ?? undefined})} searchable disabled={disabled}/>;
-                }
-                if (p.type === "select") {
-                    return <Select key={p.name} label={p.label} data={p.options ?? []}
-                                   value={typeof value[p.name] === "string" ? (value[p.name] as string) : null}
-                                   onChange={(v) => patch({[p.name]: v ?? undefined})} disabled={disabled}/>;
-                }
-                if (p.type === "int") {
-                    return <NumberInput key={p.name} label={p.label}
-                                        value={typeof value[p.name] === "number" ? (value[p.name] as number) : undefined}
-                                        onChange={(v) => patch({[p.name]: v})} disabled={disabled}/>;
-                }
-                return <TextInput key={p.name} label={p.label} description={p.help} value={String(value[p.name] ?? "")}
-                                  onChange={(e) => patch({[p.name]: e.currentTarget.value})} disabled={disabled}/>;
-            })}
-        </Stack>
-    );
-}
-
-function ActionsEditor({
-                           actions,
-                           onChange,
-                           webhooks,
-                           tagNames,
-                           profileIds,
-                           appIds,
-                           commands,
-                           disabled,
-                           onEditWebhooks
-                       }: {
-    actions: DispatcherAction[];
-    onChange: (a: DispatcherAction[]) => void;
-    webhooks: DispatcherWebhook[];
-    tagNames: string[];
-    profileIds: string[];
-    appIds: string[];
-    commands: CatalogCommand[];
-    disabled: boolean;
-    onEditWebhooks: () => void;
-}) {
-    const patch = (i: number, p: Partial<DispatcherAction>) => onChange(actions.map((a, j) => (i === j ? {...a, ...p} : a)));
-    const setParams = (i: number, params: Record<string, unknown>) => patch(i, {params});
-    return (
-        <Stack gap="xs">
-            {actions.map((a, i) => {
-                const p = a.params ?? {};
-                const cmd = commands.find((c) => c.type === p.command);
-                const isDestructive = a.type === "send_command" && cmd?.destructive;
-                return (
-                    <Paper key={i} withBorder radius="sm" p="xs">
-                        <Group justify="space-between" mb={6}>
-                            <Group gap="xs">
-                                <Select
-                                    size="xs"
-                                    data={ACTION_TYPES}
-                                    value={a.type}
-                                    onChange={(v) => {
-                                        const type = v ?? "webhook";
-                                        // A remediation acts on real devices, so it starts in dry run. A missing
-                                        // dry_run reads as false on the server, so write it explicitly.
-                                        patch(i, {
-                                            type,
-                                            params: {},
-                                            dry_run: REMEDIATION_TYPES.has(type) ? true : undefined,
-                                        });
-                                    }}
-                                    w={160}
-                                    disabled={disabled}
-                                />
-                                {REMEDIATION_TYPES.has(a.type) && (
-                                    <Switch size="xs" label="Dry run" checked={Boolean(a.dry_run)}
-                                            onChange={(e) => patch(i, {dry_run: e.currentTarget.checked})}
-                                            disabled={disabled}/>
-                                )}
-                                {isDestructive && (
-                                    <Tooltip
-                                        label="Destructive commands never run on their own; they require admin approval on the alert."
-                                        multiline w={240}>
-                                        <Badge color="orange" variant="light"
-                                               leftSection={<IconAlertTriangle size={12}/>}>
-                                            approval required
-                                        </Badge>
-                                    </Tooltip>
-                                )}
-                            </Group>
-                            <ActionIcon
-                                variant="subtle"
-                                color="red"
-                                disabled={disabled}
-                                aria-label="Remove action"
-                                onClick={() =>
-                                    modals.openConfirmModal({
-                                        title: "Remove action",
-                                        children: (
-                                            <Text size="sm">
-                                                Remove the <b>{a.type}</b> action? The rule still runs, it just stops
-                                                doing this.
-                                            </Text>
-                                        ),
-                                        labels: {confirm: "Remove", cancel: "Cancel"},
-                                        confirmProps: {color: "red"},
-                                        onConfirm: () => onChange(actions.filter((_, j) => j !== i)),
-                                    })
-                                }
-                            >
-                                <IconTrash size={14}/>
-                            </ActionIcon>
-                        </Group>
-
-                        {a.type === "webhook" && (
-                            <Select
-                                size="xs"
-                                label="Target"
-                                data={webhooks.map((w) => w.name)}
-                                value={typeof p.target === "string" ? (p.target as string) : null}
-                                onChange={(v) => setParams(i, {target: v ?? undefined})}
-                                disabled={disabled}
-                                placeholder={webhooks.length ? "Select a target" : "No targets yet"}
-                                description={
-                                    webhooks.length ? undefined : (
-                                        <UnstyledButton onClick={onEditWebhooks} fz="xs" c="blue">
-                                            Add a webhook target first
-                                        </UnstyledButton>
-                                    )
-                                }
-                            />
-                        )}
-                        {(a.type === "assign_tag" || a.type === "remove_tag") && (
-                            <TagsInput size="xs" label="Tags" data={tagNames}
-                                       value={Array.isArray(p.tags) ? (p.tags as string[]) : []}
-                                       onChange={(v) => setParams(i, {tags: v})} disabled={disabled}/>
-                        )}
-                        {a.type === "install_profiles" && (
-                            <MultiSelect size="xs" label="Profiles" data={profileIds}
-                                         value={Array.isArray(p.profile_ids) ? (p.profile_ids as string[]) : []}
-                                         onChange={(v) => setParams(i, {profile_ids: v})} searchable
-                                         disabled={disabled}/>
-                        )}
-                        {a.type === "install_apps" && (
-                            <MultiSelect size="xs" label="Apps" data={appIds}
-                                         value={Array.isArray(p.app_ids) ? (p.app_ids as string[]) : []}
-                                         onChange={(v) => setParams(i, {app_ids: v})} searchable disabled={disabled}/>
-                        )}
-                        {a.type === "send_command" && (
-                            <Select size="xs" label="Command" data={commands.map((c) => ({
-                                value: c.type,
-                                label: `${c.label}${c.destructive ? " (destructive)" : ""}`
-                            }))} value={typeof p.command === "string" ? (p.command as string) : null}
-                                    onChange={(v) => setParams(i, {command: v ?? undefined})} searchable
-                                    disabled={disabled}/>
-                        )}
-                    </Paper>
-                );
-            })}
-            <Button size="compact-xs" variant="light" leftSection={<IconPlus size={14}/>} disabled={disabled}
-                    onClick={() => onChange([...actions, {type: "webhook", params: {}, dry_run: true}])}>
-                Add action
-            </Button>
-            <Text fz="xs" c="dimmed">
-                A new remediation action starts in dry run: it records what it would have done and leaves the
-                device alone until you turn dry run off.
-            </Text>
         </Stack>
     );
 }

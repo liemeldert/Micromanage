@@ -1,22 +1,19 @@
 "use client";
 
-// The full app editor: every app in a sidebar, the selected one's identity, versions and delete actions on the
-// right. Laid out like the Dispatcher rule editor so the list stays in reach while a long form scrolls. The Apps
-// page cards link here with ?app=<id>.
+// Every app in a sidebar, with the selected one's identity, versions and devices on the right. The Apps page links
+// here with ?app=<id>.
 
 import {Suspense, useEffect, useMemo, useState} from "react";
 import {useRouter, useSearchParams} from "next/navigation";
 import {
     ActionIcon,
     Alert,
-    Anchor,
     Badge,
     Box,
     Button,
     Code,
     Group,
     Loader,
-    Modal,
     NavLink,
     ScrollArea,
     Stack,
@@ -39,10 +36,8 @@ import {
     IconTrash,
 } from "@tabler/icons-react";
 import Link from "next/link";
-import {clickable} from "../../../../../lib/a11y";
-import {api, type AppDeploymentDevice, type Device} from "../../../../../lib/api";
+import {api, type Device} from "../../../../../lib/api";
 import {useAuth} from "../../../../../lib/auth-context";
-import {DEPLOYMENT_STATUS_COLORS, DEPLOYMENT_STATUS_LABELS} from "../../../../../lib/status-labels";
 import {useReadiness} from "../../../../../lib/readiness";
 import {
     type App,
@@ -55,15 +50,17 @@ import {
     type Scope,
     useConfigResource,
 } from "../../../../../lib/config";
-import {confirmDiscard} from "../../../../../lib/use-unsaved-changes";
+import {AppDeployments} from "@/components/apps/AppDeployments";
+import {VersionScopeModal} from "@/components/apps/VersionScopeModal";
 import {AppWizard} from "@/components/config/AppWizard";
-import {RolloutEditor} from "@/components/config/RolloutEditor";
-import {ScopeEditor} from "@/components/config/ScopeEditor";
 import {SidebarLayout} from "@/components/layout/SidebarLayout";
 import {GlassCard} from "@/components/ui/GlassCard";
 
 const ADMIN_ONLY_REASON =
     "Apps install software on every device in their groups, so authoring them is admin-only.";
+
+// Unset means the platform default, which is managed on a Mac.
+const installsManaged = (app: App) => app.install_as_managed ?? true;
 
 export default function AppEditorPage() {
     return (
@@ -91,12 +88,7 @@ function AppEditorInner() {
     useEffect(() => {
         setDraft(
             selected
-                ? {
-                    name: selected.name,
-                    bundle_id: selected.bundle_id,
-                    // Unset means the platform default, which is managed on a Mac. The toggle needs a definite state.
-                    managed: selected.install_as_managed ?? true,
-                }
+                ? {name: selected.name, bundle_id: selected.bundle_id, managed: installsManaged(selected)}
                 : null,
         );
     }, [selected]);
@@ -106,10 +98,10 @@ function AppEditorInner() {
         !!draft &&
         (draft.name !== selected.name ||
             draft.bundle_id !== selected.bundle_id ||
-            draft.managed !== (selected.install_as_managed ?? true));
+            draft.managed !== installsManaged(selected));
     const bundleBad = !!draft && !BUNDLE_ID_RE.test(draft.bundle_id);
 
-    // The wizard needs the same context the Apps page gives it.
+    // Groups and devices for the wizard and the scope editor.
     const [allGroups, setAllGroups] = useState<GroupDef[]>([]);
     const [devices, setDevices] = useState<Device[]>([]);
     const {readiness} = useReadiness();
@@ -131,8 +123,7 @@ function AppEditorInner() {
             });
     }, [token]);
 
-    // Select the first app when the page opens with no ?app=. replace rather than push, so Back does not step
-    // through the default selection.
+    // Selects the first app when the page opens with no ?app=, with replace so Back skips the default selection.
     useEffect(() => {
         if (!loading && !selected && apps.length > 0) {
             router.replace(`/apps/editor?app=${encodeURIComponent(apps[0].id)}`);
@@ -161,8 +152,7 @@ function AppEditorInner() {
             title: "Delete app",
             children: (
                 <Text size="sm">
-                    Delete <b>{app.name}</b> and all its versions? Devices will not be told to remove it
-                    automatically.
+                    Delete <b>{app.name}</b> and all its versions? Devices that have it installed keep it.
                 </Text>
             ),
             labels: {confirm: "Delete", cancel: "Cancel"},
@@ -195,8 +185,7 @@ function AppEditorInner() {
         });
     }
 
-    // Index of the version being edited in the selected app, or null when the modal is closed. The modal mounts
-    // only while this is set, so reopening it on another row starts from that row's stored scope.
+    // Index of the version being edited in the selected app, or null when the modal is closed.
     const [editingIdx, setEditingIdx] = useState<number | null>(null);
     const editingVersion = selected && editingIdx !== null ? selected.versions[editingIdx] ?? null : null;
 
@@ -205,7 +194,7 @@ function AppEditorInner() {
         setEditingIdx(null);
     }, [selectedId]);
 
-    // Writes the edited scope back over one version, through the same save path deleteVersion uses.
+    // Replaces one version's targeting and keeps its package fields as stored.
     async function saveVersionScope(app: App, versionIdx: number, scope: Scope, rollout: Rollout | undefined) {
         const next = apps.map((a) =>
             a.id === app.id
@@ -214,7 +203,6 @@ function AppEditorInner() {
                     versions: a.versions.map((v, vi) =>
                         vi === versionIdx
                             ? {
-                                // Package identity stays exactly as stored: only the targeting fields are replaced.
                                 version: v.version,
                                 s3_key: v.s3_key,
                                 sha256: v.sha256,
@@ -244,7 +232,6 @@ function AppEditorInner() {
     ): Promise<boolean> {
         if (result.kind === "app") {
             const ok = await save({apps: [...apps, result.app]});
-            // Show the new app straight away rather than leaving the old selection in the form.
             if (ok) selectApp(result.app.id);
             return ok;
         }
@@ -253,6 +240,9 @@ function AppEditorInner() {
         );
         return save({apps: next});
     }
+
+    const takenIds = apps.map((a) => a.id);
+    const usedKeys = apps.flatMap((a) => a.versions.map((v) => v.s3_key));
 
     if (loading) {
         return (
@@ -345,7 +335,7 @@ function AppEditorInner() {
                 </GlassCard>
             }>
 
-                {/*  Right: the selected app  */}
+                {/* Right: the selected app */}
                 <Box>
                     <GlassCard withBorder padding="md" mih={360}>
                         {!selected || !draft ? (
@@ -526,7 +516,7 @@ function AppEditorInner() {
                 </Box>
             </SidebarLayout>
 
-            {/* Members never mount it: the package picker and the upload both use admin-only endpoints. */}
+            {/* Admin only, as the package picker and the upload call admin-only endpoints. */}
             {isAdmin && selected && (
                 <AppWizard
                     opened={wizardOpen}
@@ -535,14 +525,14 @@ function AppEditorInner() {
                     allGroups={allGroups}
                     devices={devices}
                     uploadBlockedReason={uploadBlockedReason}
-                    takenIds={apps.map((a) => a.id)}
-                    usedKeys={apps.flatMap((a) => a.versions.map((v) => v.s3_key))}
+                    takenIds={takenIds}
+                    usedKeys={usedKeys}
                     existingApp={selected}
                     onFinish={handleFinish}
                 />
             )}
 
-            {/* No existingApp, so this one runs the new-app flow the Apps page uses. */}
+            {/* Without existingApp the wizard creates a new app. */}
             {isAdmin && (
                 <AppWizard
                     opened={newAppOpen}
@@ -551,13 +541,13 @@ function AppEditorInner() {
                     allGroups={allGroups}
                     devices={devices}
                     uploadBlockedReason={uploadBlockedReason}
-                    takenIds={apps.map((a) => a.id)}
-                    usedKeys={apps.flatMap((a) => a.versions.map((v) => v.s3_key))}
+                    takenIds={takenIds}
+                    usedKeys={usedKeys}
                     onFinish={handleFinish}
                 />
             )}
 
-            {/* Mounted only while a row is being edited, which keeps the form free of the previous row's state. */}
+            {/* Mounted only while a row is being edited, so reopening it on another row starts from that row. */}
             {isAdmin && selected && editingVersion && editingIdx !== null && (
                 <VersionScopeModal
                     key={`${selected.id}:${editingIdx}`}
@@ -572,267 +562,6 @@ function AppEditorInner() {
                         if (ok) setEditingIdx(null);
                     }}
                 />
-            )}
-        </Stack>
-    );
-}
-
-// Edits one stored version's targeting: groups, conditions, device overrides and the gradual rollout, in the
-// same shape the wizard's Target step uses. The version string, key and digest name the package, so they are
-// read-only here; pointing a deployed version at other bytes has to go through a new version instead.
-function VersionScopeModal({
-                               app,
-                               version,
-                               allGroups,
-                               devices,
-                               saving,
-                               onClose,
-                               onSave,
-                           }: {
-    app: App;
-    version: AppVersion;
-    allGroups: GroupDef[];
-    devices: Device[];
-    saving: boolean;
-    onClose: () => void;
-    onSave: (scope: Scope, rollout: Rollout | undefined) => Promise<void>;
-}) {
-    const stored: Scope = useMemo(
-        () => ({
-            groups: version.groups ?? [],
-            conditions: version.conditions ?? [],
-            ...(version.include_devices ? {include_devices: version.include_devices} : {}),
-            ...(version.exclude_devices ? {exclude_devices: version.exclude_devices} : {}),
-        }),
-        [version],
-    );
-    const [scope, setScope] = useState<Scope>(stored);
-    const [rollout, setRollout] = useState<Rollout | undefined>(version.rollout);
-
-    const dirty =
-        JSON.stringify(scope) !== JSON.stringify(stored) ||
-        JSON.stringify(rollout ?? null) !== JSON.stringify(version.rollout ?? null);
-
-    // Same rule as the wizard: a version has to name at least one group, condition or included device.
-    const valid =
-        (scope.groups?.length ?? 0) > 0 ||
-        (scope.conditions?.length ?? 0) > 0 ||
-        (scope.include_devices?.length ?? 0) > 0;
-
-    function requestClose() {
-        confirmDiscard({dirty, what: `version ${version.version}`, onConfirm: onClose});
-    }
-
-    return (
-        <Modal opened onClose={requestClose} size="lg" title={`Edit v${version.version} of ${app.name}`}>
-            <Stack gap="md">
-                <Stack gap={4}>
-                    <Text fz="xs" c="dimmed">
-                        Key: <Code fz="xs">{version.s3_key}</Code>
-                    </Text>
-                    <Text fz="xs" c="dimmed">
-                        SHA-256: <Code fz="xs">{version.sha256}</Code>
-                    </Text>
-                </Stack>
-                <ScopeEditor
-                    scope={scope}
-                    onChange={setScope}
-                    devices={devices}
-                    allGroups={allGroups}
-                    previous={stored}
-                    groupsLabel="Install on groups"
-                    groupsDescription="Devices in any of these groups receive this version."
-                />
-                <RolloutEditor rollout={rollout} onChange={setRollout}/>
-                <Group justify="space-between" mt="sm">
-                    <Button variant="default" onClick={requestClose}>Cancel</Button>
-                    <Button
-                        leftSection={<IconDeviceFloppy size={16}/>}
-                        onClick={() => onSave(scope, rollout)}
-                        loading={saving}
-                        disabled={!dirty || !valid}
-                    >
-                        Save version
-                    </Button>
-                </Group>
-            </Stack>
-        </Modal>
-    );
-}
-
-// Short badge words for the six deployment statuses. The shared labels map spells two of them out at length,
-// which suits a detail line rather than a table cell, so it is used as the tooltip instead.
-const DEPLOYMENT_STATUS_WORDS: Record<string, string> = {
-    installed: "Installed",
-    accepted: "Accepted",
-    installing: "Installing",
-    pending: "Pending",
-    failed: "Failed",
-    unscoped: "Left scope",
-};
-
-// Statuses that mean the install is under way rather than settled either direction.
-const WORKING_STATUSES = ["pending", "installing", "accepted"];
-
-// Which devices actually carry this app, device by device, under the app's versions. The grouped rollout stats
-// answer how many; this answers which ones, and which of them are stuck.
-function AppDeployments({token, appId}: { token: string | null; appId: string }) {
-    const router = useRouter();
-    const [devices, setDevices] = useState<AppDeploymentDevice[] | null>(null);
-    const [loading, setLoading] = useState(true);
-    const [loadError, setLoadError] = useState(false);
-
-    useEffect(() => {
-        if (!token) return;
-        let cancelled = false;
-        setLoading(true);
-        setLoadError(false);
-        api.getAppDeployments(token, appId)
-            .then((r) => {
-                if (cancelled) return;
-                setDevices(r.devices);
-            })
-            .catch(() => {
-                if (!cancelled) setLoadError(true);
-            })
-            .finally(() => {
-                if (!cancelled) setLoading(false);
-            });
-        return () => {
-            cancelled = true;
-        };
-    }, [token, appId]);
-
-    const counts = useMemo(() => {
-        const rows = devices ?? [];
-        return {
-            total: rows.length,
-            installed: rows.filter((d) => d.status === "installed").length,
-            working: rows.filter((d) => WORKING_STATUSES.includes(d.status)).length,
-            failed: rows.filter((d) => d.status === "failed").length,
-            unscoped: rows.filter((d) => d.status === "unscoped").length,
-        };
-    }, [devices]);
-
-    return (
-        <Stack gap="xs" mt="sm">
-            <Text fw={600} fz="sm">Devices</Text>
-
-            {loading ? (
-                <Group gap="xs">
-                    <Loader size="xs"/>
-                    <Text fz="sm" c="dimmed">Counting devices…</Text>
-                </Group>
-            ) : loadError ? (
-                <Text fz="sm" c="dimmed">
-                    Could not read the install states for this app.
-                </Text>
-            ) : counts.total === 0 ? (
-                <Text fz="sm" c="dimmed">
-                    Not on any device yet. Devices join as the versions above pick up their groups.
-                </Text>
-            ) : (
-                <>
-                    <Group gap={6} wrap="wrap">
-                        <Badge variant="light" color={DEPLOYMENT_STATUS_COLORS.installed} size="sm">
-                            {counts.installed} installed
-                        </Badge>
-                        <Badge variant="light" color={DEPLOYMENT_STATUS_COLORS.installing} size="sm">
-                            {counts.working} still working
-                        </Badge>
-                        <Badge variant="light" color={DEPLOYMENT_STATUS_COLORS.failed} size="sm">
-                            {counts.failed} failed
-                        </Badge>
-                        {counts.unscoped > 0 && (
-                            <Badge variant="light" color={DEPLOYMENT_STATUS_COLORS.unscoped} size="sm">
-                                {counts.unscoped} left scope
-                            </Badge>
-                        )}
-                        <Text fz="xs" c="dimmed">of {counts.total} devices</Text>
-                    </Group>
-
-                    <Table.ScrollContainer minWidth={620}>
-                        <Table verticalSpacing={6} fz="sm" highlightOnHover>
-                            <Table.Thead>
-                                <Table.Tr>
-                                    <Table.Th>Device</Table.Th>
-                                    <Table.Th>Model</Table.Th>
-                                    <Table.Th>Status</Table.Th>
-                                    <Table.Th>Target</Table.Th>
-                                    <Table.Th>Reports</Table.Th>
-                                    <Table.Th>Error</Table.Th>
-                                </Table.Tr>
-                            </Table.Thead>
-                            <Table.Tbody>
-                                {(devices ?? []).map((d) => (
-                                    <Table.Tr
-                                        key={d.device_id}
-                                        style={{cursor: "pointer"}}
-                                        aria-label={`Open ${d.hostname || d.serial_number}`}
-                                        {...clickable(() => router.push(`/devices/${d.device_id}`), "link")}
-                                    >
-                                        <Table.Td>
-                                            <Anchor
-                                                component={Link}
-                                                href={`/devices/${d.device_id}`}
-                                                fz="sm"
-                                                fw={500}
-                                                onClick={(e) => e.stopPropagation()}
-                                            >
-                                                {d.hostname || d.serial_number}
-                                            </Anchor>
-                                            {d.hostname && (
-                                                <Text fz="xs" c="dimmed">{d.serial_number}</Text>
-                                            )}
-                                        </Table.Td>
-                                        <Table.Td>
-                                            <Text fz="xs" c="dimmed">{d.device_model || "--"}</Text>
-                                        </Table.Td>
-                                        <Table.Td>
-                                            <Tooltip
-                                                label={DEPLOYMENT_STATUS_LABELS[d.status] ?? d.status}
-                                                withArrow
-                                                disabled={!DEPLOYMENT_STATUS_LABELS[d.status]}
-                                            >
-                                                <Badge
-                                                    variant="light"
-                                                    size="sm"
-                                                    color={DEPLOYMENT_STATUS_COLORS[d.status] ?? "gray"}
-                                                >
-                                                    {DEPLOYMENT_STATUS_WORDS[d.status] ?? d.status}
-                                                </Badge>
-                                            </Tooltip>
-                                            {d.status === "failed" && d.failed_attempts > 1 && (
-                                                <Text fz="xs" c="red" mt={2}>
-                                                    {d.failed_attempts} attempts
-                                                </Text>
-                                            )}
-                                        </Table.Td>
-                                        <Table.Td>
-                                            {d.desired_version
-                                                ? <Text fz="xs">v{d.desired_version}</Text>
-                                                : <Text fz="xs" c="dimmed">--</Text>}
-                                        </Table.Td>
-                                        <Table.Td>
-                                            {d.reported_version
-                                                ? <Text fz="xs">{d.reported_version}</Text>
-                                                : <Text fz="xs" c="dimmed">--</Text>}
-                                        </Table.Td>
-                                        <Table.Td>
-                                            {d.last_error ? (
-                                                <Tooltip label={d.last_error} withArrow multiline w={360}>
-                                                    <Text fz="xs" c="red" lineClamp={2}>{d.last_error}</Text>
-                                                </Tooltip>
-                                            ) : (
-                                                <Text fz="xs" c="dimmed">--</Text>
-                                            )}
-                                        </Table.Td>
-                                    </Table.Tr>
-                                ))}
-                            </Table.Tbody>
-                        </Table>
-                    </Table.ScrollContainer>
-                </>
             )}
         </Stack>
     );

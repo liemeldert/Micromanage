@@ -1,14 +1,20 @@
 """Authentication, MFA, and password management endpoints."""
 from datetime import datetime, timezone
 import logging
-from typing import Optional
+from typing import Hashable, NoReturn, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from pydantic import BaseModel
 
 from controller.auth.dependencies import Principal, get_current_principal
 from controller.auth.passwords import hash_password, password_policy_error, verify_password
-from controller.auth.ratelimit import login_limiter
+from controller.auth.ratelimit import (
+    discover_limiter,
+    lockout_audit_limiter,
+    login_address_failures,
+    login_address_warned,
+    login_failures,
+)
 from controller.auth.tokens import (
     decode_mfa_pending_token,
     issue_mfa_pending_token,
@@ -17,7 +23,8 @@ from controller.auth.tokens import (
 )
 from controller.models.tenant import Tenant, User, UserMFA
 from controller.services import mfa
-from controller.services.audit import record_audit
+from controller.services.audit import record_audit, record_system_audit
+from controller.services.enrollment import _loggable
 
 logger = logging.getLogger(__name__)
 
@@ -68,27 +75,64 @@ class DiscoverRequest(BaseModel):
     email: str
 
 
+_TOO_MANY = "Too many attempts; try again later"
+
+
+def _client_address(http_request: Optional[Request]) -> str:
+    client = getattr(http_request, "client", None)
+    return client.host if client and client.host else "unknown"
+
+
+def _too_many(wait: int) -> HTTPException:
+    return HTTPException(status_code=429, detail=_TOO_MANY, headers={"Retry-After": str(wait)})
+
+
+def _refuse_if_locked(key: Hashable) -> None:
+    wait = login_failures.blocked(key)
+    if wait:
+        raise _too_many(wait)
+
+
+async def _refuse_login(key: Hashable, ip: str, email: str, tenant: Optional[Tenant] = None,
+                        user: Optional[User] = None) -> NoReturn:
+    """Record a failed sign-in and raise the generic 401, or a 429 when this failure starts a lock."""
+    wait = login_failures.failed(key)
+    if not login_address_failures.check(ip) and login_address_warned.check(ip):
+        logger.warning("Sign-in failures from %s reached %d across all accounts within %ds", _loggable(ip),
+                       login_failures.failures * 10, login_failures.window_seconds)
+    if not wait:
+        raise HTTPException(status_code=401, detail="Invalid credentials")
+
+    logger.warning("Sign-in for %s from %s locked for %ds", _loggable(email), _loggable(ip), wait)
+    # Only a real account gets an audit row, so made-up emails cannot fill the audit log.
+    if tenant is not None and user is not None and user.is_active and user.password_hash \
+            and lockout_audit_limiter.check(str(user.id)):
+        await record_system_audit(tenant, "user.login_locked", target_type="user", target_id=str(user.id),
+                                  detail={"email": email, "ip": ip, "failures": login_failures.count(key),
+                                          "lockout_seconds": wait})
+    raise _too_many(wait)
+
+
 @router.post("/api/v1/auth/login", response_model=TokenResponse)
 async def login(request: LoginRequest, http_request: Request):
     """Authenticate a local user (email + password) and return a session token.
 
     Tenants on an external provider (OIDC) do not use this endpoint; their clients present a provider token directly.
     """
-    throttle_key = f"{request.tenant_id}:{request.user_email}"
-    if not login_limiter.check(throttle_key):
-        raise HTTPException(status_code=429, detail="Too many attempts; try again later")
+    ip = _client_address(http_request)
+    email = request.user_email.strip().lower()
+    key = (ip, request.tenant_id, email)
+    _refuse_if_locked(key)
 
-    # Generic to avoid enumeration
-    invalid = HTTPException(status_code=401, detail="Invalid credentials")
-
+    # Every refusal counts the same way, so an unknown email is locked exactly as a known one is.
     tenant = await Tenant.get_or_none(id=request.tenant_id)
     if not tenant or not tenant.is_active:
-        raise invalid
+        await _refuse_login(key, ip, email)
 
     if tenant.auth_provider != "local":
         # Same generic refusal as a missing tenant: naming the provider would tell an anonymous caller that the tenant
         # exists and which IdP it sits behind. /api/v1/auth/discover answers that question for clients that need it.
-        raise invalid
+        await _refuse_login(key, ip, email)
 
     user = await User.get_or_none(tenant=tenant, email=request.user_email)
     if user and user.is_active and user.password_hash:
@@ -98,8 +142,10 @@ async def login(request: LoginRequest, http_request: Request):
         verify_password(request.password, _DUMMY_PASSWORD_HASH)
         ok = False
     if not ok:
-        raise invalid
+        await _refuse_login(key, ip, email, tenant, user)
 
+    # A pending second factor counts as a success here, since verify_mfa_login keeps its own key.
+    login_failures.succeeded(key)
     if await mfa.is_enabled(user):
         return TokenResponse(
             access_token=None,
@@ -122,20 +168,18 @@ async def verify_mfa_login(request: MFAVerifyRequest, http_request: Request):
         raise invalid
 
     user_id = claims["sub"]
-    # Throttle based on user_id from the verified token
-    if not login_limiter.check(str(user_id)):
-        raise HTTPException(status_code=429, detail="Too many attempts; try again later")
+    # No client address in the key, since the pending token already proves the password and expires in minutes.
+    key = ("mfa", user_id)
+    _refuse_if_locked(key)
 
     user = await User.get_or_none(id=user_id)
     if not user or not user.is_active:
         raise invalid
 
-    if await mfa.verify_code(user, request.code):
-        pass
-    elif await mfa.verify_recovery_code(user, request.code):
-        pass
-    else:
-        raise invalid
+    if not await mfa.verify_code(user, request.code) and not await mfa.verify_recovery_code(user, request.code):
+        wait = login_failures.failed(key)
+        raise _too_many(wait) if wait else invalid
+    login_failures.succeeded(key)
 
     token = issue_session_token(
         user_id=str(user.id), tenant_id=user.tenant_id, email=user.email, role=user.role
@@ -143,19 +187,27 @@ async def verify_mfa_login(request: MFAVerifyRequest, http_request: Request):
     return TokenResponse(access_token=token, expires_in=JWT_TTL_SECONDS)
 
 
-def _throttle_password_check(principal: Principal) -> None:
-    """Applies the sign-in limiter, keyed as password change is, because these routes check a password."""
-    if not login_limiter.check(f"{principal.tenant.id}:{principal.user.email}"):
-        raise HTTPException(status_code=429, detail="Too many attempts; try again later")
+def _password_key(principal: Principal) -> Hashable:
+    """The throttle key for a signed-in user's password check; raises 429 while the key is locked."""
+    key = ("password", principal.tenant.id, principal.user.id)
+    _refuse_if_locked(key)
+    return key
+
+
+def _password_refused(key: Hashable, detail: str) -> HTTPException:
+    """Record a wrong password and return the 401 with detail, or a 429 when this failure starts a lock."""
+    wait = login_failures.failed(key)
+    return _too_many(wait) if wait else HTTPException(status_code=401, detail=detail)
 
 
 @router.post("/api/v1/auth/mfa/enroll")
 async def enroll_mfa(request: MFAEnrollRequest, principal: Principal = Depends(get_current_principal)):
     if principal.tenant.auth_provider != "local":
         raise HTTPException(status_code=400, detail="Cannot enroll MFA for external provider")
-    _throttle_password_check(principal)
+    key = _password_key(principal)
     if not principal.user.password_hash or not verify_password(request.password, principal.user.password_hash):
-        raise HTTPException(status_code=401, detail="Invalid password")
+        raise _password_refused(key, "Invalid password")
+    login_failures.succeeded(key)
     try:
         secret, uri = await mfa.begin_enrollment(principal.user)
         return {"secret": secret, "provisioning_uri": uri}
@@ -182,9 +234,10 @@ async def confirm_mfa(request: MFAConfirmRequest, principal: Principal = Depends
 async def disable_mfa(request: MFADisableRequest, principal: Principal = Depends(get_current_principal)):
     if principal.tenant.auth_provider != "local":
         raise HTTPException(status_code=400, detail="Cannot disable MFA for external provider")
-    _throttle_password_check(principal)
+    key = _password_key(principal)
     if not principal.user.password_hash or not verify_password(request.password, principal.user.password_hash):
-        raise HTTPException(status_code=401, detail="Invalid password")
+        raise _password_refused(key, "Invalid password")
+    login_failures.succeeded(key)
 
     await mfa.disable(principal.user)
 
@@ -241,12 +294,10 @@ async def change_own_password(
     user = principal.user
     if user is None or not user.password_hash:
         raise HTTPException(status_code=400, detail="This account has no local password")
-    # Same limiter as sign-in: this route also confirms whether a given password is the right one.
-    throttle_key = f"{tenant.id}:{user.email}"
-    if not login_limiter.check(throttle_key):
-        raise HTTPException(status_code=429, detail="Too many attempts; try again later")
+    key = _password_key(principal)
     if not verify_password(request.current_password, user.password_hash):
-        raise HTTPException(status_code=401, detail="Current password is incorrect")
+        raise _password_refused(key, "Current password is incorrect")
+    login_failures.succeeded(key)
     problem = password_policy_error(request.new_password)
     if problem:
         raise HTTPException(status_code=400, detail=problem)
@@ -267,12 +318,12 @@ async def change_own_password(
 
 
 @router.post("/api/v1/auth/discover")
-async def discover_login(request: DiscoverRequest):
+async def discover_login(request: DiscoverRequest, http_request: Request):
     """Look up which tenants an email address can sign in to and how, confirming to any caller that the address
     has access."""
     email = request.email.strip().lower()
-    if not email or not login_limiter.check(f"discover:{email}"):
-        raise HTTPException(status_code=429, detail="Too many attempts; try again later")
+    if not email or not discover_limiter.check(("discover", _client_address(http_request), email)):
+        raise HTTPException(status_code=429, detail=_TOO_MANY)
 
     users = await User.filter(email__iexact=email, is_active=True).prefetch_related("tenant")
     tenants = []

@@ -23,6 +23,10 @@ DESTRUCTIVE_COMMANDS = frozenset({
     "logout_user", "delete_user",
 })
 
+# Agent task types a member may not queue or cancel, since they run a package as root, remove an app, or change who is
+# a local administrator.
+AGENT_ADMIN_TASK_TYPES = frozenset({"install_package", "remove_app", "grant_admin", "revoke_admin"})
+
 # Allowlist of config types a member may write. Keep in sync with _EDITABLE_CONFIG_TYPES in api/routes/config.py.
 MEMBER_WRITABLE_CONFIG_TYPES = frozenset({"tags"})
 
@@ -31,5 +35,6 @@ __all__ = [
     "ROLE_MEMBER",
     "ROLES",
     "DESTRUCTIVE_COMMANDS",
+    "AGENT_ADMIN_TASK_TYPES",
     "MEMBER_WRITABLE_CONFIG_TYPES",
 ]

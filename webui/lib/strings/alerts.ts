@@ -12,7 +12,7 @@ export const ALERT_BOARD_STRINGS = {
     adminOnly: "admin only",
     failingState: "Failing state",
     reasonLabel: "Reason",
-    reasonDescription: "Optional. This is just for future reference on the audit log.",
+    reasonDescription: "Optional. Recorded in the audit log.",
 };
 
 export const CREDENTIAL_REVEAL_STRINGS = {
@@ -23,7 +23,7 @@ export const CREDENTIAL_REVEAL_STRINGS = {
     burstBadge: (reveals?: number) => (reveals ? `revealed in a burst of ${reveals}` : "revealed too quickly"),
     lastRevealedBy: "Last revealed by",
     revealedOn: (time: string) => ` on ${time}`,
-    noRevealer: "No record of who revealed it. This should not happen so something's wrong.",
+    noRevealer: "No record of who revealed it. This should not happen, so check the audit log.",
     firstRevealedBy: (name: string) => `First revealed by ${name}.`,
     revealCount: (count: number) => `Revealed ${count} times in total.`,
     closesOnRotation: "This closes automatically when the password is rotated.",
@@ -47,8 +47,8 @@ export const REMEDIATION_STRINGS = {
     approve: "Approve & run",
     rejectTitle: "Reject this queued command?",
     rejectBody:
-        " will never run which could leave the device in a broken or inconsistent state.",
-    rejectPlaceholder: "Reason for rejecting(optional)",
+        " will never run, which could leave the device in a broken or inconsistent state.",
+    rejectPlaceholder: "Reason for rejecting (optional)",
     ledgerHeading: "Remediation ledger",
     ledgerLine: (at: string, action: string, dryRun: boolean, outcome: string) =>
         `${at} · ${action}${dryRun ? " (dry-run)" : ""} → ${outcome}`,
@@ -65,8 +65,8 @@ export const ATC_ALERT_STRINGS = {
     releasedBadge: "released unverified",
     heldTitle: "Still in Setup Assistant",
     heldBody:
-        "The run stopped before it could release this device, so it is likely stuck in setup on the step where it waits " +
-        "to be released by Remote Management. The device is likely unusable until it gets released. ",
+        "The run stopped before it could release this device, so it is likely stuck in setup on the step where it " +
+        "waits to be released by Remote Management, and unusable until then.",
     failures: (count: number, first: string, last: string) =>
         `${count} failures, first ${first}, most recent ${last}.`,
     failedOnce: (at: string) => `Failed ${at}.`,
@@ -77,7 +77,7 @@ export const GAP_LEDGER_STRINGS = {
         title: "The device exited setup early and is missing something defined by a flow",
         named: "The device left Setup Assistant. The following were defined in the flow but did not appear to run:",
         unnamed:
-            "The device has left Setup Assistant, but we ha ve detected some anomalies. The flow appears to be " +
+            "The device has left Setup Assistant, but we have detected some anomalies. The flow appears to be " +
             "holding for something indefinitely.",
     },
     policy: {

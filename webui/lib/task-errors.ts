@@ -42,6 +42,9 @@ const PUSH_HINT =
     "This almost always means the APNs push certificate hasn't been uploaded yet, or it has expired. " +
     "Until that's fixed, no command can reach any device.";
 const ENROLLMENT_LINK = {href: "/enrollment", label: "Check enrollment setup"};
+const MDM_ENQUEUE_RE = /\/v1\/(enqueue|push)\/|nanomdm/i;
+const MDM_UNREACHABLE_RE =
+    /nanomdm is unreachable|connection refused|cannot connect|connect(ion)? error|timed? ?out|failed to resolve/i;
 
 interface Rule {
     match: (raw: string) => boolean;
@@ -60,11 +63,17 @@ const RULES: Rule[] = [
             "Check the device is on and online, then retry.",
     },
     {
-        // Failures talking to the MDM push service, matched on the enqueue/push path or the service hostname.
-        match: (r) => /\/v1\/(enqueue|push)\/|nanomdm/i.test(r),
-        headline: "Micromanage couldn't hand the command to Apple's push service.",
-        nextStep: PUSH_HINT,
-        link: ENROLLMENT_LINK,
+        // An enqueue that never reached NanoMDM; ahead of the generic connection rule, which would also match it.
+        match: (r) => MDM_ENQUEUE_RE.test(r) && MDM_UNREACHABLE_RE.test(r),
+        headline: "Micromanage couldn't reach its MDM server, so the command was not queued.",
+        nextStep: "The problem is on the server side, so the device is fine. Ask whoever runs the server to check that "
+            + "the MDM service is running, then retry.",
+    },
+    {
+        // NanoMDM answered without storing the command. The API reports a failed push as queued, not as an error.
+        match: (r) => MDM_ENQUEUE_RE.test(r),
+        headline: "The MDM server refused to queue the command, so it never reached the device.",
+        nextStep: "The technical details below give the MDM server's reason. Retry once that is fixed.",
     },
     {
         match: (r) => /\b(apns|push topic|missing topic|mdm_topic)\b/i.test(r),

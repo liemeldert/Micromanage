@@ -90,7 +90,7 @@ import {clickable} from "../../../../../lib/a11y";
 import {useAuth} from "../../../../../lib/auth-context";
 import {TaskDetailDrawer} from "@/components/TaskDetailDrawer";
 import {TaskErrorBody} from "@/components/TaskErrorPanel";
-import {CommandsPanel, QuickActionsCard, RefreshButton} from "@/components/DeviceCommandKit";
+import {CommandsPanel, QuickActionsCard, RefreshButton} from "@/components/devices/commands";
 import {FactRow} from "@/components/ui/FactRow";
 import {GlassAlert} from "@/components/ui/GlassAlert";
 import {glassClassName} from "@/components/ui/glass";
@@ -109,7 +109,7 @@ import {
     type ReconciledDeployment,
     reconcileDeployments,
 } from "../../../../../lib/deployments";
-import {DEPLOYMENT_STATUS_LABELS, STATUS_COLORS,} from "../../../../../lib/status-labels";
+import {DEPLOYMENT_STATUS_LABELS, SEVERITY_COLORS, STATUS_COLORS,} from "../../../../../lib/status-labels";
 import {
     ACTOR_LABELS,
     type ActorKind,
@@ -937,7 +937,7 @@ function AutomationSection({
                                     p="xs"
                                     style={{
                                         borderRadius: "var(--mantine-radius-sm)",
-                                        borderLeft: `3px solid var(--mantine-color-${e.severity ? SEVERITY_COLOR[e.severity] ?? meta.color : meta.color}-6)`,
+                                        borderLeft: `3px solid var(--mantine-color-${e.severity ? SEVERITY_COLORS[e.severity] ?? meta.color : meta.color}-6)`,
                                         background: "var(--mantine-color-default-hover)",
                                         cursor: e.href ? "pointer" : undefined,
                                     }}
@@ -1048,7 +1048,7 @@ function AutomationSection({
                                 p="xs"
                                 style={{
                                     borderRadius: "var(--mantine-radius-sm)",
-                                    borderLeft: `3px solid var(--mantine-color-${SEVERITY_COLOR[a.severity] ?? "gray"}-6)`,
+                                    borderLeft: `3px solid var(--mantine-color-${SEVERITY_COLORS[a.severity] ?? "gray"}-6)`,
                                     background: "var(--mantine-color-default-hover)",
                                     cursor: "pointer",
                                 }}
@@ -1056,7 +1056,8 @@ function AutomationSection({
                                 {...clickable(() => router.push("/compliance"), "link")}
                             >
                                 <Group gap="xs" wrap="nowrap" style={{minWidth: 0}}>
-                                    <Badge color={SEVERITY_COLOR[a.severity] ?? "gray"} variant="filled" tt="uppercase">
+                                    <Badge color={SEVERITY_COLORS[a.severity] ?? "gray"} variant="filled"
+                                           tt="uppercase">
                                         {a.severity}
                                     </Badge>
                                     <Box style={{minWidth: 0}}>
@@ -1081,14 +1082,6 @@ function AutomationSection({
 }
 
 // == Page ==
-
-// Same triage scale the dispatcher AlertBoard uses.
-const SEVERITY_COLOR: Record<string, string> = {
-    black: "dark",
-    red: "red",
-    yellow: "yellow",
-    green: "green",
-};
 
 // DELETE /devices/{id} reports destroyed secrets by kind, without the kind_label the secrets ledger carries.
 const SECRET_KIND_LABELS: Record<string, string> = {

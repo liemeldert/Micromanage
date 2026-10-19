@@ -29,7 +29,8 @@ trust. Only a proxy that presents a publicly trusted certificate for SCEP makes 
 If a TLS proxy sits in front of port `8001`, set `FORWARDED_ALLOW_IPS` to the proxy's address as the controller sees it
 (its address on the compose network, for a proxy container). The controller then takes the client address from
 `X-Forwarded-For`, so the enrollment rate limits and logs see each device instead of the proxy. Without it every request
-appears to come from the proxy and shares one rate limit.
+appears to come from the proxy and shares one rate limit. The sign-in throttle also keys on the client address, so
+behind an unlisted proxy a lock earned by one client holds for every client sharing the proxy.
 
 ## 2. Generate secrets
 

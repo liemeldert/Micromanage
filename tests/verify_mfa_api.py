@@ -173,19 +173,19 @@ async def main():
     check("audit log contains no password", "password" not in (audit_disable.detail or {}))
 
     print("15) enroll and disable share the sign-in limiter")
-    from controller.auth.ratelimit import login_limiter
+    from controller.auth.ratelimit import login_failures
     u2 = await User.create(tenant=tenant, email="throttled@t1", role="member",
                            password_hash=hash_password("Password123!"))
     throttled = Principal(tenant=tenant, user=u2, email="throttled@t1", role="member")
     codes = []
-    for _ in range(login_limiter.max_attempts + 1):
+    for _ in range(login_failures.failures + 1):
         try:
             await api_auth.enroll_mfa(MFAEnrollRequest(password="wrong"), throttled)
             codes.append(200)
         except HTTPException as e:
             codes.append(e.status_code)
     check("enroll answers 401 up to the limit, then 429",
-          codes[:-1] == [401] * login_limiter.max_attempts and codes[-1] == 429, codes)
+          codes[:-1] == [401] * login_failures.failures and codes[-1] == 429, codes)
     try:
         await api_auth.enroll_mfa(MFAEnrollRequest(password="Password123!"), throttled)
         check("the right password is refused too while throttled", False)

@@ -1,5 +1,6 @@
-// Badge colours and display words for the status columns, shared by the device page, the task drawer and the
-// flow-run pages so they cannot drift apart.
+// Badge colours and display words for status and severity values, shared so every page shows the same ones.
+
+import type {Severity} from "./api";
 
 /** Task.status, as the controller writes it. */
 export const TASK_STATUS_COLORS: Record<string, string> = {
@@ -41,4 +42,15 @@ export const FLOW_RUN_STATUS_COLORS: Record<string, string> = {
     completed: "teal",
     failed: "red",
     cancelled: "gray",
+};
+
+/** Alert.severity, worst first. */
+export const SEVERITIES: Severity[] = ["black", "red", "yellow", "green"];
+
+/** Alert.severity. */
+export const SEVERITY_COLORS: Record<string, string> = {
+    black: "dark",
+    red: "red",
+    yellow: "yellow",
+    green: "green",
 };
