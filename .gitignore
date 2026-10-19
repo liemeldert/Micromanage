@@ -41,3 +41,6 @@ webui/.next/
 yaml-configs/
 docs/
 *.bak
+
+# Xcode per-user state
+xcuserdata/

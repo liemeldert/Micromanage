@@ -265,6 +265,18 @@ _AUX_DDL = [
     'WHERE bound_udid IS NOT NULL',
     'CREATE INDEX IF NOT EXISTS "idx_scep_challenges_tenant_serial" ON "scep_challenges" (tenant_id, serial) '
     'WHERE serial IS NOT NULL',
+    # Mac agent (models.agent) and the tenant default agent policy.
+    'ALTER TABLE "tenants" ADD COLUMN IF NOT EXISTS "agent_policy" JSONB NULL',
+    # The tenant agent list by last check-in, a device's task queue, and the elevation request lists.
+    'CREATE INDEX IF NOT EXISTS "idx_device_agents_tenant_seen" ON "device_agents" (tenant_id, last_seen_at)',
+    'CREATE INDEX IF NOT EXISTS "idx_agent_tasks_device_status_created" '
+    'ON "agent_tasks" (device_id, status, created_at)',
+    'CREATE INDEX IF NOT EXISTS "idx_agent_elevation_tenant_status_created" '
+    'ON "agent_elevation_requests" (tenant_id, status, created_at)',
+    'CREATE INDEX IF NOT EXISTS "idx_agent_elevation_device_user_status" '
+    'ON "agent_elevation_requests" (device_id, username, status)',
+    'CREATE INDEX IF NOT EXISTS "idx_agent_enrollment_codes_device" ON "agent_enrollment_codes" (device_id)',
+    'CREATE INDEX IF NOT EXISTS "idx_agent_events_device_received" ON "agent_events" (device_id, received_at)',
 ]
 
 # Best-effort DDL: applied where possible, logged and skipped where not. For constraints that existing data might

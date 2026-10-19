@@ -1,6 +1,6 @@
 """Checks shared by the unauthenticated per-tenant endpoints.
 
-These endpoints must strictly not reveal existance of services, i.e. cannot expose if a tenant_id exists.
+They must not reveal whether a tenant id exists.
 """
 from typing import Any, Optional
 
@@ -34,10 +34,10 @@ async def enrollment_tenant_or_error(tenant_id: str, token: str, what: str, remo
 
 def require_enrollment_configured(tenant: Tenant, enrollment_svc: Any) -> None:
     """A 503 for settings to check when enrollment is not fully configured."""
-    # A profile with an empty APNs topic or URL is structurally valid and dead: it installs and never checks in.
+    # A profile with an empty APNs topic or URL is structurally valid and dead, as it installs and never checks in.
     details = enrollment_svc.enrollment_details(tenant)
     if not details["configured"]:
-        # Names only, no reason: this answer goes to anyone holding an enrollment link.
+        # Names only, no reason, since the response goes to anyone holding an enrollment link.
         names = readiness.settings_to_check(details)
         raise HTTPException(
             status_code=503,

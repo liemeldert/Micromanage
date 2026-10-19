@@ -94,7 +94,9 @@ async def run_checks(url: str) -> int:
     }
     for name in ("tenants", "users", "devices", "tasks", "audit_logs", "flow_runs",
                  "alerts", "dep_servers", "device_secrets", "schema_state", "service_tokens",
-                 "enrollment_links", "scep_challenges", "legacy_identities", "identity_cutover"):
+                 "enrollment_links", "scep_challenges", "legacy_identities", "identity_cutover",
+                 "device_agents", "agent_enrollment_codes", "agent_tasks", "agent_elevation_requests",
+                 "agent_events"):
         check(f"table {name} exists", name in tables)
 
     # Three processes run this at once at startup, and every restart runs it again.
@@ -122,6 +124,7 @@ async def run_checks(url: str) -> int:
                        ("devices", "enrollment_state"),
                        ("devices", "bootstrap_token_escrowed"),
                        ("tenants", "device_naming"),
+                       ("tenants", "agent_policy"),
                        ("tenants", "fv_escrow_private_key_enc"),
                        ("tenants", "fv_escrow_cert_pem"),
                        ("tenants", "fv_escrow_cert_expires_at"),
@@ -157,7 +160,10 @@ async def run_checks(url: str) -> int:
     }
     for name in ("idx_tasks_command_uuid", "idx_appdeploy_tenant_status",
                  "idx_profiledeploy_tenant", "idx_service_tokens_tenant_hash",
-                 "idx_scep_challenges_open_renewal"):
+                 "idx_scep_challenges_open_renewal", "idx_device_agents_tenant_seen",
+                 "idx_agent_tasks_device_status_created", "idx_agent_elevation_tenant_status_created",
+                 "idx_agent_elevation_device_user_status", "idx_agent_enrollment_codes_device",
+                 "idx_agent_events_device_received"):
         check(f"{name} exists", name in indexes)
     check("an unreachable NanoMDM leaves the identity cutover unstamped",
           not await IdentityCutover.exists())

@@ -10,6 +10,8 @@ from tortoise.contrib.fastapi import register_tortoise
 
 from controller.api.ddm import public_router as ddm_public_router
 from controller.api.dep import router as dep_router
+from controller.api.routes.agent import router as agent_router
+from controller.api.routes.agent_admin import router as agent_admin_router
 from controller.api.routes.alerts import router as alerts_router
 from controller.api.routes.audit import router as audit_router
 from controller.api.routes.auth import router as auth_router
@@ -133,21 +135,23 @@ app.include_router(enrollment_router)
 app.include_router(audit_router)
 app.include_router(integrations_router)
 app.include_router(readiness_router)
+app.include_router(agent_router)
+app.include_router(agent_admin_router)
 
 app.add_event_handler("shutdown", _close_tile_client)
 
-# How long a clean shutdown waits for fire-and-forget handlers before letting the process die with the remainder
-# undone. Must stay under supervisord's stopwaitsecs for [program:userapi] and the compose stop_grace_period.
+# How long a clean shutdown waits for spawned background handlers before the process exits. Must stay under
+# supervisord's stopwaitsecs for [program:userapi] and the compose stop_grace_period.
 _SHUTDOWN_DRAIN_SECONDS = float(os.getenv("MDM_API_SHUTDOWN_DRAIN_SECONDS", "15"))
 
 
-# Registered before register_tortoise below: shutdown handlers run in registration order, and the drain must run
-# while DB connections are still open, before register_tortoise's own shutdown hook closes them.
+# Registered before register_tortoise below, since shutdown handlers run in registration order and the drain needs the
+# DB connections that register_tortoise's own shutdown hook closes.
 @app.on_event("shutdown")
 async def _drain_spawned_handlers():
     """Give this process's spawned background work a bounded window to finish.
 
-    Spawned via services.reconciler._spawn; past the window, the remainder is dropped rather than awaited further.
+    Spawned via services.reconciler._spawn; past the window the remainder is dropped.
     """
     from controller.services.reconciler import drain_background_tasks
     try:
@@ -161,7 +165,7 @@ async def _drain_spawned_handlers():
         logger.exception("shutdown: draining spawned handlers failed")
 
 
-# _pooled_url, not the raw DSN, so this process honours DB_POOL_MAX_SIZE instead of asyncpg's default of five.
+# _pooled_url, not the raw DSN, so this process honors DB_POOL_MAX_SIZE instead of asyncpg's default of five.
 register_tortoise(
     app,
     db_url=_pooled_url(DATABASE_URL),

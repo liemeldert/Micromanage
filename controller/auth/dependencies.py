@@ -59,7 +59,7 @@ async def _resolve_external(token: str, tenant_hint: Optional[str]) -> Optional[
             claims = await prov.verify(token)
         except (ExternalAuthError, jwt.PyJWTError):
             continue
-        except Exception as exc:  # a network or JWKS failure must not 500 the request
+        except Exception as exc:  # a network or JWKS failure skips this provider instead of failing the request
             logger.warning("External auth verification error for tenant %s: %s", tenant.id, exc)
             continue
 
@@ -67,7 +67,7 @@ async def _resolve_external(token: str, tenant_hint: Optional[str]) -> Optional[
         email = claims.get(prov.email_claim)
 
         user = None
-        # Primary, safe binding: the provider subject ("sub") is a stable, IdP-controlled identifier and must be
+        # The provider subject ("sub") is the primary binding, a stable IdP-controlled identifier that must be
         # pre-provisioned on the user row.
         if sub:
             user = await User.get_or_none(tenant=tenant, external_id=sub)
@@ -91,8 +91,8 @@ def _superseded_by_timestamp(claims: Dict[str, Any], changed_at) -> bool:
         return False
     issued_at = claims.get("iat")
     if issued_at is None:
-        # decode_session_token requires iat, so this is unreachable for a valid session token. A token that cannot be
-        # placed in time is refused.
+        # decode_session_token requires iat, so only a token that cannot be placed in time reaches here, and it is
+        # refused.
         return True
     return int(issued_at) < int(as_utc(changed_at).timestamp())
 
@@ -122,6 +122,11 @@ async def get_current_principal(
         raise HTTPException(
             status_code=401,
             detail="Service tokens cannot be used for user session endpoints",
+        )
+    if token.startswith("mm_ag_"):
+        raise HTTPException(
+            status_code=401,
+            detail="Agent tokens cannot be used for user session endpoints",
         )
 
     # 1. Controller-issued session token (local auth).

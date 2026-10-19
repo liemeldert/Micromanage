@@ -18,6 +18,8 @@ class Tenant(Model):
     # Dynamic device naming: a template such as IT-{serial} plus apply_on_enroll. Mirrored from config.yaml. See
     # services.naming.
     device_naming = fields.JSONField(default=dict)
+    # The tenant default agent policy; null when config.yaml has no agent block.
+    agent_policy = fields.JSONField(null=True)
     # Expiry dates for renewal reminders. apns_cert_expires_at is always admin-entered; dep_token_expires_at is
     # mirrored from the linked DepServer on upload and admin-entered otherwise.
     apns_cert_expires_at = fields.DatetimeField(null=True)
@@ -870,3 +872,14 @@ class SchemaState(Model):
     class Meta:
         table = "schema_state"
         ordering = ["-applied_at"]
+
+
+# Tortoise loads only this module and discovers models in its namespace, so the agent models are bound here by
+# assignment, which an import optimizer leaves in place.
+from controller.models import agent  # noqa: E402
+
+DeviceAgent = agent.DeviceAgent
+AgentEnrollmentCode = agent.AgentEnrollmentCode
+AgentTask = agent.AgentTask
+ElevationRequest = agent.ElevationRequest
+AgentEvent = agent.AgentEvent

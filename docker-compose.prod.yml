@@ -368,7 +368,7 @@ services:
 
   # The controller runs as uid 1000 (non-root). This runs once to fix ownership.
   yaml-init:
-    image: ${CONTROLLER_IMAGE:-ghcr.io/liemeldert/micromanage_2-controller:stable}
+    image: ${CONTROLLER_IMAGE:-ghcr.io/liemeldert/micromanage-controller:stable}
     user: "0:0"
     command: [ "sh", "-c", "mkdir -p /app/yaml-configs/tenants && chown -R 1000:1000 /app/yaml-configs" ]
     volumes:
@@ -376,7 +376,7 @@ services:
     restart: "no"
 
   controller:
-    image: ${CONTROLLER_IMAGE:-ghcr.io/liemeldert/micromanage_2-controller:stable}
+    image: ${CONTROLLER_IMAGE:-ghcr.io/liemeldert/micromanage-controller:stable}
     # supervisord stops its programs one at a time (see the note at the top of supervisord.conf), so this must exceed
     # the sum of their stopwaitsecs (30 + 30 + 30 = 90s).
     stop_grace_period: 100s
@@ -407,6 +407,7 @@ services:
       SCEP_WEBHOOK_ID_FILE: ${SCEP_WEBHOOK_ID_FILE:-/stepca-webhook/scep_webhook_id}
       STEPCA_URL: ${STEPCA_URL:-https://step-ca:9000}
       STEPCA_ROOT_FILE: ${STEPCA_ROOT_FILE:-/stepca-certs/root_ca.crt}
+      MDM_EMBED_CA_CERT_PATH: ${MDM_EMBED_CA_CERT_PATH:-}
       IDENTITY_RENEW_DAYS: ${IDENTITY_RENEW_DAYS:-30}
       IDENTITY_RENEW_INTERVAL_HOURS: ${IDENTITY_RENEW_INTERVAL_HOURS:-24}
       # Only let pre-provisioned (ADE/placeholder) serials become devices.
@@ -486,7 +487,7 @@ services:
     restart: unless-stopped
 
   webui:
-    image: ${WEBUI_IMAGE:-ghcr.io/liemeldert/micromanage_2-webui:stable}
+    image: ${WEBUI_IMAGE:-ghcr.io/liemeldert/micromanage-webui:stable}
     environment:
       CONTROLLER_URL: http://controller:8001
     ports:
