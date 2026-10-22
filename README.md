@@ -138,3 +138,18 @@ particularly fond of an MDM outside of business or education uses.
 I'm also working on a little hosted version of Micromanage, but this is nowhere near ready for public use. In the
 future, I plan to slowly roll out the hosted version to people that are interested in testing it out.
 
+## License
+
+Micromanage is licensed under the GNU AGPL, version 3
+See the  [LICENSE](LICENSE) file for more details.
+
+bla bla bla ***this is not legal advice***
+
+GNU AGPL means that modified versions of the project must be open source under AGPL as well. So, if you were to make
+changes to Micromanage, they would have to be public. Doing this prevents a commercial entity from using the hard work
+of us and our contributors for financial gain without contributing anything back to the project.
+
+However, our [CLA](CLA.md) allows Micromanage, LLP (us) to maintain our own private fork of the project. This was
+decided
+to simplify our development process and not for commercial reasons, Micromanage is and will always be an open source
+project first.

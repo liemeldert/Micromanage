@@ -164,12 +164,10 @@ For automated fleet tooling such as Ansible:
   the device hostname or its Tailscale IP. Groups are prefixed `platform_`, `tag_` and `group_`.
 - Dynamic inventory can be queried directly via HTTP or by using the CLI plugin `micromanage-cli/inventory_plugin.py`.
 
-## 8. Upgrading to per-enrollment SCEP challenges
+## 8. Backups
 
-This release replaces the shared `SCEP_CHALLENGE` with a one-time challenge per enrollment profile, checked by the
-controller through a step-ca webhook.
-
-Back up first. The step-ca and controller changes below cannot be undone without these backups.
+Back up Postgres and the `step_ca_data` volume together, since enrolled devices chain to the CA in `step_ca_data` and a
+new CA means re-enrolling them.
 
 ```sh
 docker compose -f docker-compose.prod.yml exec -T postgres pg_dumpall -U postgres --clean --if-exists \
@@ -177,59 +175,11 @@ docker compose -f docker-compose.prod.yml exec -T postgres pg_dumpall -U postgre
 docker compose -f docker-compose.prod.yml stop step-ca
 docker run --rm --volumes-from "$(docker compose -f docker-compose.prod.yml ps -aq step-ca)" -v "$PWD":/backup \
   alpine tar czf /backup/step_ca_data.tgz -C /home/step .
+docker compose -f docker-compose.prod.yml start step-ca
 ```
 
-Update the checkout (`git pull`), so the new `docker-compose.prod.yml` and `deploy/scep-front.conf.template` are on
-disk. Without the template, `scep-front` starts with nothing on 9443 and its healthcheck reports it unhealthy. Then
-upgrade:
-
-```sh
-docker compose -f docker-compose.prod.yml pull
-docker compose -f docker-compose.prod.yml up -d
-docker compose -f docker-compose.prod.yml logs -f step-ca | grep 'step-ca:'
-```
-
-The admin setup waits for the CA to answer, so give it up to three minutes. Stop following the log once it prints
-"webhook verified on <SCEP_NAME>".
-
-What the first boot does:
-
-- Before the CA starts, step-ca mints the `scep-front` certificate and copies the CA certificates into the new
-  `stepca_certs` volume, which NanoMDM reads instead of step-ca's own volume.
-- step-ca turns on its admin API. This moves the provisioners from `ca.json` into step-ca's database, once, keeping
-  `ca.json.pre-admin.bak` next to it, and replaces the SCEP challenge in `ca.json` with a random value. The admin API
-  must stay enabled from then on, because `ca.json` no longer holds the CA's provisioners. The controller's first boot
-  changes its database one way as well, so going back to an older release means restoring both backups,
-  `step_ca_data` and Postgres, as shown below.
-- It rotates the old static challenge to a random discarded value, removes every ACME provisioner, installs a
-  client-only certificate template on the SCEP provisioner and attaches the webhook. Each step logs a line; a line
-  containing `ERROR` names the step that failed. With ACME removed from the CA, any ACME client pointed at step-ca
-  stops working.
-
-From then on, anything built before the upgrade fails at SCEP and has to be redone:
-
-- Enrollment profiles downloaded or printed before the upgrade. Download a new one from **Enrollment**.
-- Return to Service erases queued before the upgrade. Send them again.
-- ADE enrollments that were partway through Setup Assistant. Start them again.
-
-Enrolled devices keep working. The controller moves their identity certificates onto the new scheme in daily batches,
-and readiness shows how many are left; after that, each certificate is renewed `IDENTITY_RENEW_DAYS` (30) days before
-it expires. ADE profiles need no re-push.
-
-In `.env`:
-
-- Delete `SCEP_CHALLENGE`, `MDM_ALLOW_UNSIGNED_TENANT_CLAIM` and `MDM_REQUIRE_SIGNED_TENANT_CLAIM`. Nothing reads
-  them any more.
-- Leave `DEP_ADE_REQUIRE_APPLE_SIGNATURE` unset; it defaults to `true`. With it on, a device wiped without checking
-  out can re-enroll through ADE; with it off, an admin has to allow that device's re-enrollment first.
-- If the check refuses a genuine device over its signer's issuer, which the controller log names, add that issuer to
-  `DEP_APPLE_DEVICE_CA_NAMES` rather than turning the check off.
-
-If your own proxy sits in front of port 9443, it now reaches `scep-front` instead of step-ca, and only the SCEP path
-answers.
-
-To roll back, check out the previous release, then restore both backups into fresh volumes. `PROJECT` is the compose
-project name, which `docker volume ls` shows as the prefix of the volume names.
+To restore, load both into fresh volumes. `PROJECT` is the compose project name, which `docker volume ls` shows as the
+prefix of the volume names.
 
 ```sh
 docker compose -f docker-compose.prod.yml down
@@ -238,8 +188,11 @@ docker compose -f docker-compose.prod.yml create step-ca
 docker run --rm --volumes-from "$(docker compose -f docker-compose.prod.yml ps -aq step-ca)" -v "$PWD":/backup \
   alpine tar xzf /backup/step_ca_data.tgz -C /home/step
 docker compose -f docker-compose.prod.yml up -d postgres
+```
+
+Wait for `postgres` to report healthy, then load the dump and start the rest of the stack:
+
+```sh
 docker compose -f docker-compose.prod.yml exec -T postgres psql -U postgres -d postgres < micromanage-postgres.sql
 docker compose -f docker-compose.prod.yml up -d
 ```
-
-Wait for `postgres` to report healthy before loading the dump.
