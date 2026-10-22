@@ -236,8 +236,8 @@ export default function DashboardLayout({children}: { children: React.ReactNode 
                                     variant="subtle"
                                     color="red"
                                     size="sm"
-                                    onClick={() => {
-                                        logout();
+                                    onClick={async () => {
+                                        await logout();
                                         router.push("/login");
                                     }}
                                     title="Sign out"

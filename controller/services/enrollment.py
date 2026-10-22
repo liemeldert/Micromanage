@@ -61,8 +61,8 @@ def tenant_url_token(tenant_id: str) -> str:
 
 
 def verify_tenant_url_token(tenant_id: str, token: str) -> bool:
-    """Constant-time check of a device-supplied tenant signature. False when no signature can be computed, so an
-    unconfigured server trusts no tenant claim. Never raises, since both arguments come from the device's ServerURL.
+    """Constant-time check of a device-supplied tenant signature, False for any malformed value from the device's
+    ServerURL and when no signature can be computed, so an unconfigured server trusts no tenant claim.
     """
     if not tenant_id:
         return False
@@ -79,7 +79,7 @@ def verify_tenant_url_token(tenant_id: str, token: str) -> bool:
 
 def log_token_refusal(endpoint: str, tenant_id: str, reason: str,
                       remote_addr: Optional[str]) -> None:
-    """Record why an unauthenticated device endpoint refused a caller. Those endpoints answer one 404 for every refusal,
+    """Record why an unauthenticated device endpoint refused a caller. Those endpoints return one 404 for every refusal,
     so this log line is the only record of the reason.
     """
     logger.warning(
@@ -105,7 +105,8 @@ def _loggable(value: Any, limit: int = 200) -> str:
 def _hostname() -> Optional[str]:
     """The public hostname of the MDM endpoints, or None when nothing is set.
 
-    No default: a placeholder like mdm.example.com would build URLs naming a host this deployment does not own.
+    There is no default, as a placeholder like mdm.example.com would build URLs naming a host this deployment does not
+    own.
     """
     return os.getenv("MDM_HOSTNAME") or None
 
@@ -132,9 +133,10 @@ def _server_url_for(tenant_id: str) -> str:
 
 
 def _scep_url() -> Optional[str]:
-    """The SCEP enrolment URL, explicit or built from the hostname.
+    """The SCEP enrollment URL, explicit or built from the hostname.
 
-    None when neither is set, same as _hostname: a SCEP URL naming an unowned host carries the real challenge to it.
+    None when neither is set, as for _hostname, since a SCEP URL naming an unowned host would send it the real
+    challenge.
     """
     explicit = os.getenv("SCEP_URL")
     if explicit:
@@ -147,7 +149,7 @@ def _topic() -> str:
     return os.getenv("MDM_TOPIC", "")
 
 
-# The armour around a certificate in a PEM file. Only the first block is read; see _embed_ca_der.
+# The armor around a certificate in a PEM file. Only the first block is read; see _embed_ca_der.
 _PEM_CERT_RE = re.compile(
     rb"-----BEGIN CERTIFICATE-----(.*?)-----END CERTIFICATE-----", re.DOTALL
 )
@@ -161,8 +163,8 @@ def _embed_ca_der() -> Optional[bytes]:
 
 
 def _read_embedded_ca() -> Tuple[Optional[bytes], Optional[str]]:
-    """(der, error) for MDM_EMBED_CA_CERT_PATH. Both None when it is unset, and never raises: an unusable path comes
-    back as the error string."""
+    """(der, error) for MDM_EMBED_CA_CERT_PATH, both None when it is unset, and None with the error string for an
+    unusable path."""
     path = os.getenv("MDM_EMBED_CA_CERT_PATH")
     if not path:
         return None, None
@@ -171,7 +173,7 @@ def _read_embedded_ca() -> Tuple[Optional[bytes], Optional[str]]:
             m = _PEM_CERT_RE.search(fh.read())
         if not m:
             raise ValueError("there is no CERTIFICATE block in it")
-        # Strip the armour and the line breaks, then decode PEM to DER.
+        # Strip the armor and the line breaks, then decode PEM to DER.
         der = base64.b64decode(b"".join(m.group(1).split()), validate=True)
         if not der:
             # An empty block decodes to b"" without raising, which would skip the payload silently.
@@ -221,7 +223,7 @@ def enrollment_details(tenant) -> Dict[str, Any]:
         "hostname": _hostname(),
         "configured": status.ready,
         "missing": missing,
-        # Set-but-broken settings, kept apart from "missing": an admin shouldn't be told to set what's already set.
+        # Settings that are set but unusable, kept apart from "missing".
         "broken": list(status.broken),
         "reason": status.reason,
         # Admin-entered renewal dates (manual-entry MVP; see models.tenant).
@@ -247,18 +249,16 @@ def ade_enroll_url(tenant_id: str) -> Optional[str]:
     return f"{readiness.public_api_url()}/api/v1/dep/enroll/{tenant_id}/{token}"
 
 
-# The XML plist Setup Assistant embeds in its signed MachineInfo.
-_PLIST_XML_RE = re.compile(rb"<\?xml.*?</plist>", re.DOTALL)
-
-
 def _extract_plist(data: bytes) -> Optional[Dict[str, Any]]:
-    """Best-effort extraction of a plist (XML or binary bplist00) embedded in raw CMS/DER bytes, with no ASN.1 parsing.
+    """Extracts a plist (XML or binary bplist00) embedded in raw CMS/DER bytes, with no ASN.1 parsing.
     For observability only, since the device identifies itself later through SCEP and the Authenticate webhook.
     """
-    m = _PLIST_XML_RE.search(data)
-    if m:
+    # The XML plist Setup Assistant embeds in its signed MachineInfo, found by a linear scan.
+    start = data.find(b"<?xml")
+    end = data.find(b"</plist>", start) if start != -1 else -1
+    if end != -1:
         try:
-            obj = plistlib.loads(m.group(0))
+            obj = plistlib.loads(data[start:end + len(b"</plist>")])
             return obj if isinstance(obj, dict) else None
         except Exception:
             pass
@@ -301,7 +301,7 @@ def parse_machine_info(header_value: Optional[str]) -> Tuple[Dict[str, Any], boo
     except Exception:
         logger.exception("ADE: CMS verification path failed; falling back to extract")
 
-    # Fallback: pull the plist straight out of the CMS bytes when verification could not return the content.
+    # Without verified content, the plist is read straight out of the CMS bytes.
     if not info:
         info = _extract_plist(raw) or {}
     if info:
@@ -335,8 +335,7 @@ def build_enrollment_profile(tenant, challenge: str, subject_cn: str) -> Dict[st
         "PayloadIdentifier": f"com.micromanage.{tenant.id}.enroll",
         "PayloadUUID": str(uuid.uuid4()).upper(),
         "PayloadOrganization": org,
-        # No PayloadScope here on purpose: setting it to System freezes the user-channel capability below off
-        # at enrollment.
+        # PayloadScope stays unset, since System scope turns off the user-channel capability below at enrollment.
         "PayloadContent": [
             {
                 "PayloadType": "com.apple.security.scep",
@@ -371,7 +370,7 @@ def build_enrollment_profile(tenant, challenge: str, subject_cn: str) -> Dict[st
                 "AccessRights": 8191,
                 "CheckOutWhenRemoved": True,
                 "SignMessage": True,
-                # Required despite reading as optional: macOS 26.6.1 refuses the install without it.
+                # macOS 26.6.1 refuses the install without ServerCapabilities.
                 "ServerCapabilities": ["com.apple.mdm.per-user-connections", "com.apple.mdm.bootstraptoken"],
             },
         ],
@@ -418,7 +417,7 @@ async def mint_profile(tenant, **mint) -> Tuple[Any, bytes]:
 
 
 async def issue_profile(tenant, **mint) -> bytes:
-    """The profile bytes from mint_profile, for issuers that never touch the row again."""
+    """The profile bytes from mint_profile, for callers that do not use the row."""
     return (await mint_profile(tenant, **mint))[1]
 
 

@@ -62,11 +62,11 @@ class User(Model):
     tenant = fields.ForeignKeyField("models.Tenant", related_name="users")
     email = fields.CharField(max_length=255)
     password_hash = fields.CharField(max_length=255, null=True)  # local auth only
-    # When the password was last set. Session tokens issued before this are refused (auth.dependencies), so a
-    # password change ends any sessions a thief was holding. Null means nothing to compare against, so it passes.
+    # When the password was last set. Session tokens issued before this are refused (auth.dependencies). Null means
+    # there is nothing to compare against.
     password_changed_at = fields.DatetimeField(null=True)
-    # When two-factor auth was last turned on or off. Same refusal mechanism as password_changed_at: disabling
-    # MFA ends whatever sessions a thief was holding. Null means never touched, so it refuses nothing.
+    # When two-factor auth was last turned on or off. Session tokens issued before this are refused, as with
+    # password_changed_at. Null means never changed.
     mfa_changed_at = fields.DatetimeField(null=True)
     role = fields.CharField(max_length=20, default="member")  # admin | member
     external_id = fields.CharField(max_length=255, null=True)  # OIDC/Clerk subject
@@ -81,8 +81,8 @@ class User(Model):
 
 class UserMFA(Model):
     """A user's console two-factor enrollment. One row per user. secret_enc is Fernet-encrypted at rest, like
-    the DEP token. confirmed_at stays null until one accepted code, and an unconfirmed row must never block
-    login. last_step guards against replaying an observed code within its tolerated step window."""
+    the DEP token. confirmed_at stays null until one accepted code, and an unconfirmed row never blocks
+    login. last_step rejects replay of an observed code within its tolerated step window."""
     id = fields.UUIDField(pk=True)
     user = fields.ForeignKeyField("models.User", related_name="mfa", unique=True)
     secret_enc = fields.TextField()
@@ -98,11 +98,21 @@ class UserMFA(Model):
         table = "user_mfa"
 
 
+class RevokedSession(Model):
+    """A session token ended by sign-out, refused until it would have expired. Other sessions of the user stay valid."""
+    jti = fields.CharField(max_length=64, pk=True)
+    user = fields.ForeignKeyField("models.User", related_name="revoked_sessions", on_delete=fields.CASCADE)
+    expires_at = fields.DatetimeField()
+
+    class Meta:
+        table = "revoked_sessions"
+
+
 class Device(Model):
     id = fields.UUIDField(pk=True)
     tenant = fields.ForeignKeyField("models.Tenant", related_name="devices")
-    # Null while a device is a pre-provisioned placeholder, known by serial but not yet enrolled, which is how DEP
-    # devices start. Postgres treats NULLs as distinct, so the unique index still allows plenty of placeholders.
+    # Null while a device is a pre-provisioned placeholder, known by serial but not yet enrolled, as DEP devices start.
+    # Postgres treats NULLs as distinct, so the unique index allows any number of placeholders.
     udid = fields.CharField(max_length=40, unique=True, null=True)
     serial_number = fields.CharField(max_length=20)
     device_model = fields.CharField(max_length=100)
@@ -111,28 +121,27 @@ class Device(Model):
     # Managed display name, either set by hand or derived from the tenant's naming template. Null falls back to
     # hostname, then serial.
     name = fields.CharField(max_length=255, null=True)
-    # Lifecycle across (un)enrollments: enrolled | unenrolled | pending. Records are retained through unenroll so
-    # history/state survive a re-enroll.
+    # Lifecycle across (un)enrollments: enrolled | unenrolled | pending. Records are kept through unenroll, so history
+    # and state survive a re-enroll.
     enrollment_state = fields.CharField(max_length=20, default="enrolled")
-    # Management backend. Only "apple_mdm" today; delimits future platforms.
+    # Management backend. Only "apple_mdm" today.
     management_type = fields.CharField(max_length=30, default="apple_mdm")
     enrollment_date = fields.DatetimeField(auto_now_add=True)
     unenrolled_at = fields.DatetimeField(null=True)
     last_seen = fields.DatetimeField(auto_now=True)
-    # Adaptive info-poll schedule (services.poller): when we last queried the device, and the current cadence in minutes
-    # (grows as a device stays silent, resets to the base when it answers).
+    # Adaptive info-poll schedule (services.poller): when the device was last queried, and the current interval in
+    # minutes, which grows while the device stays silent and resets to the base when it answers.
     last_polled_at = fields.DatetimeField(null=True)
     poll_interval_minutes = fields.IntField(default=30)
     groups = fields.JSONField(default=list)  # Computed group memberships
-    # Inventory exactly as the device reports it (Apple's InstalledApplicationList / ProfileList entries).
-    # Written only by webhook_handler._persist_inventory. Distinct from AppDeployment / ProfileDeployment, which
-    # record what we asked for rather than what the device says it has.
+    # Inventory as the device reports it (InstalledApplicationList and ProfileList entries), written only by
+    # webhook_handler._persist_inventory. AppDeployment and ProfileDeployment record what was requested instead.
     installed_apps = fields.JSONField(default=list)
     installed_profiles = fields.JSONField(default=list)
-    # Everything the device says about itself (DeviceInformation QueryResponses, SecurityInfo and friends), kept as-is
-    # rather than hardcoding a column per attribute.
+    # Everything the device reports about itself (DeviceInformation QueryResponses, SecurityInfo and similar), stored
+    # as received instead of as a column per attribute.
     attributes = fields.JSONField(default=dict)
-    # Imperative device labels, written by ATC flows, Dispatcher rules and by hand; matched by the tag scope
+    # Imperative device labels, written by ATC flows, Dispatcher rules and by hand, and matched by the tag scope
     # condition. Assignment is additive and idempotent, so a tag applied by hand survives automated writers.
     tags = fields.JSONField(default=list)
     # ADE/DEP linkage, populated when synced from Apple Business/School Manager (services.dep_manager). Null
@@ -151,7 +160,7 @@ class Device(Model):
     ddm_client_capabilities = fields.JSONField(default=dict)
     bootstrap_token_escrowed = fields.BooleanField(default=False)
     # Either one lets a fresh enrollment take over this enrolled row (services.identity.takeover_allowed). A fresh
-    # bind of a challenge certificate clears both; a legacy acceptance does not.
+    # bind of a challenge certificate clears both, a legacy acceptance does not.
     reenrollment_allowed_until = fields.DatetimeField(null=True)
     erase_acked_at = fields.DatetimeField(null=True)
     # Token and PushMagic from the last accepted TokenUpdate, sealed with crypto_secrets.
@@ -167,8 +176,8 @@ class Device(Model):
         table = "devices"
 
 
-# Deployments record confirmed state; a Task records the attempt that last moved it. last_task_id links them, stamped at
-# enqueue time. It is a plain UUID, not a ForeignKeyField, so it can dangle once the task ages out of retention.
+# Deployments record confirmed state and a Task records the attempt that last moved it. last_task_id links them, set at
+# enqueue time, and is a plain UUID so it can dangle once the task ages out of retention.
 
 class AppDeployment(Model):
     id = fields.UUIDField(pk=True)
@@ -177,22 +186,20 @@ class AppDeployment(Model):
     app_id = fields.CharField(max_length=100)
     app_version = fields.CharField(max_length=50)
     # pending, installing, accepted, installed, failed, unscoped. 'accepted' means the device acknowledged
-    # InstallApplication but has not yet confirmed the app's presence in inventory. 'unscoped' means the device
-    # is no longer scoped into this app; nothing was uninstalled, the sync loop just stops acting on it.
+    # InstallApplication but inventory does not yet show the app. 'unscoped' means the device is no longer scoped
+    # into this app, nothing was uninstalled, and the sync loop stops acting on it.
     status = fields.CharField(max_length=20)
     install_date = fields.DatetimeField(null=True)
-    # What the DEVICE reports as its version (CFBundleVersion/CFBundleShortVersionString) as of the last
-    # confirmed presence, distinct from app_version (the apps.yaml label); nothing requires the two to agree.
-    # NULL means never confirmed, i.e. a first install.
+    # The version the device reports (CFBundleVersion/CFBundleShortVersionString) at the last confirmed presence,
+    # which need not match app_version (the apps.yaml label). NULL means never confirmed, i.e. a first install.
     reported_version = fields.TextField(null=True)
     last_error = fields.TextField(null=True)
-    # Task that last tried to install this app. See the note above.
+    # Task that last tried to install this app.
     last_task_id = fields.UUIDField(null=True)
-    # Consecutive failures on this deployment; spaces retries out instead of minting a failed task every retry
-    # window. See services.reconciler._retry_delay_minutes.
+    # Consecutive failures on this deployment, used to space retries (services.reconciler._retry_delay_minutes).
     failed_attempts = fields.IntField(default=0)
-    # The app half of ProfileDeployment.install_source, and the same rule: an app a compliance rule installed on a
-    # device the app is not scoped to is held rather than retired while that rule exists.
+    # The app counterpart of ProfileDeployment.install_source: an app a compliance rule installed on a device it is not
+    # scoped to is kept while that rule exists.
     install_source = fields.TextField(null=True)
     created_at = fields.DatetimeField(auto_now_add=True)
     updated_at = fields.DatetimeField(auto_now=True)
@@ -221,23 +228,21 @@ class ProfileDeployment(Model):
     tenant = fields.ForeignKeyField("models.Tenant", related_name="profile_deployments")
     device = fields.ForeignKeyField("models.Device", related_name="profile_deployments")
     profile_id = fields.CharField(max_length=100)
-    # pending, installing, installed, failed. No 'accepted' here, unlike AppDeployment: a device applies a profile
-    # before it acknowledges InstallProfile, so that acknowledgement really does mean installed.
+    # pending, installing, installed, failed. There is no 'accepted' state, as a device applies a profile before it
+    # acknowledges InstallProfile.
     status = fields.CharField(max_length=20)
-    # Hash of the profile definition this row last ATTEMPTED. The sync loop compares it with current YAML to
-    # detect an edit and re-push, and to tell an already-fixed failure apart from a repeating one. Written on
-    # the way out either way, or a failing row would look freshly edited forever.
+    # Hash of the profile definition this row last attempted. The sync loop compares it with the current YAML to detect
+    # an edit and re-push, and to tell a fixed failure from a repeating one. It is written on failure too.
     payload_hash = fields.CharField(max_length=64, null=True)
     install_date = fields.DatetimeField(null=True)
     last_error = fields.TextField(null=True)
-    # Task that last tried to install this profile. See the note above.
+    # Task that last tried to install this profile.
     last_task_id = fields.UUIDField(null=True)
-    # The profile half of AppDeployment.failed_attempts; same counter, same backoff, cleared when the profile installs
-    # or its definition changes.
+    # The profile counterpart of AppDeployment.failed_attempts, cleared when the profile installs or its definition
+    # changes.
     failed_attempts = fields.IntField(default=0)
-    # Who asked for this profile, when it was not the device's own scope. 'remediation:<rule id>' marks one a
-    # compliance rule installed off-scope, which the sync loop must not take back off (see
-    # services.reconciler._held_by_remediation). NULL means the scope asked for it.
+    # Who requested this profile when its scope did not. 'remediation:<rule id>' marks one a compliance rule installed
+    # off-scope, which the sync loop does not remove (services.reconciler._held_by_remediation). NULL means the scope.
     install_source = fields.TextField(null=True)
     created_at = fields.DatetimeField(auto_now_add=True)
     updated_at = fields.DatetimeField(auto_now=True)
@@ -253,14 +258,13 @@ class ProfileDeployment(Model):
             "install_date": self.install_date,
             "last_error": self.last_error,
             "last_task_id": str(self.last_task_id) if self.last_task_id else None,
-            # See AppDeployment.to_dict: the same answer to the same question.
             "install_source": self.install_source,
             "updated_at": self.updated_at,
         }
 
 
 class EnrollmentProfile(Model):
-    """Retained for existing databases only; nothing writes or reads this table any more."""
+    """Retained for existing databases only; nothing reads or writes this table."""
 
     id = fields.UUIDField(pk=True)
     tenant = fields.ForeignKeyField("models.Tenant", related_name="enrollment_profiles")
@@ -279,15 +283,16 @@ class EnrollmentProfile(Model):
 
 class EnrollmentAttempt(Model):
     """A POST-SCEP webhook check-in that could not be turned into, or matched to, a Device row (the two silent drop
-    points inside _upsert_device). tenant is set only when a real Tenant row was resolved. The request's tenant id is
-    unverified (anyone can pass ?tenant=), so on a no_tenant drop it never goes in the FK or scopes a query."""
+    points inside _upsert_device). tenant is set only when a Tenant row was resolved. The request's tenant id is
+    unverified (anyone can pass ?tenant=), so on a no_tenant drop it is not stored in the FK or used to scope a
+    query."""
     id = fields.UUIDField(pk=True)
     tenant = fields.ForeignKeyField("models.Tenant", related_name="enrollment_attempts", null=True)
     udid = fields.CharField(max_length=40, null=True)
     serial_number = fields.CharField(max_length=20, null=True)
     topic = fields.CharField(max_length=50, null=True)
     outcome = fields.CharField(max_length=30)  # no_tenant | no_serial
-    detail = fields.JSONField(default=dict)  # never secrets; may hold an unverified tenant id
+    detail = fields.JSONField(default=dict)  # no secrets; may hold an unverified tenant id
     created_at = fields.DatetimeField(auto_now_add=True)
 
     class Meta:
@@ -340,7 +345,7 @@ class EnrollmentLink(Model):
 
 
 class ScepChallenge(Model):
-    """One SCEP challenge, minted per enrollment profile and consumed once by the step-ca webhook. Only its sha256 is
+    """One SCEP challenge, created per enrollment profile and consumed once by the step-ca webhook. Only its sha256 is
     stored. subject_cn is the Subject CN the profile asks for, and bound_* records the certificate that used it."""
     id = fields.UUIDField(pk=True)
     tenant = fields.ForeignKeyField("models.Tenant", related_name="scep_challenges")
@@ -367,7 +372,7 @@ class ScepChallenge(Model):
     bound_udid = fields.CharField(max_length=40, null=True)
     # On a renewal row, the PEM of the certificate the device held before it, for a rollback.
     previous_pem = fields.TextField(null=True)
-    # manual, ade, rts or renewal, set when minted. The foreign keys above can be nulled by retention later.
+    # manual, ade, rts or renewal, set at creation. Retention can null the foreign keys above.
     origin = fields.CharField(max_length=16)
 
     class Meta:
@@ -398,8 +403,8 @@ class IdentityCutover(Model):
 
 class AuditLog(Model):
     """An append-only record of who or what changed something, scoped to the tenant it happened in. A null
-    actor_email/actor_role marks a machine-attributed row, which cleanup_old_audit_log relies on. detail must
-    never carry a secret."""
+    actor_email/actor_role marks a machine-attributed row, which cleanup_old_audit_log relies on. detail
+    holds no secret."""
     id = fields.UUIDField(pk=True)
     tenant = fields.ForeignKeyField("models.Tenant", related_name="audit_logs")
     actor_email = fields.CharField(max_length=255, null=True)
@@ -428,26 +433,24 @@ class AuditLog(Model):
         }
 
 
-# Unit separator, not a printable char, so a bundle id or version containing the delimiter cannot collide with
-# a different pair. Also what the _AUX_DDL backfill concatenates with, as E'\x1f'.
+# Unit separator, a non-printable character so a bundle id or version containing the delimiter cannot collide with
+# a different pair. The _AUX_DDL backfill concatenates with it as E'\x1f'.
 DEDUP_KEY_SEP = "\x1f"
 
-# Keyed task types, kept in sync with task_dedup_key below by hand.
+# Keyed task types; task_dedup_key below must agree.
 DEDUP_KEY_TYPES = ("profile_install", "profile_remove", "app_install")
 
 
 def task_dedup_key(task_type: str, details: Dict[str, Any]) -> Optional[str]:
     """The duplicate key for a task, or None when it has no dedup identity. The reconciler queues no second task while
-    one with the same (device, type, key) is pending or running. The sole definition of the key, shared by four call
-    sites; it never raises, since Task.save() and the reconcile cycle call it."""
+    one with the same (device, type, key) is pending or running. Shared by four call sites, and never raises, as
+    Task.save() and the reconcile cycle call it."""
     if not isinstance(details, dict):
-        # Covers None and what "details or {}" does not: a JSONField holds whatever was put in it, and a list here would
-        # make every .get() below raise. Same reasoning as the isinstance guard on profile_info.
+        # A JSONField holds whatever was put in it, and a list here would make every .get() below raise.
         return None
     if task_type == "profile_install":
         info = details.get("profile_info")
-        # isinstance rather than truthiness alone: .get() straight onto a truthy non-object raises AttributeError, and
-        # this runs inside save(), so it would fail the task creation itself.
+        # .get() on a truthy non-object raises AttributeError, and this runs inside save().
         if isinstance(info, dict) and info:
             return str(info.get("id"))
     elif task_type == "profile_remove":
@@ -470,11 +473,11 @@ class Task(Model):
     user = fields.CharField(max_length=255, null=True)  # User who initiated the task
     description = fields.TextField()
     details = fields.JSONField(default=dict)  # Task-specific details
-    # The MDM CommandUUID this task is waiting on, mirrored out of details by save() so the webhook can
-    # correlate a response with one indexed lookup. NULL if no command was enqueued.
+    # The MDM CommandUUID this task is waiting on, mirrored from details by save() for an indexed webhook lookup. NULL
+    # if no command was enqueued.
     command_uuid = fields.CharField(max_length=64, null=True)
-    # The reconciler's duplicate-task key, mirrored out of details by save(). Keeps the guard from reading every
-    # pending task's whole details JSONB each cycle. Unbounded TEXT.
+    # The reconciler's duplicate-task key, mirrored from details by save() so the guard does not read every pending
+    # task's details JSONB each cycle. Unbounded TEXT.
     dedup_key = fields.TextField(null=True)
     error = fields.TextField(null=True)
     created_at = fields.DatetimeField(auto_now_add=True)
@@ -487,10 +490,8 @@ class Task(Model):
         ordering = ["-created_at"]
 
     async def save(self, *args, **kwargs):
-        """Keep the command_uuid and dedup_key columns in step with details, so no writer can forget a column
-        the webhook correlation and dedup guard depend on. details is the source of truth: a row whose details
-        drop a value has its mirrored column cleared too."""
-        # details may hold anything a JSONField was given; a non-dict here (e.g. a list) must not raise below.
+        """Keep the command_uuid and dedup_key columns in step with details, the source of truth. A row whose
+        details drop a value has its mirrored column cleared."""
         details = self.details if isinstance(self.details, dict) else {}
         uuid_in_details = details.get("command_uuid") or None
         if uuid_in_details != self.command_uuid:
@@ -504,17 +505,15 @@ class Task(Model):
 
     @staticmethod
     def _widen_update_fields(kwargs: Dict[str, Any], field: str) -> None:
-        """Make sure a scoped save still writes a column the mirror just moved. A save with no update_fields
-        writes everything and needs nothing here; one that names its fields would otherwise leave the mirrored
-        column behind in the database while the in-memory object moved on."""
+        """Add a mirrored column the save just changed to update_fields. A save with no update_fields writes
+        everything and needs nothing here."""
         update_fields = kwargs.get("update_fields")
         if update_fields is not None and field not in update_fields:
             kwargs["update_fields"] = [*update_fields, field]
 
     async def update_progress(self, progress: int, status: str = None):
-        """Update task progress. Saves ONLY the lifecycle fields: a full save() from a stale copy (several code
-        paths hold separate Python objects for the same row) would overwrite details.command_uuid and break the
-        webhook to task correlation."""
+        """Update task progress. Saves only the lifecycle fields, as a full save() from a stale copy (several code
+        paths hold separate objects for the same row) would overwrite details.command_uuid."""
         self.progress = min(100, max(0, progress))
         if status:
             self.status = status
@@ -525,20 +524,20 @@ class Task(Model):
         await self.save(update_fields=['progress', 'status', 'started_at', 'completed_at', 'error'])
 
     async def mark_sent(self, command_uuid: Optional[str]) -> None:
-        """Record the enqueued command and leave the task running until the device answers."""
+        """Record the enqueued command and leave the task running until the device responds."""
         self.details['command_uuid'] = command_uuid
         self.status = 'running'
         await self.save()
 
     async def mark_push_failed(self, error: str) -> None:
-        """Fail a task whose command was never enqueued. Stamps completed_at, which retention keys its delete on."""
+        """Fail a task whose command was never enqueued. Sets completed_at, which retention uses to delete."""
         self.status = 'failed'
         self.error = error
         self.completed_at = datetime.now(timezone.utc)
         await self.save()
 
     def to_dict(self) -> Dict[str, Any]:
-        """Convert task to dictionary for API responses"""
+        """Serialize for the API."""
         return {
             'id': str(self.id),
             'type': self.type,
@@ -564,24 +563,23 @@ class FlowRun(Model):
     device = fields.ForeignKeyField("models.Device", related_name="flow_runs")
     flow_id = fields.CharField(max_length=100)
     # The start node this run entered from and the event that started it (enroll_dep | enroll_profile | checkin
-    # | schedule). Run identity is (device, flow_id, start_node); start node ids are unique only within a flow,
-    # which is why flow_id is part of the key. Nullable for legacy rows.
+    # | schedule). Run identity is (device, flow_id, start_node), as start node ids are unique only within a flow.
+    # Nullable for legacy rows.
     start_node = fields.CharField(max_length=100, null=True)
     event_kind = fields.CharField(max_length=20, null=True)
-    # sha256 of the flow document at start, pinning the definition for the run's lifetime. The full snapshot lives in
-    # context['flow'].
+    # sha256 of the flow document at start, which pins the definition for the run. The snapshot is in context['flow'].
     flow_hash = fields.CharField(max_length=64)
     # running | waiting | completed | failed | cancelled
     status = fields.CharField(max_length=20, default="running")
-    # Node id we are at / parked on (null once terminal).
+    # Current or parked node id; null once terminal.
     current_node = fields.CharField(max_length=100, null=True)
-    # For a parked wait_for node: the signal we're waiting on and an optional reference (profile_id / app_id / task_id)
+    # For a parked wait_for node: the signal being waited on and an optional reference (profile_id / app_id / task_id)
     # the signal must match.
     waiting_signal = fields.CharField(max_length=40, null=True)
     waiting_ref = fields.CharField(max_length=255, null=True)
     wait_deadline = fields.DatetimeField(null=True)  # timeout sweep target
-    # Accumulated run state: the pinned flow snapshot, a step timeline and any per-node results. No secrets;
-    # send_command redacts before recording.
+    # Accumulated run state: the pinned flow snapshot, a step timeline and per-node results. send_command redacts
+    # secrets before recording.
     context = fields.JSONField(default=dict)
     error = fields.TextField(null=True)
     started_at = fields.DatetimeField(auto_now_add=True)
@@ -615,7 +613,7 @@ class FlowRun(Model):
             "error": self.error,
             "timeline": ctx.get("timeline", []),
             "visited": ctx.get("visited", []),
-            # The run's gap ledger: what each barrier did not get, which the timeline of what happened does not record.
+            # What each barrier did not receive; the timeline does not record this.
             "gaps": ctx.get("gaps", []),
             "started_at": self.started_at.isoformat() if self.started_at else None,
             "updated_at": self.updated_at.isoformat() if self.updated_at else None,
@@ -627,7 +625,7 @@ class FlowRun(Model):
 
 class Alert(Model):
     """A Dispatcher compliance alert for a (device, rule) pair (services.dispatcher). At most one non-resolved row
-    exists per (device, rule_id); re-evaluation updates it. pending anchors the grace period, and open means
+    exists per (device, rule_id), and re-evaluation updates it. pending starts the grace period, and open means
     grace_minutes elapsed and the actions ran. Severity ranks black > red > yellow > green."""
     id = fields.UUIDField(pk=True)
     tenant = fields.ForeignKeyField("models.Tenant", related_name="alerts")
@@ -637,8 +635,8 @@ class Alert(Model):
     # pending | open | acknowledged | resolved
     status = fields.CharField(max_length=20, default="pending")
     summary = fields.CharField(max_length=255)
-    # Snapshot of the failing state + remediation ledger (attempts, outcomes, reversible tags, pending approvals). JSON,
-    # never carries secrets.
+    # Snapshot of the failing state plus the remediation ledger (attempts, outcomes, reversible tags, pending
+    # approvals). Holds no secrets.
     detail = fields.JSONField(default=dict)
     first_detected_at = fields.DatetimeField(auto_now_add=True)  # grace anchor
     opened_at = fields.DatetimeField(null=True)
@@ -672,7 +670,7 @@ class Alert(Model):
 
 class DepServer(Model):
     """A linked Apple Business/School Manager MDM-server token (services.dep_manager). token_enc and private_key_enc are
-    encrypted at rest and never serialized or logged; token_enc decides which devices enroll into which MDM org-wide.
+    encrypted at rest and never serialized or logged.
     """
     id = fields.UUIDField(pk=True)
     tenant = fields.ForeignKeyField("models.Tenant", related_name="dep_servers")
@@ -688,8 +686,8 @@ class DepServer(Model):
     token_expires_at = fields.DatetimeField(null=True)  # from access_token_expiry
     # /account cache (non-secret): org_name, server_name, org_id, admin_id, ...
     account_detail = fields.JSONField(default=dict)
-    # Delta-sync cursor (opaque, <7 days) + bookkeeping. TextField, not a bounded VARCHAR, since the cursor can reach
-    # 1000 hex chars (https://developer.apple.com/documentation/devicemanagement/).
+    # Delta-sync cursor (opaque, <7 days) and bookkeeping. A TextField, as the cursor can reach 1000 hex chars
+    # (https://developer.apple.com/documentation/devicemanagement/).
     sync_cursor = fields.TextField(null=True)
     cursor_fetched_at = fields.DatetimeField(null=True)
     last_sync_at = fields.DatetimeField(null=True)
@@ -711,7 +709,7 @@ class DepServer(Model):
         return self.status == "linked" and bool(self.token_enc)
 
     def to_dict(self) -> Dict[str, Any]:
-        """Non-secret projection for the API. NEVER includes token/key material."""
+        """Non-secret projection for the API, without token or key material."""
         acct = self.account_detail or {}
         return {
             "id": str(self.id),
@@ -743,8 +741,8 @@ class DepServer(Model):
 
 class DepProfile(Model):
     """Maps a locally-authored DEP enrollment profile (profiles.yaml id) to the profile_uuid Apple returns from
-    POST /profile (services.dep_manager). Per-DepServer runtime state, not config, so it lives in the DB.
-    payload_hash is how the manager notices an edit and re-pushes."""
+    POST /profile (services.dep_manager). Per-DepServer runtime state, kept in the DB.
+    payload_hash lets the manager notice an edit and re-push."""
     id = fields.UUIDField(pk=True)
     tenant = fields.ForeignKeyField("models.Tenant", related_name="dep_profiles")
     dep_server = fields.ForeignKeyField("models.DepServer", related_name="profiles")
@@ -777,8 +775,7 @@ class DeviceSecret(Model):
     DEP token; to_dict is the non-secret projection. One row per (device, kind); reprovisioning overwrites the
     value and clears the reveal ledger."""
 
-    # Escrow kinds. Kept as plain strings (not an enum) to match the codebase's stringly-typed status columns; the API
-    # validates against this set.
+    # Escrow kinds, plain strings like the status columns; the API validates against this set.
     KIND_MANAGED_ADMIN = "managed_admin_password"
     KIND_FIRMWARE = "firmware_password"
     KIND_RECOVERY_LOCK = "recovery_lock"
@@ -799,15 +796,15 @@ class DeviceSecret(Model):
     tenant = fields.ForeignKeyField("models.Tenant", related_name="device_secrets")
     device = fields.ForeignKeyField("models.Device", related_name="secrets")
     kind = fields.CharField(max_length=40)
-    # Non-secret context. Safe to serialize.
+    # Non-secret context.
     label = fields.CharField(max_length=255, null=True)
-    # crypto_secrets ciphertext of the plaintext password. NEVER serialized.
+    # crypto_secrets ciphertext of the plaintext password; never serialized.
     value_enc = fields.TextField()
     meta = fields.JSONField(default=dict)
     created_by = fields.CharField(max_length=255, null=True)  # atc:<flow> | admin:<email>
     created_at = fields.DatetimeField(auto_now_add=True)
     updated_at = fields.DatetimeField(auto_now=True)
-    # Ledger of when the secret was revealed to an admin and by whom
+    # When the secret was revealed and by whom.
     revealed_at = fields.DatetimeField(null=True)
     revealed_by = fields.CharField(max_length=255, null=True)
     reveal_count = fields.IntField(default=0)
@@ -817,8 +814,8 @@ class DeviceSecret(Model):
         unique_together = (("device", "kind"),)
         ordering = ["kind"]
 
-    # meta keys that carry ciphertext (a rotation parks the new password there). Never serialized: the projection below
-    # and the API reveal path both filter on this.
+    # meta keys that carry ciphertext (a rotation stores the new password there). Never serialized; the projection below
+    # and the API reveal path filter on this.
     SECRET_META_KEYS = ("pending_value_enc",)
 
     @property
@@ -826,12 +823,12 @@ class DeviceSecret(Model):
         return self._KIND_LABELS.get(self.kind, self.kind)
 
     def public_meta(self) -> Dict[str, Any]:
-        """meta with the secret-bearing keys dropped. Safe to serialize."""
+        """meta without the secret-bearing keys."""
         return {k: v for k, v in (self.meta or {}).items()
                 if k not in self.SECRET_META_KEYS}
 
     def to_dict(self) -> Dict[str, Any]:
-        """Non-secret projection. NEVER includes value_enc / the plaintext."""
+        """Non-secret projection, without value_enc or the plaintext."""
         return {
             "id": str(self.id),
             "device_id": str(self.device_id),
@@ -880,8 +877,8 @@ class SchemaState(Model):
         ordering = ["-applied_at"]
 
 
-# Tortoise loads only this module and discovers models in its namespace, so the agent models are bound here by
-# assignment, which an import optimizer leaves in place.
+# Tortoise discovers models only in this module's namespace, so the agent models are bound here by assignment, which an
+# import optimizer leaves in place.
 from controller.models import agent  # noqa: E402
 
 DeviceAgent = agent.DeviceAgent

@@ -23,10 +23,11 @@ import {
 import {notifications} from "@mantine/notifications";
 import {IconArrowLeft, IconClockExclamation, IconExternalLink} from "@tabler/icons-react";
 import {api, ApiError, type DiscoveredTenant} from "../../../lib/api";
+import {SESSION_MARKER} from "../../../lib/auth-context";
 
 type Step = "email" | "tenant" | "password" | "external" | "mfa";
 
-// Must match auth-context's STORAGE_KEY, since this page writes the session itself.
+// Must match auth-context's STORAGE_KEY, since this page writes the stored identity itself.
 const AUTH_STORAGE_KEY = "mm_auth";
 
 function LoginFlow() {
@@ -64,7 +65,7 @@ function LoginFlow() {
             if (res.tenants.length === 1) proceedWith(res.tenants[0]);
             else if (res.tenants.length > 1) setStep("tenant");
                 // Unknown email: go on to the password step with a manual tenant field.
-            // The final sign-in gives the same generic error either way.
+            // The final sign-in returns the same generic error for an unknown email.
             else proceedWith(null);
         } catch (e) {
             const msg =
@@ -77,14 +78,14 @@ function LoginFlow() {
         }
     };
 
-    // Writes the session the way auth-context's login() does, then navigates so AuthProvider hydrates fresh from
-    // localStorage. login() cannot serve the password step: it commits to the response before a second factor is
-    // known to be needed.
-    const finishLogin = async (accessToken: string, tenantId: string) => {
-        const me = await api.me(accessToken).catch(() => null);
+    // Stores the identity the way auth-context's login() does, then navigates so AuthProvider hydrates fresh from
+    // localStorage. The proxy has already set the session cookie. login() cannot serve the password step: it commits
+    // to the response before a second factor is known to be needed.
+    const finishLogin = async (tenantId: string) => {
+        const me = await api.me(SESSION_MARKER).catch(() => null);
         localStorage.setItem(
             AUTH_STORAGE_KEY,
-            JSON.stringify({token: accessToken, tenantId, email: email.trim(), role: me?.role ?? null}),
+            JSON.stringify({tenantId, email: email.trim(), role: me?.role ?? null}),
         );
         // eslint-disable-next-line @next/next/no-location-assign-relative-destination
         window.location.href = "/dashboard";
@@ -103,11 +104,7 @@ function LoginFlow() {
                 setStep("mfa");
                 return;
             }
-            if (!res.access_token) {
-                notifications.show({color: "red", title: "Authentication failed", message: "Login failed"});
-                return;
-            }
-            await finishLogin(res.access_token, tenantId);
+            await finishLogin(tenantId);
         } catch (e) {
             const msg = e instanceof ApiError ? e.message : "Login failed";
             notifications.show({color: "red", title: "Authentication failed", message: msg});
@@ -120,8 +117,8 @@ function LoginFlow() {
         if (!mfaCode.trim()) return;
         setLoading(true);
         try {
-            const res = await api.verifyMfa(mfaToken, mfaCode.trim());
-            await finishLogin(res.access_token, mfaTenantId);
+            await api.verifyMfa(mfaToken, mfaCode.trim());
+            await finishLogin(mfaTenantId);
         } catch (e) {
             // Same generic message as a wrong password: this must not say
             // whether the code or the pending token was the problem.
@@ -158,7 +155,7 @@ function LoginFlow() {
 
                 {expired && step === "email" && (
                     <Alert color="yellow" icon={<IconClockExclamation size={16}/>} variant="light">
-                        Your session has expired. Please sign in again.
+                        Your session ended. Sign in again.
                     </Alert>
                 )}
 

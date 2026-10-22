@@ -140,6 +140,9 @@ async def run_checks(url: str) -> int:
                        ("devices", "bootstrap_token_enc")):
         check(f"{table}.{col} exists", (table, col) in cols)
     check("table user_mfa exists", "user_mfa" in tables)
+    check("table revoked_sessions exists", "revoked_sessions" in tables)
+    for col in ("jti", "user_id", "expires_at"):
+        check(f"revoked_sessions.{col} exists", ("revoked_sessions", col) in cols)
     for col in ("id", "user_id", "secret_enc", "confirmed_at", "last_step",
                 "recovery_codes", "failed_attempts", "lockout_until",
                 "created_at", "updated_at"):
@@ -301,5 +304,5 @@ if __name__ == "__main__":
     except Exception:  # noqa: BLE001
         traceback.print_exc()
         code = 1
-    # asyncpg holds no non-daemon threads, but exit explicitly all the same.
+    # Exits explicitly rather than relying on interpreter shutdown.
     sys.exit(code)

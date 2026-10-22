@@ -6,12 +6,13 @@ import {useAuth} from "../../lib/auth-context";
 import {Center, Loader} from "@mantine/core";
 
 export default function Root() {
-    const {isAuthenticated} = useAuth();
+    const {isAuthenticated, hydrated} = useAuth();
     const router = useRouter();
 
     useEffect(() => {
+        if (!hydrated) return;
         router.replace(isAuthenticated ? "/dashboard" : "/login");
-    }, [isAuthenticated, router]);
+    }, [isAuthenticated, hydrated, router]);
 
     return (
         <Center h="100vh">

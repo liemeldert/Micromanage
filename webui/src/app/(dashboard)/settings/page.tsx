@@ -129,12 +129,12 @@ const EMPTY_S3_FORM: S3FormState = {
     secret_access_key: "",
 };
 
-// Matches the controller's default minimum (password_policy_error), which stays the authority. This
-// only keeps the button from posting a password already known to be too short.
+// Matches the controller's default minimum (password_policy_error), which is authoritative. This only
+// stops the button from posting a password known to be too short.
 const MIN_PASSWORD_LENGTH = 12;
 
 export default function SettingsPage() {
-    const {token, tenantId, email, isAdmin, setToken} = useAuth();
+    const {token, tenantId, email, isAdmin} = useAuth();
     const [tenant, setTenant] = useState<TenantInfo | null>(null);
     const [loading, setLoading] = useState(true);
     const [health, setHealth] = useState<"ok" | "error" | "loading">("loading");
@@ -151,8 +151,7 @@ export default function SettingsPage() {
     const [newPw, setNewPw] = useState("");
     const [confirmPw, setConfirmPw] = useState("");
     const [changingPw, setChangingPw] = useState(false);
-    // The controller's rejection names the rule that was broken, so it belongs
-    // next to the fields rather than in a toast.
+    // The controller's rejection names the rule that was broken and is shown next to the fields.
     const [pwError, setPwError] = useState<string | null>(null);
 
     // Two-factor auth (any role, own account only). null until /auth/mfa answers.
@@ -193,8 +192,7 @@ export default function SettingsPage() {
     // Tracked apart from tenantDirty because s3_config is a whole-object replace: it goes in the body
     // only when the S3 section was touched, never as a side effect of renaming the tenant.
     const [s3Dirty, setS3Dirty] = useState(false);
-    // A rejected S3 block names the keys that are missing, so that message gets a place on the page
-    // rather than a toast that scrolls away.
+    // A rejected S3 block names the missing keys, and the message is shown on the page instead of in a toast.
     const [s3Error, setS3Error] = useState<string | null>(null);
     const [savingTenant, setSavingTenant] = useState(false);
     // Mirror tenantDirty into a ref so the async loadTenant reads the live value rather than the one
@@ -304,9 +302,8 @@ export default function SettingsPage() {
         if (s3Draft.region.trim()) next.region = s3Draft.region.trim();
         if (s3Draft.endpoint_url.trim()) next.endpoint_url = s3Draft.endpoint_url.trim();
         if (prefix) next.prefix = prefix;
-        // Written whenever there is a bucket: the block is declared by then, so an explicit use_ssl
-        // and an absent one resolve the same way, and writing both keeps the switches and the stored
-        // config in step. Held back without a bucket so a rejection names the settings truly missing.
+        // Written whenever there is a bucket, as the block is declared by then. Held back without one so a rejection
+        // names the settings actually missing.
         if (s3Draft.bucket.trim()) {
             next.use_ssl = s3Draft.use_ssl;
             next.path_style = s3Draft.path_style;
@@ -397,10 +394,8 @@ export default function SettingsPage() {
         setChangingPw(true);
         setPwError(null);
         try {
-            const res = await api.changePassword(token, currentPw, newPw);
-            // The change invalidates every session for this account, this tab's old token included.
-            // The token that came back keeps this tab signed in.
-            setToken(res.access_token);
+            // The change ends every session for this account; the proxy sets a new session cookie for this tab.
+            await api.changePassword(token, currentPw, newPw);
             setCurrentPw("");
             setNewPw("");
             setConfirmPw("");
@@ -501,8 +496,7 @@ export default function SettingsPage() {
         <Stack gap="lg">
             <PageHeader description={null}/>
 
-            {/* Controller health. One of the few cards with a positive tone, because every other page depends on the
-              controller being reachable. */}
+            {/* Controller health */}
             <GlassCard
                 withBorder
                 p="md"

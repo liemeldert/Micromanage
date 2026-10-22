@@ -8,7 +8,7 @@ import jwt
 from controller.auth import ROLE_ADMIN
 from controller.auth.providers import ExternalAuthError, ExternalJWTProvider
 from controller.auth.tokens import decode_session_token
-from controller.models.tenant import Tenant, User
+from controller.models.tenant import RevokedSession, Tenant, User
 from controller.utils.timeutil import as_utc
 from fastapi import Depends, HTTPException, Request, Security
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
@@ -42,8 +42,7 @@ async def _resolve_external(token: str, tenant_hint: Optional[str]) -> Optional[
     if tenant_hint:
         tenants = await Tenant.filter(id=tenant_hint, is_active=True)
     else:
-        # No hint: consider active tenants configured for external auth and match on issuer. Fine for modest tenant
-        # counts.
+        # No hint: consider active tenants configured for external auth and match on issuer.
         tenants = await Tenant.filter(is_active=True)
 
     for tenant in tenants:
@@ -71,8 +70,8 @@ async def _resolve_external(token: str, tenant_hint: Optional[str]) -> Optional[
         # pre-provisioned on the user row.
         if sub:
             user = await User.get_or_none(tenant=tenant, external_id=sub)
-        # Email fallback is only safe when the IdP asserts the email is verified. Many IdPs let a user set an arbitrary,
-        # unverified email on their own account, so matching an unverified email would allow account takeover.
+        # The email fallback requires the IdP to assert the email is verified, as many IdPs let a user set an arbitrary
+        # unverified email, which would then sign them in as the account that owns it.
         if user is None and email and claims.get("email_verified") is True:
             user = await User.get_or_none(tenant=tenant, email=email)
 
@@ -86,19 +85,18 @@ async def _resolve_external(token: str, tenant_hint: Optional[str]) -> Optional[
 
 
 def _superseded_by_timestamp(claims: Dict[str, Any], changed_at) -> bool:
-    """Whether this session was minted before the given user-row timestamp."""
+    """True when this session was issued before the given user-row timestamp."""
     if not changed_at:
         return False
     issued_at = claims.get("iat")
     if issued_at is None:
-        # decode_session_token requires iat, so only a token that cannot be placed in time reaches here, and it is
-        # refused.
+        # decode_session_token requires iat, so a token without it cannot be placed in time and is refused.
         return True
     return int(issued_at) < int(as_utc(changed_at).timestamp())
 
 
 def _superseded_by_password_change(claims: Dict[str, Any], user: User) -> bool:
-    """Whether this session was minted before the user's password was last changed.
+    """True when this session was issued before the user's password was last changed.
 
     See _superseded_by_timestamp for how the comparison works.
     """
@@ -106,7 +104,7 @@ def _superseded_by_password_change(claims: Dict[str, Any], user: User) -> bool:
 
 
 def _superseded_by_mfa_change(claims: Dict[str, Any], user: User) -> bool:
-    """Whether this session was minted before the user's MFA settings were last changed.
+    """True when this session was issued before the user's MFA settings were last changed.
 
     See _superseded_by_timestamp for how the comparison works.
     """
@@ -148,6 +146,8 @@ async def get_current_principal(
                 status_code=401,
                 detail="This session ended when two-factor authentication was changed. Sign in again.",
             )
+        if claims.get("jti") and await RevokedSession.exists(jti=str(claims["jti"])):
+            raise HTTPException(status_code=401, detail="You have been signed out. Please sign in again.")
         return Principal(tenant=tenant, user=user, email=user.email, role=user.role)
 
     # 2. Externally-issued provider token (Clerk / OIDC).

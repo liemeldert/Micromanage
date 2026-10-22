@@ -1,11 +1,10 @@
-// Leaflet map whose tiles come from the controller's same-origin tile proxy with the bearer token, rendered as
+// Leaflet map whose tiles come from the controller's same-origin tile proxy with the session cookie, rendered as
 // blob: images. The CSP allows img-src 'self' blob: and connect-src 'self', so no third-party tile CDN.
 
 import {useEffect, useRef} from "react";
 import {Anchor, Box, Group, Text} from "@mantine/core";
 import {IconExternalLink} from "@tabler/icons-react";
 import "leaflet/dist/leaflet.css";
-import {useAuth} from "../../lib/auth-context";
 
 export interface DeviceLocation {
     Latitude: number;
@@ -15,7 +14,6 @@ export interface DeviceLocation {
 }
 
 export function DeviceLocationMap({location, height = 260}: { location: DeviceLocation; height?: number }) {
-    const {token} = useAuth();
     const ref = useRef<HTMLDivElement>(null);
     const {Latitude: lat, Longitude: lon, HorizontalAccuracy: acc} = location;
 
@@ -39,11 +37,11 @@ export function DeviceLocationMap({location, height = 260}: { location: DeviceLo
                     const img = document.createElement("img");
                     img.setAttribute("role", "presentation");
                     const url = `/api/proxy/api/v1/map/tile/${coords.z}/${coords.x}/${coords.y}`;
-                    fetch(url, {headers: token ? {Authorization: `Bearer ${token}`} : {}})
+                    fetch(url, {headers: {"X-MM-Client": "web"}})
                         .then((r) => (r.ok ? r.blob() : Promise.reject(new Error(String(r.status)))))
                         .then((blob) => {
                             const objUrl = URL.createObjectURL(blob);
-                            // Revoke on either outcome so an undecodable tile can't leak the URL.
+                            // Revoke on both outcomes so an undecodable tile does not keep the object URL.
                             const cleanup = () => URL.revokeObjectURL(objUrl);
                             img.onload = cleanup;
                             img.onerror = cleanup;
@@ -82,7 +80,7 @@ export function DeviceLocationMap({location, height = 260}: { location: DeviceLo
             cancelled = true;
             map?.remove();
         };
-    }, [lat, lon, acc, token]);
+    }, [lat, lon, acc]);
 
     return (
         <Box>

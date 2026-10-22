@@ -37,6 +37,10 @@ def _secret() -> str:
     return secret
 
 
+# time difference tolerated when a token is verified, so a token still verifies this long past its exp.
+TOKEN_LEEWAY_SECONDS = 10
+
+
 def issue_session_token(*, user_id: str, tenant_id: str, email: str, role: str) -> str:
     now = datetime.now(timezone.utc)
     payload = {
@@ -66,7 +70,7 @@ def _decode_typed(token: str, typ: str) -> Optional[Dict[str, Any]]:
             issuer=JWT_ISSUER,
             # iat is required: a password change ends every session issued before it (auth.dependencies).
             options={"require": ["exp", "iat", "iss", "aud", "sub"]},
-            leeway=10,
+            leeway=TOKEN_LEEWAY_SECONDS,
         )
     except (jwt.PyJWTError, AuthConfigError):
         return None

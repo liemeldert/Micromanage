@@ -1,12 +1,13 @@
 """Authentication, MFA, and password management endpoints."""
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import logging
 from typing import Hashable, NoReturn, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Request, Response
+from fastapi import APIRouter, Depends, HTTPException, Request, Response, Security
+from fastapi.security import HTTPAuthorizationCredentials
 from pydantic import BaseModel
 
-from controller.auth.dependencies import Principal, get_current_principal
+from controller.auth.dependencies import Principal, get_current_principal, security
 from controller.auth.passwords import hash_password, password_policy_error, verify_password
 from controller.auth.ratelimit import (
     discover_limiter,
@@ -17,11 +18,13 @@ from controller.auth.ratelimit import (
 )
 from controller.auth.tokens import (
     decode_mfa_pending_token,
+    decode_session_token,
+    TOKEN_LEEWAY_SECONDS,
     issue_mfa_pending_token,
     issue_session_token,
     JWT_TTL_SECONDS,
 )
-from controller.models.tenant import Tenant, User, UserMFA
+from controller.models.tenant import RevokedSession, Tenant, User, UserMFA
 from controller.services import mfa
 from controller.services.audit import record_audit, record_system_audit
 from controller.services.enrollment import _loggable
@@ -130,15 +133,15 @@ async def login(request: LoginRequest, http_request: Request):
         await _refuse_login(key, ip, email)
 
     if tenant.auth_provider != "local":
-        # Same generic refusal as a missing tenant: naming the provider would tell an anonymous caller that the tenant
-        # exists and which IdP it sits behind. /api/v1/auth/discover answers that question for clients that need it.
+        # Same generic refusal as a missing tenant, as naming the provider would reveal to an anonymous caller that the
+        # tenant exists and which IdP it uses. /api/v1/auth/discover provides that for clients that need it.
         await _refuse_login(key, ip, email)
 
     user = await User.get_or_none(tenant=tenant, email=request.user_email)
     if user and user.is_active and user.password_hash:
         ok = verify_password(request.password, user.password_hash)
     else:
-        # Always do the bcrypt work so timing doesn't show if a user exists
+        # The bcrypt work always runs, so timing does not reveal whether a user exists.
         verify_password(request.password, _DUMMY_PASSWORD_HASH)
         ok = False
     if not ok:
@@ -215,8 +218,15 @@ async def enroll_mfa(request: MFAEnrollRequest, principal: Principal = Depends(g
         raise HTTPException(status_code=409, detail="MFA is already confirmed")
 
 
+def _fresh_session(principal: Principal) -> str:
+    """A session token issued after an MFA change, which ends every session issued before it."""
+    user = principal.user
+    return issue_session_token(user_id=str(user.id), tenant_id=principal.tenant.id, email=user.email, role=user.role)
+
+
 @router.post("/api/v1/auth/mfa/confirm")
 async def confirm_mfa(request: MFAConfirmRequest, principal: Principal = Depends(get_current_principal)):
+    """Confirm two-factor enrollment. Returns the recovery codes, shown only this once, and a new session token."""
     codes = await mfa.confirm_enrollment(principal.user, request.code)
     if codes is None:
         raise HTTPException(status_code=400, detail="Invalid code")
@@ -227,11 +237,13 @@ async def confirm_mfa(request: MFAConfirmRequest, principal: Principal = Depends
         target_id=str(principal.user.id),
         detail={}
     )
-    return {"recovery_codes": codes}
+    return {"recovery_codes": codes, "access_token": _fresh_session(principal), "token_type": "bearer",
+            "expires_in": JWT_TTL_SECONDS}
 
 
-@router.delete("/api/v1/auth/mfa", status_code=204)
+@router.delete("/api/v1/auth/mfa", response_model=TokenResponse)
 async def disable_mfa(request: MFADisableRequest, principal: Principal = Depends(get_current_principal)):
+    """Turn two-factor off after checking the password. Returns a new session token."""
     if principal.tenant.auth_provider != "local":
         raise HTTPException(status_code=400, detail="Cannot disable MFA for external provider")
     key = _password_key(principal)
@@ -247,7 +259,7 @@ async def disable_mfa(request: MFADisableRequest, principal: Principal = Depends
         target_id=str(principal.user.id),
         detail={}
     )
-    return Response(status_code=204)
+    return TokenResponse(access_token=_fresh_session(principal), expires_in=JWT_TTL_SECONDS)
 
 
 @router.get("/api/v1/auth/mfa")
@@ -276,6 +288,30 @@ async def whoami(principal: Principal = Depends(get_current_principal)):
         "is_admin": principal.is_admin,
         "has_password": bool(getattr(principal.user, "password_hash", None)),
     }
+
+
+@router.post("/api/v1/auth/logout", status_code=204)
+async def logout(
+    credentials: HTTPAuthorizationCredentials = Security(security),
+    principal: Principal = Depends(get_current_principal),
+):
+    """Sign out, ending only the session that made this request."""
+    user = principal.user
+    now = datetime.now(timezone.utc)
+    claims = decode_session_token(credentials.credentials) or {}
+    if claims.get("jti") and claims.get("exp"):
+        await RevokedSession.get_or_create(
+            jti=str(claims["jti"]),
+            defaults={"user": user, "expires_at": datetime.fromtimestamp(int(claims["exp"]), tz=timezone.utc)},
+        )
+    # A row refuses nothing once its token is past exp plus the verification leeway; each sign-out prunes rows a
+    # minute beyond that.
+    prune_before = now - timedelta(seconds=TOKEN_LEEWAY_SECONDS) - timedelta(minutes=1)
+    await RevokedSession.filter(expires_at__lt=prune_before).delete()
+    await record_audit(
+        principal, "user.logout", target_type="user", target_id=str(user.id), detail={"email": user.email},
+    )
+    return Response(status_code=204)
 
 
 @router.post("/api/v1/auth/password", response_model=TokenResponse)

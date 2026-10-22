@@ -18,23 +18,30 @@ export class ApiError extends Error {
     }
 }
 
+// The session is an HttpOnly cookie that the proxy sends upstream as a bearer token. The proxy refuses a
+// state-changing call without this header, which a cross-site form cannot set.
+const WEB_CLIENT_HEADERS = {"X-MM-Client": "web"};
+
 // A 401 on any authenticated call means the session is dead, expired or revoked. Clear it and force a fresh sign-in
 // rather than leave the page toasting errors.
 function handleUnauthorized(path: string, method = "GET") {
     if (typeof window === "undefined") return;
-    // login, discover, password-change and MFA-verify answer 401 for bad input; anywhere else it means a dead session.
+    // login, discover, password-change and MFA-verify return 401 for bad input; anywhere else it means a dead session.
     if (
         path.startsWith("/api/v1/auth/login") ||
         path.startsWith("/api/v1/auth/discover") ||
         path.startsWith("/api/v1/auth/password") ||
         // A wrong or expired code fails the login attempt; there is no session yet to lose.
         path.startsWith("/api/v1/auth/mfa/verify") ||
-        // Starting or turning off two-factor auth re-checks the password and answers 401 when it is wrong; the
-        // session itself is still good.
+        // Starting or turning off two-factor auth returns 401 when the re-checked password is wrong; the session is
+        // still good.
         path.startsWith("/api/v1/auth/mfa/enroll") ||
         (path === "/api/v1/auth/mfa" && method === "DELETE")
     ) return;
     localStorage.removeItem("mm_auth");
+    // Clears this browser's cookie only; the user's other sessions stay signed in.
+    fetch("/api/session/logout?scope=local", {method: "POST", headers: WEB_CLIENT_HEADERS}).catch(() => {
+    });
     if (!window.location.pathname.startsWith("/login")) {
         window.location.href = "/login?expired=1";
     }
@@ -66,9 +73,8 @@ async function requestWithResponse<T>(
     const headers: Record<string, string> = {
         "Content-Type": "application/json",
         ...(options.headers as Record<string, string>),
+        ...WEB_CLIENT_HEADERS,
     };
-    if (token) headers["Authorization"] = `Bearer ${token}`;
-
     const res = await fetch(proxyPath(path), {...options, headers});
 
     if (res.status === 401) handleUnauthorized(path, (options.method ?? "GET").toUpperCase());
@@ -147,8 +153,9 @@ export interface StatsOverview {
 
 export const api = {
     // Auth
+    // The proxy keeps the session token in its cookie and removes it from the body.
     login(tenantId: string, email: string, password: string) {
-        return request<{ access_token: string; token_type: string; expires_in: number }>(
+        return request<{ token_type: string; expires_in: number }>(
             "/api/v1/auth/login",
             undefined,
             {
@@ -172,9 +179,9 @@ export const api = {
         );
     },
 
-    // Changes every other session for the account; returned token keeps caller signed in.
+    // Ends every other session for the account; the proxy replaces this browser's session cookie.
     changePassword(token: string, currentPassword: string, newPassword: string) {
-        return request<{ access_token: string; token_type: string; expires_in: number }>(
+        return request<{ token_type: string; expires_in: number }>(
             "/api/v1/auth/password",
             token,
             {
@@ -192,10 +199,9 @@ export const api = {
         });
     },
 
-    // Separate from login() to support two-factor: returns mfa_token or access_token.
+    // Separate from login() to support two-factor: returns mfa_token, or sets the session cookie.
     loginPassword(tenantId: string, email: string, password: string) {
         return request<{
-            access_token?: string;
             token_type: string;
             expires_in?: number;
             mfa_required?: boolean;
@@ -208,7 +214,7 @@ export const api = {
 
     // Verify MFA code (TOTP or recovery; same generic failure either way).
     verifyMfa(mfaToken: string, code: string) {
-        return request<{ access_token: string; token_type: string; expires_in: number }>(
+        return request<{ token_type: string; expires_in: number }>(
             "/api/v1/auth/mfa/verify",
             undefined,
             {
@@ -250,7 +256,7 @@ export const api = {
 
     // Disable two-factor (controller re-asks password).
     disableMfa(token: string, password: string) {
-        return request<void>(
+        return request<{ token_type: string; expires_in: number }>(
             "/api/v1/auth/mfa",
             token,
             {
@@ -429,7 +435,7 @@ export const api = {
     // Raw YAML text for the YAML viewer, with the same version. Credential redaction still applies to config.yaml.
     async getConfigRaw(token: string, type: ReadableConfigType) {
         const res = await fetch(proxyPath(`/api/v1/config/${type}?raw=true`), {
-            headers: {Authorization: `Bearer ${token}`},
+            headers: WEB_CLIENT_HEADERS,
         });
         if (res.status === 401) handleUnauthorized("/api/v1/config");
         if (!res.ok) {
@@ -541,7 +547,7 @@ export const api = {
         // Direct fetch rather than the JSON request helper, so the browser sets the multipart boundary itself.
         const res = await fetch(proxyPath(`/api/v1/apps/upload?${qs}`), {
             method: "POST",
-            headers: {Authorization: `Bearer ${token}`},
+            headers: WEB_CLIENT_HEADERS,
             body: fd,
         });
         if (res.status === 401) handleUnauthorized("/api/v1/apps/upload");
@@ -814,7 +820,7 @@ export const api = {
     getFileVaultEscrow(token: string) {
         return request<FileVaultEscrowStatus>("/api/v1/tenant/filevault-escrow", token);
     },
-    // Mint keypair (409 if one exists; replace=true reconciles by minting fresh).
+    // Create keypair (409 if one exists; replace=true creates a new one).
     generateFileVaultEscrow(token: string, replace = false) {
         return request<FileVaultEscrowStatus>(
             `/api/v1/tenant/filevault-escrow?replace=${replace}`,
@@ -822,10 +828,11 @@ export const api = {
             {method: "POST"},
         );
     },
-    // Certificate as PEM text, fetched with auth header (not linked).
+    // Certificate as PEM text, fetched rather than linked.
+    // eslint-disable-next-line @typescript-eslint/no-unused-vars
     async getFileVaultCertificate(token: string) {
         const res = await fetch(proxyPath("/api/v1/tenant/filevault-escrow/certificate"), {
-            headers: {Authorization: `Bearer ${token}`},
+            headers: WEB_CLIENT_HEADERS,
         });
         if (res.status === 401) handleUnauthorized("/api/v1/tenant/filevault-escrow/certificate");
         if (!res.ok) {
@@ -881,8 +888,7 @@ export const api = {
         });
     },
 
-    // Users, admin only. The server enforces it via require_admin, so a non-admin
-    // call 403s and the caller should surface that through notifications.
+    // Users, admin only; a non-admin call returns 403.
     listUsers(token: string) {
         return request<{ users: User[] }>("/api/v1/users", token);
     },
@@ -1013,7 +1019,7 @@ export const api = {
         // Direct fetch so the browser sets the multipart boundary itself.
         const res = await fetch(proxyPath(`/api/v1/dep/servers/${id}/token`), {
             method: "POST",
-            headers: {Authorization: `Bearer ${token}`},
+            headers: WEB_CLIENT_HEADERS,
             body: fd,
         });
         if (res.status === 401) handleUnauthorized(`/api/v1/dep/servers/${id}/token`);
@@ -1181,7 +1187,7 @@ export interface DeviceSecret {
     revealed_at: string | null;
     revealed_by: string | null;
     reveal_count: number;
-    sealed: boolean;      // true == the glass has never been broken
+    sealed: boolean;      // true == never revealed
 }
 
 // DeviceSecret.meta keys describing device confirmation state.
@@ -1196,7 +1202,7 @@ export interface SecretLifecycle {
     pending_set_by?: string;
     // Device acknowledged the command that set this value.
     confirmed_at?: string;
-    // What a Verify command said when run against this escrowed password.
+    // When a Verify command last ran against this escrowed password.
     verified_at?: string;
     verify_failed_at?: string;
 }
@@ -1324,8 +1330,8 @@ export type ScopePreviewTriggerKind =
 
 export interface ScopePreviewRequest {
     scope?: Record<string, unknown>;
-    // "all" for flow starts and dispatcher rules, "none" for profiles and app versions. The server 422s without it
-    // rather than guess.
+    // "all" for flow starts and dispatcher rules, "none" for profiles and app versions. The server returns 422 without
+    // it.
     empty_scope: "all" | "none";
     trigger_kind?: ScopePreviewTriggerKind | null;
     sample_limit?: number;
@@ -1943,8 +1949,8 @@ export interface DraftDiffSummary {
     removed: number;
     changed: number;
     unchanged: number;
-    // Present on a promotion response: whether the live flow had moved since the draft was taken, which is what
-    // force overrode. Recorded in the audit row too.
+    // Present on a promotion response: whether the live flow had moved since the draft was taken, which is the
+    // condition force overrides. Recorded in the audit row too.
     base_drifted?: boolean;
 }
 
@@ -2028,8 +2034,8 @@ export interface DispatcherAlert {
     device?: { serial_number: string | null; display_name: string | null } | null;
 }
 
-/** Whether an alert is the record of somebody being handed a device password. Only an admin may close one of
- * these, and closing it is audited. */
+/** Whether an alert records a device password being revealed. Only an admin may close one, and closing it is
+ * audited. */
 export function isCredentialRevealAlert(alert: DispatcherAlert): boolean {
     return (alert.rule_id ?? "").startsWith("breakglass:");
 }

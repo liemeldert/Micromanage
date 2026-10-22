@@ -46,7 +46,8 @@ async def main():
 
     import controller.api.routes.auth as api_auth
     from controller.models.tenant import Tenant, User, AuditLog, UserMFA
-    from controller.auth.dependencies import Principal
+    from controller.auth.dependencies import Principal, _superseded_by_mfa_change
+    from controller.auth.tokens import decode_session_token
     from controller.api.routes.auth import (LoginRequest, MFAVerifyRequest, MFAConfirmRequest, MFADisableRequest,
                                             MFAEnrollRequest)
 
@@ -104,6 +105,10 @@ async def main():
     confirm_res = await api_auth.confirm_mfa(MFAConfirmRequest(code=c_confirm), admin_principal)
     check("recovery_codes returned once", "recovery_codes" in confirm_res and len(confirm_res["recovery_codes"]) > 0)
     recovery_code = confirm_res["recovery_codes"][0]
+    confirm_claims = decode_session_token(confirm_res.get("access_token") or "")
+    check("confirm returns a session token", confirm_claims is not None and confirm_claims["sub"] == str(u1.id))
+    check("the MFA change does not end the token confirm returns",
+          confirm_claims is not None and not _superseded_by_mfa_change(confirm_claims, u1))
 
     audit_confirm = await AuditLog.filter(action="user.mfa_confirm").first()
     check("audit log written for mfa_confirm", audit_confirm is not None)
@@ -164,7 +169,10 @@ async def main():
         check("disable refused on bad password", e.status_code == 401)
 
     print("14) disable succeeds with correct password")
-    await api_auth.disable_mfa(MFADisableRequest(password="Password123!"), admin_principal)
+    disable_res = await api_auth.disable_mfa(MFADisableRequest(password="Password123!"), admin_principal)
+    disable_claims = decode_session_token(disable_res.access_token or "")
+    check("disable returns a session token the MFA change does not end",
+          disable_claims is not None and not _superseded_by_mfa_change(disable_claims, u1))
     status4 = await api_auth.get_mfa_status(admin_principal)
     check("MFA is disabled", status4["enabled"] is False)
 

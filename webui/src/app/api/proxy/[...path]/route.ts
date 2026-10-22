@@ -2,15 +2,14 @@ import {type NextRequest, NextResponse} from "next/server";
 
 const CONTROLLER = process.env.CONTROLLER_URL ?? "http://localhost:8001";
 
-// How long the controller gets to answer before the request is abandoned. The default is generous because a fleet
-// sync or an ABM device pull can take minutes; multipart bodies get a longer cap still, since package uploads run
-// to hundreds of MB.
+// Request timeout. Generous as a fleet sync or an ABM device pull can take minutes, and multipart bodies get a longer
+// cap for package uploads of hundreds of MB.
 const TIMEOUT_MS = Number(process.env.PROXY_TIMEOUT_MS) || 300_000;
 const UPLOAD_TIMEOUT_MS = Number(process.env.PROXY_UPLOAD_TIMEOUT_MS) || 600_000;
 
 // Upstream response headers that are not copied through: hop-by-hop headers; content-encoding, content-length and
 // content-range, which describe the encoded body while fetch returns it decoded; and set-cookie and www-authenticate,
-// since auth here is a bearer token the client holds.
+// since the only cookie on this origin is the session cookie set below.
 const DROP_RESPONSE_HEADERS = new Set([
     "connection",
     "transfer-encoding",
@@ -21,6 +20,49 @@ const DROP_RESPONSE_HEADERS = new Set([
     "set-cookie",
     "www-authenticate",
 ]);
+
+const SESSION_COOKIE = "mm_session";
+const SESSION_FALLBACK_SECONDS = 43200;
+
+// Controller responses that carry a fresh session token, which goes into the cookie instead of the body.
+const TOKEN_ISSUING_REQUESTS = new Set([
+    "POST /api/v1/auth/login",
+    "POST /api/v1/auth/mfa/verify",
+    "POST /api/v1/auth/password",
+    "POST /api/v1/auth/mfa/confirm",
+    "DELETE /api/v1/auth/mfa",
+]);
+
+const UNSAFE_METHODS = new Set(["POST", "PUT", "PATCH", "DELETE"]);
+
+function isHttps(req: NextRequest): boolean {
+    return req.headers.get("x-forwarded-proto") === "https" || req.nextUrl.protocol === "https:";
+}
+
+// Moves access_token from a sign-in response body into the session cookie; any other body is returned unchanged.
+function withSessionCookie(req: NextRequest, text: string, status: number, headers: Headers): NextResponse {
+    let body: unknown;
+    try {
+        body = JSON.parse(text);
+    } catch {
+        return new NextResponse(text, {status, headers});
+    }
+    const token = (body as { access_token?: unknown } | null)?.access_token;
+    if (typeof token !== "string" || !token) return new NextResponse(text, {status, headers});
+
+    const rest: Record<string, unknown> = {...(body as Record<string, unknown>)};
+    delete rest.access_token;
+    const expiresIn = Number(rest.expires_in);
+    const res = NextResponse.json(rest, {status, headers});
+    res.cookies.set(SESSION_COOKIE, token, {
+        httpOnly: true,
+        sameSite: "strict",
+        path: "/",
+        maxAge: Number.isFinite(expiresIn) && expiresIn > 0 ? expiresIn : SESSION_FALLBACK_SECONDS,
+        secure: isHttps(req),
+    });
+    return res;
+}
 
 function clientIp(req: NextRequest): string | null {
     const fwd = req.headers.get("x-forwarded-for");
@@ -36,9 +78,21 @@ async function proxy(req: NextRequest, segments: string[]) {
     const contentType = req.headers.get("content-type") ?? "application/json";
     const headers: Record<string, string> = {"Content-Type": contentType};
     const auth = req.headers.get("authorization");
-    if (auth) headers["Authorization"] = auth;
-    // If-Match carries the version a config editor is saving against; dropping it turns every conflict-checked save
-    // into last write wins.
+    const session = req.cookies.get(SESSION_COOKIE)?.value;
+    if (auth) {
+        headers["Authorization"] = auth;
+    } else if (session) {
+        // A state-changing call authenticated by the cookie must also carry a header that a cross-site form cannot set.
+        if (UNSAFE_METHODS.has(req.method) && req.headers.get("x-mm-client") !== "web") {
+            return NextResponse.json(
+                {detail: "Missing the web client header. Reload the page and try again."},
+                {status: 403},
+            );
+        }
+        headers["Authorization"] = `Bearer ${session}`;
+    }
+    // If-Match carries the version a config editor is saving against; without it the controller cannot detect a
+    // conflicting save.
     const ifMatch = req.headers.get("if-match");
     if (ifMatch) headers["If-Match"] = ifMatch;
     const ip = clientIp(req);
@@ -80,6 +134,9 @@ async function proxy(req: NextRequest, segments: string[]) {
         if (!DROP_RESPONSE_HEADERS.has(k.toLowerCase())) resHeaders.set(k, v);
     });
 
+    if (TOKEN_ISSUING_REQUESTS.has(`${req.method} ${path}`) && upstream.ok) {
+        return withSessionCookie(req, await upstream.text(), upstream.status, resHeaders);
+    }
     return new NextResponse(upstream.body, {status: upstream.status, headers: resHeaders});
 }
 

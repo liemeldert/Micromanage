@@ -7,6 +7,7 @@ import os
 import plistlib
 import subprocess
 import tempfile
+import time
 import uuid
 from urllib.parse import parse_qs, urlparse
 
@@ -98,14 +99,14 @@ def test_top_level():
     parsed = None
     try:
         parsed = plistlib.loads(raw)
-    except Exception as exc:  # noqa: BLE001 - the point is that it parses
+    except Exception as exc:  # noqa: BLE001 - only parsing is checked
         print(f"    plistlib refused the profile: {exc}")
     check("plistlib parses the shipped bytes", isinstance(parsed, dict))
     if not isinstance(parsed, dict):
         return
 
     check("the outer payload is a Configuration", parsed.get("PayloadType") == "Configuration")
-    # PayloadScope must stay absent: a System scope suppresses the user channel the MDM payload declares, and a Mac
+    # PayloadScope stays absent, since a System scope suppresses the user channel the MDM payload declares and a Mac
     # cannot gain that channel after enrollment.
     check("it does not pin PayloadScope", "PayloadScope" not in parsed)
     check("its identifier is tenant-specific",
@@ -275,7 +276,7 @@ def test_broken_ca_path(tmp):
             raised, parsed = None, None
             try:
                 parsed = shipped(StubTenant("acme", "Acme Inc"))
-            except Exception as exc:  # noqa: BLE001 - the point is that none escapes
+            except Exception as exc:  # noqa: BLE001 - checks that none escapes
                 raised = exc
             check(f"{label}: the builder raises nothing", raised is None)
             check(f"{label}: the profile is the SCEP + MDM pair",
@@ -298,6 +299,19 @@ def test_broken_ca_path(tmp):
 
     check("unset again: enrollment is ready and nothing is broken",
           readiness.check(readiness.ENROLL).ready)
+
+
+def test_extract_plist():
+    print("9) The ADE MachineInfo plist is found by a linear scan")
+    body = plistlib.dumps({"SERIAL": "C02XYZ"})
+    got = enroll._extract_plist(b"\x30\x82junk" + body + b"\x00trailer")
+    check("an XML plist between junk bytes is extracted", isinstance(got, dict) and got.get("SERIAL") == "C02XYZ")
+    t0 = time.perf_counter()
+    got = enroll._extract_plist(b"<?xml" * (64 * 1024 // 5))
+    elapsed = time.perf_counter() - t0
+    print(f"  extract time for 64 KB of repeated <?xml: {elapsed:.4f}s")
+    check("64 KB of repeated <?xml returns no plist, in under 0.5 s", got is None and elapsed < 0.5)
+    check("<?xml without </plist> returns no plist", enroll._extract_plist(b"junk<?xml version='1.0'?><plist>") is None)
 
 
 def test_cms_signing():
@@ -436,7 +450,7 @@ def test_cms_signing():
     def p12_of(key, cert_pem, cas=(), password=b"secret", legacy=False):
         cert = x509.load_pem_x509_certificate(cert_pem.encode("ascii"))
         if legacy:
-            # The 3DES/SHA1 flavour that Keychain Access has long produced.
+            # The 3DES/SHA1 variant that Keychain Access produces.
             enc = (serialization.PrivateFormat.PKCS12.encryption_builder()
                    .kdf_rounds(2048).key_cert_algorithm(pkcs12.PBES.PBESv1SHA1And3KeyTripleDESCBC)
                    .hmac_hash(hashes.SHA1()).build(password))
@@ -548,6 +562,7 @@ def main():
         test_challenge_is_not_repeated(tmp)
         test_broken_ca_path(tmp)
     test_cms_signing()
+    test_extract_plist()
 
     print(f"\nRESULT: {'PASS' if not FAIL else 'FAIL'} ({len(PASS)} passed, {len(FAIL)} failed)")
     if FAIL:

@@ -75,11 +75,11 @@ const ACTION_GROUPS: { group: string; items: string[] }[] = [
         group: "Users",
         // password_change is written by any role changing their own password, not only by an admin changing
         // someone else's.
-        items: ["user.create", "user.delete", "user.password_change", "user.update"],
+        items: ["user.create", "user.delete", "user.logout", "user.password_change", "user.update"],
     },
 ];
 
-// Per-action colours: destructive or irreversible in red, changes in blue, additions in teal.
+// Per-action colors: destructive or irreversible in red, changes in blue, additions in teal.
 const ACTION_COLORS: Record<string, string> = {
     "alert.breakglass_dismiss": "orange",
     "alert.remediation_approve": "red",
@@ -106,11 +106,12 @@ const ACTION_COLORS: Record<string, string> = {
     "device_secret.reveal_throttled": "orange",
     "user.create": "teal",
     "user.delete": "red",
+    "user.logout": "gray",
     "user.password_change": "orange",
     "user.update": "blue",
 };
 
-// An action this build does not know still takes a colour from its family rather than dropping to grey.
+// An action this build does not know still takes a color from its family rather than dropping to grey.
 const PREFIX_COLORS: Record<string, string> = {
     alert: "orange",
     app: "teal",
@@ -222,7 +223,7 @@ export default function AuditLogPage() {
     // query per keystroke.
     const [draft, setDraft] = useState<Filters>(NO_FILTERS);
     const [filters, setFilters] = useState<Filters>(NO_FILTERS);
-    // Last request wins, so paging during a slow request cannot leave the previous page's rows on screen.
+    // Only the latest response is applied, so paging during a slow request cannot show the previous page's rows.
     const reqSeq = useRef(0);
 
     const load = useCallback(async () => {
@@ -334,8 +335,7 @@ export default function AuditLogPage() {
                         <Text fz="xs">{e.target_type}</Text>
                         {e.target_id && (
                             <Group gap={4} wrap="nowrap">
-                                {/* Shown whole: truncating to 8 characters made every row of a busy device look
-                                    like the next. */}
+                                {/* Shown whole, as a truncated id looks the same on every row of a busy device. */}
                                 <Code fz="xs" style={{wordBreak: "break-all"}}>{e.target_id}</Code>
                                 {e.target_type === "device" && (
                                     <Anchor component={Link} href={`/devices/${e.target_id}`} fz="xs">

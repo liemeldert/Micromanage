@@ -1,7 +1,11 @@
 "use client";
 
 import {createContext, useCallback, useContext, useEffect, useState} from "react";
-import {api} from "./api";
+import {api, ApiError} from "./api";
+
+// The session token is in an HttpOnly cookie the browser cannot read. token holds this marker while the session
+// is live and null otherwise, and api functions ignore its value.
+export const SESSION_MARKER = "cookie";
 
 interface AuthState {
     token: string | null;
@@ -10,12 +14,15 @@ interface AuthState {
     role: string | null;
 }
 
+interface StoredIdentity {
+    tenantId: string | null;
+    email: string | null;
+    role: string | null;
+}
+
 interface AuthContext extends AuthState {
     login: (tenantId: string, email: string, password: string) => Promise<void>;
-    // Swap the session token in place, keeping the same identity and role. A password change returns a fresh token
-    // because it invalidates every existing session for the account, this tab's included.
-    setToken: (token: string) => void;
-    logout: () => void;
+    logout: () => Promise<void>;
     isAuthenticated: boolean;
     isAdmin: boolean;
     hydrated: boolean;
@@ -25,59 +32,63 @@ const Ctx = createContext<AuthContext | null>(null);
 
 const STORAGE_KEY = "mm_auth";
 
+const SIGNED_OUT: AuthState = {token: null, tenantId: null, email: null, role: null};
+
+function storeIdentity(identity: StoredIdentity) {
+    const {tenantId, email, role} = identity;
+    localStorage.setItem(STORAGE_KEY, JSON.stringify({tenantId, email, role}));
+}
+
 export function AuthProvider({children}: { children: React.ReactNode }) {
-    const [state, setState] = useState<AuthState>({
-        token: null,
-        tenantId: null,
-        email: null,
-        role: null,
-    });
-    // True once persisted auth has been read from localStorage. Treating a user as unauthenticated before this flips
-    // bounces a logged-in user to /login on every refresh.
+    const [state, setState] = useState<AuthState>(SIGNED_OUT);
+    // True once the stored identity has been checked against the controller. Treating a user as unauthenticated
+    // before this flips bounces a signed-in user to /login on every refresh.
     const [hydrated, setHydrated] = useState(false);
 
     useEffect(() => {
-        let restored: AuthState | null = null;
+        let stored: StoredIdentity | null = null;
         try {
             const raw = localStorage.getItem(STORAGE_KEY);
             if (raw) {
-                restored = {role: null, ...JSON.parse(raw)};
-                setState(restored!);
+                const parsed = JSON.parse(raw);
+                stored = {tenantId: parsed.tenantId ?? null, email: parsed.email ?? null, role: parsed.role ?? null};
             }
         } catch {
         }
-        setHydrated(true);
-        // Sessions saved without a role get it backfilled here, which also checks the token: a dead one 401s.
-        if (restored?.token && !restored?.role) {
-            api.me(restored.token).then((me) => {
-                setState((s) => {
-                    const next = {...s, role: me.role};
-                    localStorage.setItem(STORAGE_KEY, JSON.stringify(next));
-                    return next;
-                });
-            }).catch(() => {
-            });
+        if (!stored) {
+            setHydrated(true);
+            return;
         }
+        const identity = stored;
+        api.me(SESSION_MARKER)
+            .then((me) => {
+                const next = {tenantId: me.tenant_id, email: me.email, role: me.role};
+                storeIdentity(next);
+                setState({token: SESSION_MARKER, ...next});
+            })
+            .catch((e) => {
+                if (e instanceof ApiError && e.status === 401) {
+                    localStorage.removeItem(STORAGE_KEY);
+                    setState(SIGNED_OUT);
+                } else {
+                    // Any other failure keeps the session, and the pages report the error.
+                    setState({token: SESSION_MARKER, ...identity});
+                }
+            })
+            .finally(() => setHydrated(true));
     }, []);
 
     const login = useCallback(async (tenantId: string, email: string, password: string) => {
-        const res = await api.login(tenantId, email, password);
-        const me = await api.me(res.access_token).catch(() => null);
-        const next = {token: res.access_token, tenantId, email, role: me?.role ?? null};
-        setState(next);
-        localStorage.setItem(STORAGE_KEY, JSON.stringify(next));
+        await api.login(tenantId, email, password);
+        const me = await api.me(SESSION_MARKER);
+        const next = {tenantId, email, role: me.role};
+        storeIdentity(next);
+        setState({token: SESSION_MARKER, ...next});
     }, []);
 
-    const setToken = useCallback((token: string) => {
-        setState((s) => {
-            const next = {...s, token};
-            localStorage.setItem(STORAGE_KEY, JSON.stringify(next));
-            return next;
-        });
-    }, []);
-
-    const logout = useCallback(() => {
-        setState({token: null, tenantId: null, email: null, role: null});
+    const logout = useCallback(async () => {
+        await fetch("/api/session/logout", {method: "POST", headers: {"X-MM-Client": "web"}}).catch(() => null);
+        setState(SIGNED_OUT);
         localStorage.removeItem(STORAGE_KEY);
     }, []);
 
@@ -86,7 +97,6 @@ export function AuthProvider({children}: { children: React.ReactNode }) {
             value={{
                 ...state,
                 login,
-                setToken,
                 logout,
                 isAuthenticated: !!state.token,
                 isAdmin: state.role === "admin",

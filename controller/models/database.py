@@ -8,23 +8,20 @@ from typing import Optional
 from tortoise import Tortoise
 from tortoise.utils import get_schema_sql
 
-# Blank when unset, never a default: a default DSN would let a process that lost the variable connect to the
-# wrong database instead of saying so. Not a raise here; see enforce_database_url.
+# Blank when unset. enforce_database_url raises at startup.
 DATABASE_URL = os.getenv("DATABASE_URL", "")
 
-# Raised above Tortoise's per-process default of 5, since supervisord runs three processes and the reconciler
-# alone runs up to MDM_MAX_CONCURRENT_TASKS handlers at once.
+# Above Tortoise's per-process default of 5, as supervisord runs three processes and the reconciler runs up to
+# MDM_MAX_CONCURRENT_TASKS handlers at once.
 DB_POOL_MAX = int(os.getenv("DB_POOL_MAX_SIZE", "20"))
 DB_POOL_MIN = int(os.getenv("DB_POOL_MIN_SIZE", "2"))
 
-# Floor on the pool maximum: a pool of one deadlocks init_schema's schema phase, which pins one connection for
-# the whole hold while other queries wait on it.
+# Minimum pool maximum; a pool of one deadlocks init_schema, which pins a connection for the whole schema phase.
 _MIN_POOL_MAX = 2
 
 
 def _pooled_url(url: str) -> str:
-    """Add pool sizing to a Postgres DSN, leaving a minimum the DSN already sets alone. Postgres only, since
-    sqlite has no pool.
+    """Add pool sizing to a Postgres DSN, keeping a minimum the DSN already sets. Postgres only.
     """
     from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
@@ -36,8 +33,7 @@ def _pooled_url(url: str) -> str:
     try:
         maxsize = int(params["maxsize"])
     except (TypeError, ValueError):
-        # An unparseable maxsize already fails downstream at asyncpg. Leave it to fail there instead of inventing a new
-        # error here.
+        # An unparseable maxsize fails downstream at asyncpg.
         maxsize = None
     if maxsize is not None and maxsize < _MIN_POOL_MAX:
         logging.getLogger(__name__).warning(
@@ -60,16 +56,16 @@ def _pooled_url(url: str) -> str:
     return urlunsplit(parts._replace(query=urlencode(params)))
 
 
-# Columns added after the initial schema. generate_schemas() never alters existing tables, so these are applied
-# by hand here. Keep the statements idempotent.
+# Columns added after the initial schema. generate_schemas() never alters existing tables, so these are applied here.
+# The statements must be idempotent.
 _AUX_DDL = [
     'ALTER TABLE "profile_deployments" ADD COLUMN IF NOT EXISTS "payload_hash" VARCHAR(64)',
     'ALTER TABLE "devices" ADD COLUMN IF NOT EXISTS "attributes" JSONB NOT NULL DEFAULT \'{}\'::jsonb',
-    # Device lifecycle across enrollments (retain history; support DEP placeholders).
+    # Device lifecycle across enrollments, with DEP placeholders.
     'ALTER TABLE "devices" ADD COLUMN IF NOT EXISTS "enrollment_state" VARCHAR(20) NOT NULL DEFAULT \'enrolled\'',
     'ALTER TABLE "devices" ADD COLUMN IF NOT EXISTS "management_type" VARCHAR(30) NOT NULL DEFAULT \'apple_mdm\'',
     'ALTER TABLE "devices" ADD COLUMN IF NOT EXISTS "unenrolled_at" TIMESTAMPTZ NULL',
-    # udid becomes nullable so pre-provisioned placeholders (serial only) can exist.
+    # udid is nullable for pre-provisioned placeholders (serial only).
     'ALTER TABLE "devices" ALTER COLUMN "udid" DROP NOT NULL',
     # Managed device name + per-tenant dynamic naming template.
     'ALTER TABLE "devices" ADD COLUMN IF NOT EXISTS "name" VARCHAR(255) NULL',
@@ -77,28 +73,26 @@ _AUX_DDL = [
     # Adaptive info-poll schedule (services.poller).
     'ALTER TABLE "devices" ADD COLUMN IF NOT EXISTS "last_polled_at" TIMESTAMPTZ NULL',
     'ALTER TABLE "devices" ADD COLUMN IF NOT EXISTS "poll_interval_minutes" INTEGER NOT NULL DEFAULT 30',
-    # Imperative device tags (ATC/Dispatcher writers + manual); flat list[str], matched by the "tag" scope condition.
-    # See services.scoping / models.tenant.
+    # Imperative device tags (ATC, Dispatcher and manual writers), a flat list of strings matched by the "tag" scope
+    # condition.
     'ALTER TABLE "devices" ADD COLUMN IF NOT EXISTS "tags" JSONB NOT NULL DEFAULT \'[]\'::jsonb',
-    # Admin-entered APNs cert and DEP token expiry dates. Entered by hand, since we can't read the live cert or a DEP
-    # token. See models.tenant.
+    # APNs cert and DEP token expiry dates, entered by an admin as the live cert and token cannot be read.
     'ALTER TABLE "tenants" ADD COLUMN IF NOT EXISTS "apns_cert_expires_at" TIMESTAMPTZ NULL',
     'ALTER TABLE "tenants" ADD COLUMN IF NOT EXISTS "dep_token_expires_at" TIMESTAMPTZ NULL',
     # Per-tenant object storage ceiling (models.tenant.Tenant.storage_quota_bytes).
     'ALTER TABLE "tenants" ADD COLUMN IF NOT EXISTS "storage_quota_bytes" BIGINT NULL',
-    # FileVault recovery-key escrow keypair (services.filevault_escrow). The private key is Fernet-encrypted at rest;
-    # the certificate is public.
+    # FileVault recovery-key escrow keypair (services.filevault_escrow), with the private key Fernet-encrypted at rest.
     'ALTER TABLE "tenants" ADD COLUMN IF NOT EXISTS "fv_escrow_private_key_enc" TEXT NULL',
     'ALTER TABLE "tenants" ADD COLUMN IF NOT EXISTS "fv_escrow_cert_pem" TEXT NULL',
     'ALTER TABLE "tenants" ADD COLUMN IF NOT EXISTS "fv_escrow_cert_expires_at" TIMESTAMPTZ NULL',
-    # Automated Device Enrollment (ADE/DEP) device linkage (services.dep_manager). Populated for devices synced from
-    # Apple Business/School Manager; null for OTA/manual. See models.DepServer.
+    # ADE/DEP device linkage (services.dep_manager), set for devices synced from Apple Business/School Manager and null
+    # for OTA and manual devices.
     'ALTER TABLE "devices" ADD COLUMN IF NOT EXISTS "dep_server_id" UUID NULL',
     'ALTER TABLE "devices" ADD COLUMN IF NOT EXISTS "dep_profile_uuid" VARCHAR(64) NULL',
     'ALTER TABLE "devices" ADD COLUMN IF NOT EXISTS "dep_profile_status" VARCHAR(30) NULL',
     'ALTER TABLE "devices" ADD COLUMN IF NOT EXISTS "dep_last_synced_at" TIMESTAMPTZ NULL',
     # Converts the DepServer.sync_cursor column to TEXT if it has another type. Apple allows a cursor of up to 1000
-    # characters, and saving one that does not fit fails, so the stored cursor never advances.
+    # characters, and a save that does not fit fails, leaving the stored cursor unchanged.
     # https://developer.apple.com/documentation/devicemanagement/fetchdevicerequest
     "DO $$\n"
     "BEGIN\n"
@@ -112,19 +106,18 @@ _AUX_DDL = [
     "    END IF;\n"
     "END\n"
     "$$",
-    # ATC: a run's entry node and the event that started it (run identity is device, flow_id, start_node). See
-    # models.tenant.FlowRun.
+    # ATC: a run's entry node and the event that started it (run identity is device, flow_id, start_node).
     'ALTER TABLE "flow_runs" ADD COLUMN IF NOT EXISTS "start_node" VARCHAR(100) NULL',
     'ALTER TABLE "flow_runs" ADD COLUMN IF NOT EXISTS "event_kind" VARCHAR(20) NULL',
-    # Who started a run and with which role. See models.tenant.FlowRun.
+    # Who started a run and with which role.
     'ALTER TABLE "flow_runs" ADD COLUMN IF NOT EXISTS "started_by" VARCHAR(255) NULL',
     'ALTER TABLE "flow_runs" ADD COLUMN IF NOT EXISTS "started_role" VARCHAR(16) NULL',
     'CREATE INDEX IF NOT EXISTS "idx_flowruns_dev_flow_start_event" '
     'ON "flow_runs" (device_id, flow_id, start_node, event_kind, started_at)',
     'CREATE INDEX IF NOT EXISTS "idx_flowruns_tenant_flow_start_event_dev" '
     'ON "flow_runs" (tenant_id, flow_id, start_node, event_kind, device_id, started_at)',
-    # Drops the flow_runs indexes keyed without flow_id, since every lookup by start node also filters on flow_id.
-    # Listed after the creates, so a failed upgrade never leaves the table with neither.
+    # Drops the flow_runs indexes keyed without flow_id, as every lookup by start node also filters on flow_id. Listed
+    # after the creates, so a failed upgrade leaves one set of indexes.
     'DROP INDEX IF EXISTS "idx_flowruns_dev_start_event"',
     'DROP INDEX IF EXISTS "idx_flowruns_tenant_start_event_dev"',
     # Declarative Device Management (services.ddm_manager).
@@ -136,37 +129,34 @@ _AUX_DDL = [
     'ALTER TABLE "devices" ADD COLUMN IF NOT EXISTS "ddm_declaration_status" JSONB NOT NULL DEFAULT \'{}\'::jsonb',
     'ALTER TABLE "devices" ADD COLUMN IF NOT EXISTS "ddm_client_capabilities" JSONB NOT NULL DEFAULT \'{}\'::jsonb',
     'ALTER TABLE "devices" ADD COLUMN IF NOT EXISTS "bootstrap_token_escrowed" BOOLEAN NOT NULL DEFAULT FALSE',
-    # Plain UUID, no FK: the retention sweep deletes tasks, and a dangling pointer just means the attempt aged
-    # out. See models.tenant.AppDeployment.
+    # Plain UUID, no FK, as the retention sweep deletes tasks and a dangling pointer means the attempt aged out.
     'ALTER TABLE "app_deployments" ADD COLUMN IF NOT EXISTS "last_task_id" UUID NULL',
     'ALTER TABLE "profile_deployments" ADD COLUMN IF NOT EXISTS "last_task_id" UUID NULL',
-    # Paces services.reconciler's retry backoff. NOT NULL DEFAULT 0, since the loop reads this on every row.
+    # Paces services.reconciler's retry backoff.
     'ALTER TABLE "app_deployments" ADD COLUMN IF NOT EXISTS "failed_attempts" INTEGER NOT NULL DEFAULT 0',
     'ALTER TABLE "profile_deployments" ADD COLUMN IF NOT EXISTS "failed_attempts" INTEGER NOT NULL DEFAULT 0',
-    # Device-reported version, which need not match what the deployment asked for. NULL means never
-    # confirmed. TEXT because the device-supplied string length is not ours to promise.
+    # Device-reported version, which need not match what the deployment requested. NULL means never confirmed. TEXT, as
+    # the device supplies the length.
     'ALTER TABLE "app_deployments" ADD COLUMN IF NOT EXISTS "reported_version" TEXT',
-    # Who asked for a profile the device's own scope does not, written as remediation:<rule id>; NULL is the
-    # ordinary scoped case. TEXT since a rule id is authored and unbounded. See models.tenant.ProfileDeployment.
+    # Who requested a profile the device's scope does not, written as remediation:<rule id>; NULL is the ordinary scoped
+    # case. TEXT, as a rule id is unbounded.
     'ALTER TABLE "profile_deployments" ADD COLUMN IF NOT EXISTS "install_source" TEXT NULL',
     'ALTER TABLE "app_deployments" ADD COLUMN IF NOT EXISTS "install_source" TEXT NULL',
-    # Session cut-off for a password change (auth.dependencies). Null on every existing row, which reads as "never
-    # changed" and refuses nothing.
+    # Session cut-off for a password change (auth.dependencies). Null means never changed.
     'ALTER TABLE "users" ADD COLUMN IF NOT EXISTS "password_changed_at" TIMESTAMPTZ NULL',
-    # Session cut-off for disabling two-factor auth (auth.dependencies), which deletes the UserMFA row rather than
-    # updating a column on it, so the cut-off has to live here on User. See models.tenant.UserMFA.
+    # Session cut-off for disabling two-factor auth (auth.dependencies). Disabling deletes the UserMFA row, so the
+    # cut-off is stored on User.
     'ALTER TABLE "users" ADD COLUMN IF NOT EXISTS "mfa_changed_at" TIMESTAMPTZ NULL',
-    # Task.command_uuid: MDM CommandUUID mirrored out of details (models.tenant.Task.save) so webhook_handler
-    # gets an indexed equality lookup instead of scanning the device's 50 newest tasks.
+    # Task.command_uuid: MDM CommandUUID mirrored from details (models.tenant.Task.save) for an indexed webhook_handler
+    # lookup instead of a scan of the device's 50 newest tasks.
     'ALTER TABLE "tasks" ADD COLUMN IF NOT EXISTS "command_uuid" VARCHAR(64) NULL',
     'UPDATE "tasks" SET "command_uuid" = "details"->>\'command_uuid\' '
     "WHERE \"command_uuid\" IS NULL AND \"details\"->>'command_uuid' IS NOT NULL",
     # Partial: tasks that never enqueued a command stay NULL and are never looked up this way.
     'CREATE INDEX IF NOT EXISTS "idx_tasks_command_uuid" ON "tasks" (command_uuid) WHERE command_uuid IS NOT NULL',
-    # Task.dedup_key: the reconciler's duplicate-task key, mirrored the same way command_uuid is (see
-    # models.tenant.task_dedup_key). TEXT not VARCHAR(n).
+    # Task.dedup_key: the reconciler's duplicate-task key, mirrored like command_uuid (models.tenant.task_dedup_key).
     'ALTER TABLE "tasks" ADD COLUMN IF NOT EXISTS "dedup_key" TEXT NULL',
-    # Backfill: matches only rows whose key SQL can reproduce identically (every component a JSON string).
+    # Backfill for rows whose key SQL can reproduce identically (every component a JSON string).
     # reconciler._unmirrored_task_keys computes the key in Python for the rest.
     'UPDATE "tasks" SET "dedup_key" = CASE "type" '
     'WHEN \'profile_install\' THEN "details"->\'profile_info\'->>\'id\' '
@@ -183,21 +173,18 @@ _AUX_DDL = [
     'OR ("type" = \'app_install\' '
     'AND jsonb_typeof("details"->\'app_info\'->\'app_id\') = \'string\' '
     'AND jsonb_typeof("details"->\'app_info\'->\'version\') = \'string\'))',
-    # Resets installed_apps to an empty array where it holds a JSON object, since the column holds Apple's
-    # InstalledApplicationList, which is an array.
+    # Resets installed_apps to an empty array where it holds a JSON object; the column holds an array.
     'UPDATE "devices" SET "installed_apps" = \'[]\'::jsonb '
     "WHERE jsonb_typeof(\"installed_apps\") = 'object'",
 
-    # ==Indexes for the hot paths==
-    # Tortoise indexes only primary keys and unique_together, so every query below was a sequential scan.
-    # Plain CREATE INDEX, not CONCURRENTLY.
+    # Indexes for frequent queries. Tortoise indexes only primary keys and unique_together. Plain CREATE INDEX, not
+    # CONCURRENTLY.
 
     # The device command list (api.routes.devices) and the pending-task cancel on checkout.
     'CREATE INDEX IF NOT EXISTS "idx_tasks_device_created" ON "tasks" (device_id, created_at DESC)',
     # reconciler._active_task_keys / _fail_timed_out_tasks, the Tasks list page, and poller._prune_scheduled_tasks.
     'CREATE INDEX IF NOT EXISTS "idx_tasks_tenant_status_created" ON "tasks" (tenant_id, status, created_at)',
-    # dispatcher._active_alert and _recent_remediation_state run per (device, rule) for every rule on every evaluation,
-    # so this one is per-check-in hot.
+    # dispatcher._active_alert and _recent_remediation_state run per (device, rule) for every rule on every evaluation.
     'CREATE INDEX IF NOT EXISTS "idx_alerts_device_rule_status" ON "alerts" (device_id, rule_id, status)',
     # The tenant alert list and the unresolved severity counts.
     'CREATE INDEX IF NOT EXISTS "idx_alerts_tenant_status" ON "alerts" (tenant_id, status)',
@@ -206,20 +193,18 @@ _AUX_DDL = [
     # The fleet sweep each pass starts with (reconciler, poller, dispatcher, ATC schedule starts) and the per-state
     # device counts in api.routes.devices.
     'CREATE INDEX IF NOT EXISTS "idx_devices_tenant_enrollstate" ON "devices" (tenant_id, enrollment_state)',
-    # atc.sweep_timeouts (waiting + deadline) and the orphaned-running recovery, both of which run per tenant on every
-    # poll tick.
+    # atc.sweep_timeouts (waiting and deadline) and the orphaned-running recovery, both run per tenant on every poll
+    # tick.
     'CREATE INDEX IF NOT EXISTS "idx_flowruns_tenant_status_deadline" '
     'ON "flow_runs" (tenant_id, status, wait_deadline)',
-    # The fleet run list sorts newest-first across a whole tenant, so the index above, which leads with status, does not
-    # serve it. Check-in triggered flows can add dozens of rows per device per day.
+    # The fleet run list sorts newest-first across a tenant, which the index above (leading with status) does not serve.
     'CREATE INDEX IF NOT EXISTS "idx_flowruns_tenant_started" ON "flow_runs" (tenant_id, started_at DESC)',
     # The audit log query is tenant-scoped and always newest-first.
     'CREATE INDEX IF NOT EXISTS "idx_auditlogs_tenant_created" ON "audit_logs" (tenant_id, created_at DESC)',
-    # webhook_handler._record_attempt does this lookup on the enrollment path, for exactly the devices that are already
-    # failing repeatedly.
+    # webhook_handler._record_attempt looks up on the enrollment path.
     'CREATE INDEX IF NOT EXISTS "idx_enrollattempts_udid_outcome" ON "enrollment_attempts" (udid, outcome)',
-    # reconciler._fail_timed_out_tasks looks deployments up by the task that was installing them. Partial, because a row
-    # only has a pointer once something has tried to deploy it.
+    # reconciler._fail_timed_out_tasks looks deployments up by the task that was installing them. Partial, as a row has
+    # a pointer only once a deploy was attempted.
     'CREATE INDEX IF NOT EXISTS "idx_appdeploy_last_task" '
     'ON "app_deployments" (last_task_id) WHERE last_task_id IS NOT NULL',
     'CREATE INDEX IF NOT EXISTS "idx_profiledeploy_last_task" '
@@ -227,8 +212,8 @@ _AUX_DDL = [
     # Both deployment tables are read tenant-wide on every tick by the reconciler, dispatcher, and poller.
     'CREATE INDEX IF NOT EXISTS "idx_appdeploy_tenant_status" ON "app_deployments" (tenant_id, status)',
     'CREATE INDEX IF NOT EXISTS "idx_profiledeploy_tenant" ON "profile_deployments" (tenant_id)',
-    # The daily retention sweep (services.task_manager.run_retention), whose cross-tenant deletes miss every
-    # tenant-led index above. Status leads and this is composite, not partial.
+    # The daily retention sweep (services.task_manager.run_retention), whose cross-tenant deletes cannot use the
+    # tenant-led indexes above.
     'CREATE INDEX IF NOT EXISTS "idx_tasks_status_completed" ON "tasks" (status, completed_at)',
     'CREATE INDEX IF NOT EXISTS "idx_alerts_status_resolved" ON "alerts" (status, resolved_at)',
     'CREATE INDEX IF NOT EXISTS "idx_flowruns_status_started" ON "flow_runs" (status, started_at)',
@@ -250,7 +235,7 @@ _AUX_DDL = [
     'ALTER TABLE "tenants" ADD COLUMN IF NOT EXISTS "profile_signing_key_enc" TEXT NULL',
     'ALTER TABLE "tenants" ADD COLUMN IF NOT EXISTS "profile_signing_chain_pem" TEXT NULL',
     'ALTER TABLE "tenants" ADD COLUMN IF NOT EXISTS "profile_signing_cert_expires_at" TIMESTAMPTZ NULL',
-    # Enrollment identity
+    # Enrollment identity.
     'ALTER TABLE "devices" ADD COLUMN IF NOT EXISTS "reenrollment_allowed_until" TIMESTAMPTZ NULL',
     'ALTER TABLE "devices" ADD COLUMN IF NOT EXISTS "erase_acked_at" TIMESTAMPTZ NULL',
     'ALTER TABLE "devices" ADD COLUMN IF NOT EXISTS "push_token_enc" TEXT NULL',
@@ -284,30 +269,30 @@ _AUX_DDL = [
 
 # DDL applied where possible, logged and skipped where not, for constraints that existing data might already violate.
 _BEST_EFFORT_DDL = [
-    # A physical device is uniquely identified within a tenant by its serial. Enforces one record per serial so
-    # placeholder adoption / re-enroll can't create duplicates. Excludes blank serials (placeholders always have one).
+    # One record per serial within a tenant, so placeholder adoption and re-enroll cannot create duplicates. Blank
+    # serials are excluded.
     'CREATE UNIQUE INDEX IF NOT EXISTS "devices_tenant_serial_uniq" '
     "ON \"devices\" (tenant_id, serial_number) WHERE serial_number <> ''",
 ]
 
-# Serializes the whole schema-establishment phase between processes, since IF NOT EXISTS is not atomic.
-# Derived, not picked: advisory lock keys share one namespace per database, so sha256 of the DDL list's
-# qualified name, not hash() since PYTHONHASHSEED would give each process a different key.
+# Serializes the schema phase between processes, as IF NOT EXISTS is not atomic. Advisory lock keys share one
+# namespace per database, so the key is derived from sha256 of the DDL list's qualified name, as hash() varies per
+# process under PYTHONHASHSEED.
 _AUX_DDL_LOCK_KEY = int.from_bytes(
     hashlib.sha256(b"micromanage.controller.models.database._AUX_DDL").digest()[:8],
     "big",
     signed=True,
 )  # -8696307116457702301
 
-# ContextVar, not a module flag: two separate tasks calling init_schema() at once should serialize correctly
-# in Postgres, and only nesting inside one task is a bug. See _schema_lock.
+# A ContextVar so two tasks calling init_schema() at once serialize on the lock, and only nesting inside one task is
+# refused.
 _IN_SCHEMA_LOCK: ContextVar[bool] = ContextVar(
     "micromanage_in_schema_lock", default=False
 )
 
 
 def is_postgres(conn=None) -> bool:
-    """Whether conn, or the default connection, is a Postgres connection."""
+    """True when conn, or the default connection, is Postgres."""
     conn = conn if conn is not None else Tortoise.get_connection("default")
     return getattr(conn.capabilities, "dialect", None) == "postgres"
 
@@ -329,8 +314,7 @@ async def _schema_lock(conn):
     token = _IN_SCHEMA_LOCK.set(True)
     try:
         if not is_postgres(conn):
-            # sqlite has no advisory locks and no second process to race. Does not make the module portable;
-            # both DDL lists are still Postgres-only.
+            # sqlite has no advisory locks and no second process; both DDL lists remain Postgres-only.
             yield None
             return
 
@@ -341,8 +325,8 @@ async def _schema_lock(conn):
             try:
                 yield pinned
             finally:
-                # Every path, including a raising one: a leaked session lock would block every later startup.
-                # Guarded since a dead connection has already dropped the lock and must not mask its own error.
+                # Runs on every path, as a leaked session lock blocks later startups. A dead connection has already
+                # dropped the lock, and its error is not masked.
                 try:
                     await pinned.execute(
                         f"SELECT pg_advisory_unlock({_AUX_DDL_LOCK_KEY}::bigint)"
@@ -371,21 +355,19 @@ def _ddl_executor(conn, pinned):
 async def _apply_aux_ddl(execute, log) -> None:
     """Run both DDL lists through execute, one statement at a time."""
     for ddl in _AUX_DDL:
-        # No try/except. These are the statements the schema is required to have, and the advisory lock above removes
-        # the one failure that was benign, so anything still raising is a real DDL problem.
+        # No try/except; a failure here is a real DDL problem.
         await execute(ddl)
     for ddl in _BEST_EFFORT_DDL:
         try:
             await execute(ddl)
         except Exception as exc:
-            # e.g. legacy duplicate serials from before soft-unenroll existed; app-level dedup still applies (adoption
-            # tolerates duplicates).
+            # For example legacy duplicate serials from before soft-unenroll; app-level dedup still applies.
             log.warning("aux DDL skipped (%s): %s", ddl[:60], exc)
 
 
 async def ensure_aux_columns():
     """Apply the idempotent post-create DDL under the schema lock. Call after Tortoise is initialized. init_schema()
-    covers startup; inside a hold of the lock call _apply_aux_ddl instead, since _schema_lock refuses to nest.
+    covers startup; inside a hold of the lock call _apply_aux_ddl instead, as _schema_lock does not nest.
     """
     log = logging.getLogger(__name__)
     conn = Tortoise.get_connection("default")
@@ -394,8 +376,8 @@ async def ensure_aux_columns():
 
 
 async def init_schema():
-    """Create the missing tables and apply the aux DDL as one critical section, since all three supervisord processes
-    run this at startup and race on a fresh database. Covers the default connection only.
+    """Create the missing tables and apply the aux DDL as one critical section, as all three supervisord processes
+    run this at startup. Covers the default connection only.
     """
     log = logging.getLogger(__name__)
     conn = Tortoise.get_connection("default")
@@ -414,7 +396,7 @@ async def init_schema():
 
 
 async def _run_identity_cutover(log) -> None:
-    """The one-time identity cutover, under the schema lock held by caller."""
+    """The one-time identity cutover, under the schema lock held by the caller."""
     from controller.services import identity
     try:
         await identity.run_cutover()
@@ -433,8 +415,8 @@ def schema_fingerprint() -> str:
 
 
 async def _record_schema_state(log, pinned=None) -> None:
-    """Record that this database is at the running code's schema. A failure is logged and ignored, since the schema is
-    applied either way. It writes SQL on the pinned connection, because an ORM query would need a second pooled one.
+    """Record that this database is at the running code's schema. A failure is logged and ignored. Raw SQL on the
+    pinned connection, as an ORM query would open a second one.
     """
     from controller.models.tenant import SchemaState
     from controller.version import __version__
@@ -500,7 +482,7 @@ def database_url_error() -> Optional[str]:
 
 def enforce_database_url() -> None:
     """Log the reason and raise SystemExit when there is no DSN to connect with. Call it at startup, not at import,
-    since test suites import api.main and api.webhook while running Tortoise on their own sqlite.
+    as test suites import api.main and api.webhook while running Tortoise on their own sqlite.
     """
     problem = database_url_error()
     if problem:
