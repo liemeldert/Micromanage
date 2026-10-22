@@ -845,33 +845,44 @@ async def main():
             },
         })
 
+    def _late_waits():
+        return [t for t in _rec._background_tasks
+                if not t.done() and t.get_coro().__name__ == "_await_late_task"]
+
+    async def until_waiting_alone(timeout=15.0):
+        """Poll until the late-task wait is the only background work still running, or timeout passes."""
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            live = [t for t in _rec._background_tasks if not t.done()]
+            if live and len(live) == len(_late_waits()):
+                return
+            await asyncio.sleep(0.01)
+
     try:
-        wh._LATE_RESPONSE_WAIT_SECONDS = 3.0
+        # A working late path returns as soon as the row is written; only a broken one runs to the 30s bound.
+        wh._LATE_RESPONSE_WAIT_SECONDS = 30.0
         wh._LATE_RESPONSE_POLL_SECONDS = 0.02
         racer = await Task.create(
             tenant=t10, type="restart", status="running", device=e_dev,
             user="admin@t1", description="restart", details={}, progress=40)
-
-        async def _write_uuid_late():
-            await asyncio.sleep(0.15)
-            racer.details = {"command_uuid": "cmd-overtaken"}
-            await racer.save(update_fields=["details"])
-
-        writer = asyncio.create_task(_write_uuid_late())
-        await ack(e_dev, {}, command_uuid="cmd-overtaken")
-        await writer
+        await post_ack(e_dev, "cmd-overtaken")
+        await until_waiting_alone()
+        check("the answer that missed its row is waiting for it", len(_late_waits()) == 1)
+        racer.details = {"command_uuid": "cmd-overtaken"}
+        await racer.save(update_fields=["details"])
+        await wh.drain_deferred()
         await racer.refresh_from_db()
         check("the answer is still applied once the task catches up",
               racer.status == "completed" and racer.progress == 100)
 
         # Burst responses need wait outside both device and deferred locks.
-        wh._LATE_RESPONSE_WAIT_SECONDS = 2.0
+        wh._LATE_RESPONSE_WAIT_SECONDS = 30.0
         wh._LATE_RESPONSE_POLL_SECONDS = 0.05
         slow = await Task.create(
             tenant=t10, type="restart", status="running", device=e_dev,
             user="admin@t1", description="restart", details={}, progress=10)
         await post_ack(e_dev, "cmd-slow")
-        await asyncio.sleep(0.25)  # Let the acknowledgement handler poll for the task a few times.
+        await until_waiting_alone()
         # Wait runs outside both locks to avoid stalling other devices.
         check(f"the wait holds none of the deferred slots "
               f"({_rec._semaphore()._value} of {_rec.MAX_CONCURRENT_TASKS} free)",

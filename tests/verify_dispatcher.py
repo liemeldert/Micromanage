@@ -36,6 +36,18 @@ FV_PROFILE_PASSWORD = "fv-open-directory-pw-4d1f"
 check = make_check(_FAILURES)
 
 
+async def settle(timeout=15.0):
+    """Wait until every spawned background task has finished, recording a failed check past timeout."""
+    from controller.services import reconciler
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
+    while any(not t.done() for t in reconciler._background_tasks):
+        if loop.time() >= deadline:
+            check(f"background work finished within {timeout:.0f}s", False)
+            return
+        await asyncio.sleep(0.01)
+
+
 class FakeConnector:
     def __init__(self, *a, **k):
         pass
@@ -104,7 +116,7 @@ DISPATCHER_DOC = {
             "actions": [{"type": "send_command", "params": {"command": "refresh_info"}, "dry_run": True}],
             "auto_resolve": False,
         },
-        {  # destructive remediation -> queued for approval, never auto-fired
+        {  # destructive remediation -> queued for approval, never sent automatically
             "id": "risky-wipe", "name": "Wipe risky", "severity": "black",
             "check": {"type": "tagged", "tags": ["risky"]}, "grace_minutes": 0,
             # A Mac erase needs a 6-digit PIN (enforced in the shared command path so an approved wipe can't brick the
@@ -113,7 +125,7 @@ DISPATCHER_DOC = {
                 "command": "erase", "params": {"pin": "123456"}}}],
             "auto_resolve": False,
         },
-        {  # destructive remediation WITH a secret param -> must not leak it
+        {  # destructive remediation WITH a secret param -> must not expose it
             "id": "recovery", "name": "Set recovery lock", "severity": "black",
             "check": {"type": "tagged", "tags": ["risky"]}, "grace_minutes": 0,
             "actions": [{"type": "send_command", "params": {
@@ -137,8 +149,8 @@ def _write_configs(base: Path):
     (tdir / "config.yaml").write_text(yaml.safe_dump({"tenant": {"id": "default", "name": "D", "allowed_users": []}}))
     (tdir / "groups.yaml").write_text(yaml.safe_dump({"groups": []}))
     (tdir / "apps.yaml").write_text(yaml.safe_dump({"apps": []}))
-    # The payload carries a password on purpose: this is the profile a remediation queues, so it is what proves the
-    # tasks table never holds the value.
+    # The payload carries a password because this is the profile a remediation queues, which proves the tasks table
+    # never holds the value.
     (tdir / "profiles.yaml").write_text(yaml.safe_dump({"profiles": [
         {"id": "enforce-fv", "name": "Enforce FileVault",
          "payload": {"PayloadType": "com.apple.MCX.FileVault2",
@@ -177,15 +189,15 @@ async def main():
     await dispatcher.evaluate_device(dev)
     a = await fv_alert()
     check("pending alert created", a is not None and a.status == "pending")
-    check("no webhook fired during grace", len(CAPTURED) == 0)
+    check("no webhook sent during grace", len(CAPTURED) == 0)
     await dev.refresh_from_db()
     check("no reversible tag applied during grace", "noncompliant-fv" not in dev.tags)
 
-    print("2) after grace, alert opens and fires actions")
+    print("2) after grace, alert opens and runs its actions")
     a.first_detected_at = datetime.now(timezone.utc) - timedelta(minutes=11)
     await a.save()
     await dispatcher.evaluate_device(dev)
-    await asyncio.sleep(0.2)  # let the spawned webhook run
+    await settle()
     a = await fv_alert()
     await dev.refresh_from_db()
     check("alert opened", a.status == "open")
@@ -227,7 +239,7 @@ async def main():
     check("no refresh_info command task created by dry-run", refreshed == 0)
 
     print("5) real remediation runs through the audited path as dispatcher:<rule>")
-    await asyncio.sleep(0.2)
+    await settle()
     rem_tasks = await Task.filter(device=dev, type="profile_install", user="dispatcher:fv-remediate").all()
     check("profile_install task created by remediation", len(rem_tasks) >= 1)
 
@@ -271,14 +283,14 @@ async def main():
     # cooldown=0, max=2. It already attempted once in step 2/5. Drive more evals.
     for _ in range(4):
         await dispatcher.evaluate_device(dev)
-        await asyncio.sleep(0.05)
+        await settle()
     rem = await Alert.get_or_none(device_id=dev.id, rule_id="fv-remediate")
     detail = rem.detail or {}
     check("remediation marked failed after max attempts", detail.get("remediation_failed") is True)
     check("severity escalated above yellow",
           dispatcher.SEVERITY_RANK.get(rem.severity, 0) > dispatcher.SEVERITY_RANK["yellow"])
 
-    print("7) destructive remediation is queued for approval, not auto-fired")
+    print("7) destructive remediation is queued for approval, not sent automatically")
     # Add rather than replace: overwriting dev.tags would drop the noncompliant-fv tag step 2 applied, and step 8's
     # resolve would become a no-op that proves nothing about the revert path.
     dev.tags = sorted(set(dev.tags or []) | {"risky"})
@@ -296,14 +308,14 @@ async def main():
     check("approval executes the erase (audited)", erase_after == 1)
     check("pending approval cleared after approval",
           not (risky.detail or {}).get("pending_approvals"))
-    # secret leak: a destructive remediation's secret param must never appear in the alert detail exposed by GET /alerts
-    # (action_key + params both redacted).
+    # secret exposure: a destructive remediation's secret param must never appear in the alert detail returned by GET
+    # /alerts (action_key + params both redacted).
     import json as _json
     rec = await Alert.get_or_none(device_id=dev.id, rule_id="recovery")
     detail_json = _json.dumps(rec.detail or {}) if rec else ""
     check("queued (pending approval exists for recovery)",
           bool((rec.detail or {}).get("pending_approvals")) if rec else False)
-    check("secret param NOT leaked into alert detail", "supersecret" not in detail_json)
+    check("secret param NOT exposed in alert detail", "supersecret" not in detail_json)
 
     print("8) becoming compliant auto-resolves and removes the reversible tag")
     dev.attributes = {"SecurityInfo": {"FDE_Enabled": True}}  # FileVault ON now
@@ -338,7 +350,6 @@ async def main():
     fresh.first_detected_at = datetime.now(timezone.utc) - timedelta(minutes=11)
     await fresh.save()
     await dispatcher.evaluate_device(dev)  # should open despite webhook 500
-    await asyncio.sleep(0.3)
     await fresh.refresh_from_db()
     check("alert opens even though the webhook fails", fresh.status == "open")
 
@@ -417,7 +428,7 @@ async def main():
         check("resolved alert raises", False)
     except HTTPException as e:
         check("resolved alert -> 409", e.status_code == 409)
-    check("no erase fired from the resolved alert",
+    check("no erase sent from the resolved alert",
           await Task.filter(device=dev, type="erase").count() == erase_before)
 
     print("13) a webhook inventory response defers dispatcher evaluation; the alert still raises")
@@ -440,7 +451,7 @@ async def main():
     check("the task row completed inline", sec_task.status == "completed")
     await webhook_handler.drain_deferred()
     fv3 = await Alert.get_or_none(device_id=dev3.id, rule_id="fv-alert")
-    check("the deferred evaluation raised the alert the inline path used to",
+    check("the deferred evaluation raises the same alert as the inline path",
           fv3 is not None and fv3.status == "pending")
 
     # The batched sweep (alert-pair prefetch plus .only() device rows) must produce the same alert outcomes as the
@@ -544,8 +555,8 @@ async def main():
     swA.tags = ["scoped-tag"]
     await swA.save(update_fields=["tags"])
 
-    # The wide net matters: an AttributeError on a lazily-excluded field can surface, and be swallowed into a log line,
-    # in compliance_catalog, scoping, ddm_manager or the command path, not only in dispatcher.
+    # The wide net matters: an AttributeError on a lazily-excluded field can surface, and be ignored apart from a log
+    # line, in compliance_catalog, scoping, ddm_manager or the command path, not only in dispatcher.
     cap_handler = LogCapture(level=_logging.ERROR)
     _logging.getLogger("controller").addHandler(cap_handler)
     swept = await dispatcher.sweep(sw_tenant)
@@ -902,11 +913,11 @@ async def main():
     finally:
         ddm_manager.compute_device_declarations_cached = _orig_cached
     sg_before = await _sg_alerts()
-    check("BEFORE the fix: a stale column raised drift on a device that is fine",
+    check("built from the stored groups column, a stale column raises drift on a device that is fine",
           "mm.cfg.kiosk-only" in (sg_before.get("SG-A") or {}).get("identifiers", []))
-    check("BEFORE the fix: a stale column hid drift the device really has",
+    check("built from the stored groups column, a stale column hides drift the device really has",
           "SG-C" not in sg_before)
-    check("BEFORE the fix: membership-independent drift fired either way",
+    check("built from the stored groups column, drift that does not depend on membership is still reported",
           "SG-B" in sg_before)
 
     await Alert.filter(tenant=sg_tenant).delete()
@@ -916,11 +927,11 @@ async def main():
     sg_after = await _sg_alerts()
     check("a stale groups column no longer raises a drift alert",
           "SG-A" not in sg_after)
-    check("real drift still fires, with its reason code intact",
+    check("real drift is still reported, with its reason code intact",
           (sg_after.get("SG-B") or {}).get("identifiers") == ["mm.cfg.note1"]
           and (sg_after["SG-B"]["problems"][0].get("reason")
                == "Error.ConfigurationCannotBeApplied"))
-    check("drift the stale column used to hide is now visible",
+    check("drift the stale column hid is reported",
           "mm.cfg.kiosk-only" in (sg_after.get("SG-C") or {}).get("identifiers", []))
 
     # Cold drift build must be stored in the cache entry that api/ddm.py serves from.
@@ -972,7 +983,7 @@ async def main():
 
     _tid = str(tenant.id)
     # Re-parse from disk first: earlier sections have already evaluated against this document, so a snapshot of the
-    # cache entry would bake in any mutation they made and the comparison would run against itself.
+    # cache entry would keep any mutation they made and the comparison would run against itself.
     _tc.invalidate(_tid)
     disp_before = copy.deepcopy(_tc._load_readonly(_tid, "dispatcher.yaml"))
     disp_shared = _tc._load_readonly(_tid, "dispatcher.yaml")
@@ -1028,8 +1039,8 @@ async def main():
         group_loads["n"] += 1
         return real_groups(tid)
 
-    # Section 16 left this fleet clean, so put one profile back into a failed state: no drift either way would pass
-    # without the branches having agreed about anything.
+    # Section 16 left this fleet clean, so put one profile back into a failed state: no drift in either branch
+    # would pass without the branches having agreed about anything.
     pdB.status = "failed"
     await pdB.save(update_fields=["status"])
     _tc.load_groups = _counted_groups
@@ -1045,7 +1056,7 @@ async def main():
         await pdB.save(update_fields=["status"])
     check("a config_drift pass with membership supplied loads no groups.yaml",
           supplied_loads == 0)
-    check("the no-membership branch, which is now production's, loads it once",
+    check("the no-membership branch, which is production's, loads it once",
           group_loads["n"] == 1)
     check("and both reach the same drift verdict, which is not the empty one",
           bool(ctx_supplied.get("drift"))
@@ -1165,14 +1176,13 @@ async def main():
     finally:
         dispatcher._build_ctx = _orig_build_ctx
     sp_before = await _sp_alerts()
-    check("BEFORE the fix: a stale column raised profile drift on a device that is fine",
+    check("built from the stored groups column, a stale column raises profile drift on a device that is fine",
           _sp_profiles(sp_before.get(("SP-A", "sp-drift"))) == ["lab-only"])
-    check("BEFORE the fix: the DDM alert on that same stale column was already "
-          "clear, so an admin watched the two disagree",
+    check("...while the DDM alert on that same stale column is clear, so the two drift alerts disagree",
           ("SP-A", "sp-decl") not in sp_before)
-    check("BEFORE the fix: membership-independent drift fired either way",
+    check("built from the stored groups column, profile drift that does not depend on membership is still reported",
           _sp_profiles(sp_before.get(("SP-B", "sp-drift"))) == ["base"])
-    check("BEFORE the fix: a stale column hid profile drift the device really has",
+    check("built from the stored groups column, a stale column hides profile drift the device really has",
           ("SP-C", "sp-drift") not in sp_before)
 
     await Alert.filter(tenant=sp_tenant).delete()
@@ -1181,14 +1191,14 @@ async def main():
         await dispatcher.evaluate_device(d)
     sp_after = await _sp_alerts()
     check("a stale groups column no longer raises a profile drift alert, and "
-          "the two drift alerts now agree about the same device",
+          "the two drift alerts agree about the same device",
           ("SP-A", "sp-drift") not in sp_after
           and ("SP-A", "sp-decl") not in sp_after)
-    check("real profile drift still fires, naming the profile and its status",
+    check("real profile drift is still reported, naming the profile and its status",
           _sp_profiles(sp_after.get(("SP-B", "sp-drift"))) == ["base"]
           and (sp_after[("SP-B", "sp-drift")]["problems"][0].get("status")
                is None))
-    check("profile drift the stale column used to hide is now visible",
+    check("profile drift the stale column hid is reported",
           _sp_profiles(sp_after.get(("SP-C", "sp-drift"))) == ["lab-only"])
 
     # Separate tenant: reconciler would repair the staleness fixture induces via evaluate_device_apps.
@@ -1304,7 +1314,7 @@ async def main():
     flA = await _fl_device(fl_tenant, "FL-A")  # parked 6h, past the 4h limit
     flB = await _fl_device(fl_tenant, "FL-B")  # parked 1h, inside the limit
     flC = await _fl_device(fl_tenant, "FL-C")  # no runs at all
-    # A live rung of the escalation ladder, set in the future on purpose: the check judges silence rather than expiry,
+    # A live rung of the escalation ladder, set in the future because the check judges silence rather than expiry,
     # so a run can be well past the rule's threshold with its own deadline not yet due.
     fl_soon = datetime.now(timezone.utc) + timedelta(minutes=30)
     fl_runA = await _fl_run(fl_tenant, flA, status="waiting", hours_ago=6,
@@ -1338,7 +1348,7 @@ async def main():
         await dispatcher.evaluate_device(d)
     fl_unbatched = await _fl_alerts()
     fl_detail = fl_unbatched.get(("FL-A", "fl-parked"))
-    check("the check fires end to end on the parked-overdue device, and only there",
+    check("the check reports end to end on the parked-overdue device, and only there",
           set(fl_unbatched) == {("FL-A", "fl-parked")})
     check("the alert names the parked run, its flow and the node it sits on",
           _fl_runs(fl_detail) == fl_expect)
@@ -1401,7 +1411,7 @@ async def main():
           fl_batched_q == 1)
     check(f"a tenant with no flow_parked_for rule never reads the table at all (got {nf_q} queries)",
           nf_q == 0 and nf_alerts == 0)
-    check("fixture: that tenant's own run would fire under a rule of this type, "
+    check("fixture: that tenant's own run would raise under a rule of this type, "
           "so the silence above is the gate and not an empty fixture",
           _cc.evaluate_check(fl_check, nfA, {"flow_runs": [nf_run]}) is not None)
     check(f"a failed prefetch degrades to per-device queries (swept {fl_degraded_n}, {fl_degraded_q} queries)",
@@ -1587,7 +1597,7 @@ async def main():
           rec_alert.severity == sev_before)
 
     print("24a) the refusal sticks: the next evaluation does not ask again")
-    # Without this the refusal would read as honoured while the request sat queued again a second later.
+    # Without this the refusal would read as honored while the request sat queued again a second later.
     await dispatcher.evaluate_device(dev)
     await webhook_handler.drain_deferred()
     await rec_alert.refresh_from_db()
@@ -1732,7 +1742,7 @@ async def main():
           {"app_id", "name", "bundle_id", "version", "s3_key", "sha256",
            "install_options", "install_as_managed"})
 
-    print("25a) a rollout wave is still honoured, because scope and pace are different questions")
+    print("25a) a rollout wave is still honored, because scope and pace are different questions")
     _apps_remedy_configs({"rules": [dict(APP_RULE, id="app-remedy-held", actions=[
         {"type": "install_apps", "params": {"app_ids": ["held-app"]}}])]})
     held_dev = await Device.create(
@@ -1817,7 +1827,7 @@ async def main():
                                 "https://hooks.slack.com/b")]
 
     await dispatcher.evaluate_device(mw_dev, tenant=mw_tenant)
-    await asyncio.sleep(0.3)
+    await settle()
     check("both webhook targets were notified when the alert opened",
           sorted(_mw_hits()) == ["https://hooks.slack.com/a",
                                  "https://hooks.slack.com/b"])
@@ -1829,7 +1839,7 @@ async def main():
 
     mw_before = len(_mw_hits())
     await dispatcher.evaluate_device(mw_dev, tenant=mw_tenant)
-    await asyncio.sleep(0.2)
+    await settle()
     check("a re-evaluation at the same severity re-notifies neither target",
           len(_mw_hits()) == mw_before)
 
@@ -1838,7 +1848,7 @@ async def main():
     mw_detail["notified_severity"] = {"hook-a": "yellow", "hook-b": "green"}
     await Alert.filter(id=mw_alert.id).update(detail=mw_detail)
     await dispatcher.evaluate_device(mw_dev, tenant=mw_tenant)
-    await asyncio.sleep(0.2)
+    await settle()
     mw_new = _mw_hits()[mw_before:]
     check("the stale target was caught up and the current one left alone",
           mw_new == ["https://hooks.slack.com/b"])
@@ -1850,13 +1860,13 @@ async def main():
     await Alert.filter(id=mw_alert.id).update(detail=mw_detail)
     mw_before = len(_mw_hits())
     await dispatcher.evaluate_device(mw_dev, tenant=mw_tenant)
-    await asyncio.sleep(0.2)
+    await settle()
     check("a scalar at the current severity notifies nobody again",
           len(_mw_hits()) == mw_before)
 
     # == 27. Approval races: the pending entry is claimed before dispatch ==
     # Claimed on stored row, not caller's copy; stale approve cannot erase refusal or double-execute.
-    print("27) an approve holding a stale copy honours a decline that landed first")
+    print("27) an approve holding a stale copy honors a decline that landed first")
     RACE_DOC = {"rules": [
         {"id": "race-wipe", "name": "Wipe race", "severity": "black",
          "grace_minutes": 0, "check": {"type": "tagged", "tags": ["race"]},
