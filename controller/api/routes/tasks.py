@@ -12,7 +12,8 @@ from controller.auth.dependencies import get_current_principal, Principal
 from controller.models.tenant import Task
 from controller.services import identity
 from controller.services.app_manager import AppManager
-from controller.services.audit import record_device_command
+from controller.services.audit import record_audit, record_device_command
+from controller.services.flow_permissions import ADMIN_ONLY_TASK_TYPES
 
 router = APIRouter()
 
@@ -83,9 +84,19 @@ async def get_task_details(task_id: str, principal: Principal = Depends(get_curr
 @router.post("/api/v1/tasks/{task_id}/cancel")
 async def cancel_task(task_id: str, principal: Principal = Depends(get_current_principal)):
     """Cancel a pending or running task by flipping its stored status; a command already delivered to the device
-    is not recalled."""
+    is not recalled. Destructive, firmware lock and account configuration tasks need an admin."""
     tenant = principal.tenant
     task = await get_owned_or_404(Task, task_id, tenant, "Task not found")
+    device_ref = str(task.device_id) if task.device_id else None
+
+    if task.type in ADMIN_ONLY_TASK_TYPES and not principal.is_admin:
+        await record_audit(
+            principal, "task.cancel_refused", target_type="task", target_id=str(task.id),
+            detail={"type": task.type, "device_id": device_ref},
+        )
+        raise HTTPException(
+            status_code=403, detail=f"Only an admin can cancel a '{task.type}' task. Ask an admin to cancel it.",
+        )
 
     if task.status not in ["pending", "running"]:
         raise HTTPException(
@@ -95,9 +106,14 @@ async def cancel_task(task_id: str, principal: Principal = Depends(get_current_p
     # Stop the in-process handler if this process owns it; nothing depends on it having one.
     await runtime.task_manager.cancel_task(str(task.id))
 
+    previous_status = task.status
     task.status = "cancelled"
     task.completed_at = datetime.now(timezone.utc)
     await task.save(update_fields=["status", "completed_at"])
+    await record_audit(
+        principal, "task.cancel", target_type="task", target_id=str(task.id),
+        detail={"type": task.type, "device_id": device_ref, "previous_status": previous_status},
+    )
     await identity.fail_renewal_tasks([task.id])
 
     return {"message": "Task cancelled"}
@@ -106,9 +122,19 @@ async def cancel_task(task_id: str, principal: Principal = Depends(get_current_p
 @router.post("/api/v1/tasks/{task_id}/retry")
 async def retry_task(task_id: str, principal: Principal = Depends(get_current_principal)):
     """Retry a failed or cancelled task by re-dispatching it as a fresh Task row through its original handler,
-    leaving the failed row in history."""
+    leaving the failed row in history. Destructive, firmware lock and account configuration tasks need an admin."""
     tenant = principal.tenant
     task = await get_owned_or_404(Task, task_id, tenant, "Task not found", prefetch=("device",))
+    device_ref = str(task.device_id) if task.device_id else None
+
+    if task.type in ADMIN_ONLY_TASK_TYPES and not principal.is_admin:
+        await record_audit(
+            principal, "task.retry_refused", target_type="task", target_id=str(task.id),
+            detail={"type": task.type, "device_id": device_ref},
+        )
+        raise HTTPException(
+            status_code=403, detail=f"Only an admin can retry a '{task.type}' task. Ask an admin to retry it.",
+        )
 
     async def _refuse(status_code: int, detail: str):
         """Record the refusal against the device, then raise it.
@@ -182,4 +208,8 @@ async def retry_task(task_id: str, principal: Principal = Depends(get_current_pr
             params={"retry_of": str(task.id)},
             task_id=str(new_task.id),
         )
+    await record_audit(
+        principal, "task.retry", target_type="task", target_id=str(task.id),
+        detail={"type": task.type, "device_id": device_ref, "new_task_id": str(new_task.id)},
+    )
     return {"task_id": str(new_task.id), "message": "Task retry started"}

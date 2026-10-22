@@ -9,7 +9,7 @@ from tortoise.models import Model
 class Tenant(Model):
     id = fields.CharField(max_length=100, pk=True)
     name = fields.CharField(max_length=255)
-    allowed_users = fields.JSONField(default=list)  # Deprecated: advisory only; authz is via User rows
+    allowed_users = fields.JSONField(default=list)  # Deprecated: advisory only; access comes from User rows
     s3_config = fields.JSONField(default=dict)
     # Per-tenant authentication backend: provider local, or provider clerk with its issuer and settings. See
     # controller.auth.
@@ -587,6 +587,10 @@ class FlowRun(Model):
     started_at = fields.DatetimeField(auto_now_add=True)
     updated_at = fields.DatetimeField(auto_now=True)
     completed_at = fields.DatetimeField(null=True)
+    # Who started the run (an email, or "system" for an automatic trigger) and with which role (admin | member |
+    # system). Null counts as system (services.flow_permissions.run_role).
+    started_by = fields.CharField(max_length=255, null=True)
+    started_role = fields.CharField(max_length=16, null=True)
 
     class Meta:
         table = "flow_runs"
@@ -616,6 +620,8 @@ class FlowRun(Model):
             "started_at": self.started_at.isoformat() if self.started_at else None,
             "updated_at": self.updated_at.isoformat() if self.updated_at else None,
             "completed_at": self.completed_at.isoformat() if self.completed_at else None,
+            "started_by": self.started_by,
+            "started_role": self.started_role,
         }
 
 

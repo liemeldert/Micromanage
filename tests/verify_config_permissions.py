@@ -3,7 +3,7 @@
 A member may write only the types in controller.auth.MEMBER_WRITABLE_CONFIG_TYPES (an allowlist), so a type nobody has
 classified is refused.
 
-Run: PYTHONPATH=. ./.venv/bin/python tests/verify_config_authz.py
+Run: PYTHONPATH=. ./.venv/bin/python tests/verify_config_permissions.py
 """
 import inspect
 import os

@@ -340,9 +340,9 @@ async def main():
         def __init__(self, *a, **k):
             pass
 
-        # What the transport answered last, so a test can make the push fail.
+        # What the transport returned last, so a test can make the push fail.
         push = {}
-        # What it says when it refuses outright, which the endpoint has to carry through to the admin.
+        # The reason it returns when it refuses outright, which the endpoint has to carry through to the admin.
         reason = "nanomdm is down"
 
         async def restart_device(self, udid):
@@ -408,8 +408,8 @@ async def main():
           and "APNs 410 unregistered" in pushed["message"]
           and "next check-in" in pushed["message"])
 
-    # The message builder tolerates a transport that says nothing about pushes, and separates a failure with no reason
-    # from no failure at all.
+    # The message builder tolerates a transport that reports nothing about pushes, and separates a failure with no
+    # reason from no failure at all.
     from controller.api.routes.commands import _command_sent_message, _push_failure_reason
 
     check("no push keys at all reads as a healthy push",
@@ -441,7 +441,7 @@ async def main():
           and generic_row.detail.get("request_type") == "CertificateList")
 
     # A command that never reached the device is still an admin sending one, so it is audited, and what the transport
-    # said travels with it rather than sitting only on the task row.
+    # reported travels with it rather than sitting only on the task row.
     before_ids = {r.id for r in await AuditLog.all()}
     FakeConnector.fail = True
     FakeConnector.reason = "nanomdm rejected the enqueue: 500 command_error"
@@ -469,7 +469,7 @@ async def main():
               await AuditLog.filter(action=COMMAND_ACTION).count()
               == len([r for r in await AuditLog.all() if r.action == COMMAND_ACTION]))
 
-    # Transport text is not written for an API response: a failure that answers with an error page must not put the
+    # Transport text is not written for an API response, so a failure whose body is an error page does not put the
     # whole page into a toast or a log row.
     before_ids = {r.id for r in await AuditLog.all()}
     FakeConnector.fail = True
@@ -487,7 +487,7 @@ async def main():
     check("and truncated in the audit row as well",
           huge_row is not None and 0 < len(huge_row.detail.get("error", "")) < 400)
 
-    # A send that fails with nothing to say still answers cleanly, rather than trailing a colon and an empty string.
+    # A send that fails with no reason still returns a clean message, rather than a trailing colon and an empty string.
     FakeConnector.fail = True
     FakeConnector.reason = "   "
     try:
@@ -501,7 +501,7 @@ async def main():
         FakeConnector.fail = False
         FakeConnector.reason = "nanomdm is down"
 
-    # A refused command is audited too, and a retired one answers with the reason it went away rather than an
+    # A refused command is audited too, and a retired one returns the reason it went away rather than an
     # invalid-type message. Nothing is retired today, so this mutates a synthetic entry into RETIRED_COMMANDS for the
     # block; the validator and dispatch read that dict by reference, so the mutation looks like a retirement.
     from controller.services import command_catalog as _cc
@@ -615,7 +615,8 @@ async def main():
         await asyncio.sleep(0.05)
     finally:
         TASK_HANDLERS.pop("restart", None)
-    retry_row = await new_row(before_ids)
+    retry_rows = [r for r in await AuditLog.filter(action=COMMAND_ACTION).all() if r.id not in before_ids]
+    retry_row = retry_rows[0] if len(retry_rows) == 1 else None
     check("a retry writes its own audit row", retry_row is not None)
     if retry_row:
         check("the retry is attributed to whoever pressed retry, not the original sender",
@@ -657,7 +658,7 @@ async def main():
           unrunnable_row is not None
           and unrunnable_row.detail.get("outcome") == "refused")
 
-    # 10. The refusals send_device_command answers before the shared path, and the commands nobody pressed a
+    # 10. The refusals send_device_command returns before the shared path, and the commands nobody pressed a
     #      button for.
     print("automated and pre-dispatch-refused commands:")
 

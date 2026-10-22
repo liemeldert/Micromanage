@@ -27,8 +27,9 @@ os.environ.pop("IDENTITY_RENEW_DAYS", None)
 from tortoise import Tortoise  # noqa: E402
 
 from controller.models.tenant import (  # noqa: E402
-    Alert, Device, EnrollmentAttempt, LegacyIdentity, ScepChallenge, Task, Tenant,
+    Alert, Device, EnrollmentAttempt, LegacyIdentity, ScepChallenge, Task, Tenant, User,
 )
+from controller.auth.dependencies import Principal  # noqa: E402
 from controller.services import identity, identity_renewal, reconciler  # noqa: E402
 from controller.services.nanomdm_store import Identity  # noqa: E402
 from controller.utils.timeutil import as_utc, utcnow  # noqa: E402
@@ -320,11 +321,11 @@ async def test_timeout_keeps_both(tenant, stub):
           await Alert.filter(device_id=dev.id, rule_id=identity.ALERT_RULE_RENEWAL, status="open").exists())
 
     print("\n12) the cancel route expires a bound renewal the same way")
-    from types import SimpleNamespace
-
     from controller.api.routes import tasks as task_routes
 
     dev, task, row, before, renewed = await bound_renewal(tenant, stub, "U-CANCEL")
+    cancel_user = await User.create(tenant=tenant, email="admin@renewal", role="admin")
+    cancel_admin = Principal(tenant=tenant, user=cancel_user, email=cancel_user.email, role="admin")
     seen = []
     original = identity.fail_renewal_tasks
 
@@ -335,7 +336,7 @@ async def test_timeout_keeps_both(tenant, stub):
 
     identity.fail_renewal_tasks = recording
     try:
-        await task_routes.cancel_task(str(task.id), SimpleNamespace(tenant=tenant))
+        await task_routes.cancel_task(str(task.id), cancel_admin)
     finally:
         identity.fail_renewal_tasks = original
     await dev.refresh_from_db()

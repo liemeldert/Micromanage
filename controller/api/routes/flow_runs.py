@@ -13,6 +13,8 @@ from controller.api.ids import (
 from controller.api.redaction import _redact_flow
 from controller.auth.dependencies import Principal, get_current_principal
 from controller.models.tenant import Device, FlowRun
+from controller.services import flow_permissions, scoping
+from controller.services.audit import record_audit
 from controller.services.task_manager import FLOW_RUN_RETENTION_DAYS
 
 router = APIRouter()
@@ -216,8 +218,8 @@ async def start_device_flow_run(
     body: FlowRunStart,
     principal: Principal = Depends(get_current_principal),
 ):
-    """Start a run from a named start node against one device, for a test or a re-run. The start's own scope is ignored,
-    since the caller named the device."""
+    """Start a run from a named start node against one device, for a test or a re-run. An admin may start any flow on
+    any device; a member only on a device inside the start node's scope, and only a flow with no admin-only step."""
     tenant = principal.tenant
     device = await get_owned_or_404(Device, device_id, tenant, "Device not found")
     if device.enrollment_state != "enrolled":
@@ -235,12 +237,44 @@ async def start_device_flow_run(
                 status_code=409,
                 detail=f"Start node '{start_id}' exists in flows {candidates}; pass flow_id",
             )
-    run = await atc.start_run_from_start(device, start_id, flow_id)
+    not_found = HTTPException(
+        status_code=400,
+        detail=f"Start node '{body.start_node_id}' not found or is not a start node",
+    )
+    resolved = atc.resolve_start(str(tenant.id), start_id, flow_id)
+    if resolved is None:
+        raise not_found
+    flow, start = resolved
+    resolved_flow_id = str(flow.get("id") or "flow")
+    in_scope = scoping.matches_or_all(device, list(device.groups or []), (start.get("params") or {}).get("match"))
+
+    if not principal.is_admin:
+        refusal = flow_permissions.member_flow_refusal(device, flow, start_id)
+        if refusal is not None:
+            reason, node = refusal
+            await record_audit(
+                principal, "flow.run.refused", target_type="device", target_id=str(device.id),
+                detail={"flow_id": resolved_flow_id, "start_node": start_id, "reason": reason,
+                        "node_id": node.get("id") if node else None,
+                        "node_type": node.get("type") if node else None},
+            )
+            if reason == "admin_only_node":
+                detail = flow_permissions.FLOW_PERMISSION_ERRORS["start_admin_only_node"].format(
+                    flow=resolved_flow_id, node=node.get("id"), type=node.get("type"))
+            else:
+                detail = flow_permissions.FLOW_PERMISSION_ERRORS["start_out_of_scope"].format(
+                    serial=device.serial_number, start=start_id, flow=resolved_flow_id)
+            raise HTTPException(status_code=403, detail=detail)
+
+    run = await atc.start_run_from_start(device, start_id, resolved_flow_id,
+                                         started_by=principal.email, started_role=principal.role)
     if run is None:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Start node '{body.start_node_id}' not found or is not a start node",
-        )
+        raise not_found
+    await record_audit(
+        principal, "flow.run.start", target_type="flow_run", target_id=str(run.id),
+        detail={"flow_id": resolved_flow_id, "start_node": start_id, "device_id": str(device.id),
+                "serial_number": device.serial_number, "in_scope": in_scope},
+    )
     return run.to_dict()
 
 
@@ -251,10 +285,20 @@ async def resume_flow_run(
     principal: Principal = Depends(get_current_principal),
 ):
     """Resume a run parked on a manual_gate down the chosen decision edge. The edge must be one the gate offers, and a
-    run that is already decided is left as it is."""
-    await get_owned_or_404(FlowRun, run_id, principal.tenant, "Flow run not found")
+    run that is already decided is left as it is. A member may decide only a gate whose device is inside the run's
+    start node scope, in a flow with no admin-only step."""
+    run = await get_owned_or_404(FlowRun, run_id, principal.tenant, "Flow run not found")
+    edge = body.edge.strip()
+    refused = await flow_permissions.gate_refused(principal, run, alert_id=None, action=edge)
+    if refused is not None:
+        raise HTTPException(status_code=403, detail=refused)
     from controller.services import atc
-    result = await atc.resume_manual_gate(run_id, body.edge.strip(), principal.email)
+    result = await atc.resume_manual_gate(run_id, edge, principal.email)
     if result is None:
         raise HTTPException(status_code=400, detail="Could not resume run")
+    await record_audit(
+        principal, "flow.gate.resume", target_type="flow_run", target_id=str(result.id),
+        detail={"flow_id": result.flow_id, "device_id": str(result.device_id) if result.device_id else None,
+                "edge": edge, "status": result.status},
+    )
     return result.to_dict()

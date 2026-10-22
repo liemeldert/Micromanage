@@ -130,6 +130,8 @@ async def run_checks(url: str) -> int:
                        ("tenants", "fv_escrow_cert_expires_at"),
                        ("tenants", "profile_signing_cert_expires_at"),
                        ("users", "mfa_changed_at"),
+                       ("flow_runs", "started_by"),
+                       ("flow_runs", "started_role"),
                        ("devices", "reenrollment_allowed_until"),
                        ("devices", "erase_acked_at"),
                        ("devices", "push_token_enc"),

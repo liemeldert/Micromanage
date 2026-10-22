@@ -12,8 +12,8 @@ from fastapi import HTTPException
 from fastapi.responses import Response
 from tortoise import Tortoise
 
-# As in verify_config_authz.py, the YAML base goes into the environment before anything imports the app, so every reader
-# sees the temp tree.
+# As in verify_config_permissions.py, the YAML base goes into the environment before anything imports the app, so
+# every reader sees the temp tree.
 _BASE = Path(tempfile.mkdtemp())
 os.environ["YAML_CONFIG_PATH"] = str(_BASE)
 

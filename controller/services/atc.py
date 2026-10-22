@@ -11,6 +11,7 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 
 from controller.models.tenant import Device, FlowRun, Tenant
 from controller.services import atc_alerts, atc_context, atc_flow, atc_node_effects, flow_gate
+from controller.services.flow_permissions import FLOW_PERMISSION_ERRORS, ROLE_SYSTEM, admin_only_node, run_role
 from controller.services.atc_alerts import (
     _authored_gate_timeout, _duration_phrase, _ensure_in_setup_alert, _escalate_gate_alert,
     _gate_options, _gate_schedule, _raise_gate_alert, _raise_run_failed_alert,
@@ -191,7 +192,9 @@ async def _supersede(device_id: Any, flow_id: str, start_id: str) -> None:
 
 async def _start_run(device: Device, flow: Dict[str, Any], start_node: Dict[str, Any],
                      event_kind: str,
-                     trigger_ref: Optional[str] = None) -> Optional[FlowRun]:
+                     trigger_ref: Optional[str] = None, *,
+                     started_by: str = ROLE_SYSTEM,
+                     started_role: str = ROLE_SYSTEM) -> Optional[FlowRun]:
     """Create a FlowRun entering at start_node and advance it once. trigger_ref names whatever started the run
     for the kinds that have one (e.g. a compliance alert id); device-triggered kinds have nothing to point at
     and leave it None. Rides in context["trigger"], not a column, since only one screen reads it."""
@@ -205,6 +208,8 @@ async def _start_run(device: Device, flow: Dict[str, Any], start_node: Dict[str,
             flow_hash=_flow_hash(flow),
             status="running",
             current_node=str(start_node.get("id")),
+            started_by=started_by,
+            started_role=started_role,
             # Own copy: _load_flows and a sweep hand out one shared/cached document, so without a deepcopy every
             # run's context would alias the same dict.
             context={"flow": copy.deepcopy(flow), "timeline": [], "visited": [],
@@ -226,7 +231,7 @@ async def _start_run(device: Device, flow: Dict[str, Any], start_node: Dict[str,
 
 async def start_flows_for_event(device: Device, event_kind: str) -> List[FlowRun]:
     """Start runs for every matching start node in every enabled flow. Enroll events supersede a prior run;
-    everything else dedups against an active run. Best-effort: one bad flow/node does not stop the rest."""
+    everything else dedups against an active run. One bad flow or node does not stop the rest."""
     runs: List[FlowRun] = []
     flows = _enabled_flows(str(device.tenant_id))
     if not flows:
@@ -288,31 +293,43 @@ async def start_flows_for_event(device: Device, event_kind: str) -> List[FlowRun
     return runs
 
 
+def resolve_start(tenant_id: str, start_node_id: str,
+                  flow_id: Optional[str] = None) -> Optional[Tuple[Dict[str, Any], Dict[str, Any]]]:
+    """The (flow, start node) a manual start names among the enabled flows. Without flow_id every enabled flow is
+    searched, and an id present in more than one is refused rather than guessed at. None when the node does not exist,
+    is not a start node, or is ambiguous."""
+    if flow_id is not None:
+        flows = [f for f in _enabled_flows(str(tenant_id)) if str(f.get("id")) == str(flow_id)]
+    else:
+        flows = _enabled_flows(str(tenant_id))
+    matches = [(f, _nodes_by_id(f).get(start_node_id)) for f in flows]
+    matches = [(f, n) for f, n in matches if n and n.get("type") == "start"]
+    if len(matches) != 1:
+        if len(matches) > 1:
+            logger.warning("ATC: start node %s is ambiguous across flows %s",
+                           start_node_id,
+                           [str(f.get("id")) for f, _ in matches])
+        return None
+    return matches[0]
+
+
 async def start_run_from_start(device: Device, start_node_id: str,
-                               flow_id: Optional[str] = None
+                               flow_id: Optional[str] = None, *,
+                               started_by: str = ROLE_SYSTEM,
+                               started_role: str = ROLE_SYSTEM,
                                ) -> Optional[FlowRun]:
     """Manually start a run from a specific start node (testing, API), superseding an active run from the same flow and
-    start. Without flow_id every enabled flow is searched, and an id present in more than one is refused rather than
-    guessed at. Returns None if the node does not exist, is not a start node, is ambiguous, or the start fails."""
+    start. The node is found by resolve_start. Returns None if it finds nothing or the start fails."""
     try:
-        if flow_id is not None:
-            flows = [f for f in _enabled_flows(str(device.tenant_id))
-                     if str(f.get("id")) == str(flow_id)]
-        else:
-            flows = _enabled_flows(str(device.tenant_id))
-        matches = [(f, _nodes_by_id(f).get(start_node_id)) for f in flows]
-        matches = [(f, n) for f, n in matches if n and n.get("type") == "start"]
-        if len(matches) != 1:
-            if len(matches) > 1:
-                logger.warning("ATC: start node %s is ambiguous across flows %s",
-                               start_node_id,
-                               [str(f.get("id")) for f, _ in matches])
+        resolved_start = resolve_start(str(device.tenant_id), start_node_id, flow_id)
+        if resolved_start is None:
             return None
-        flow, node = matches[0]
+        flow, node = resolved_start
         resolved = str(flow.get("id") or "flow")
         await _supersede(device.id, resolved, start_node_id)
         kind = (node.get("params") or {}).get("kind") or "manual"
-        return await _start_run(device, flow, node, str(kind))
+        return await _start_run(device, flow, node, str(kind),
+                                started_by=started_by, started_role=started_role)
     except Exception:
         logger.exception("ATC: manual start of node %s failed for device %s",
                          start_node_id, device.id)
@@ -327,8 +344,8 @@ async def _claim_waiting(run_id: Any, **filters: Any) -> int:
 
 
 async def advance_on_signal(device_id: str, signal: str, ref: Optional[str] = None) -> None:
-    """Resume waiting runs for a device when a device signal arrives. Best-effort: called from webhook handlers,
-    so it swallows and logs any failure rather than breaking webhook processing."""
+    """Resume waiting runs for a device when a device signal arrives. Called from webhook handlers, so a
+    failure is logged and ignored instead of breaking webhook processing."""
     try:
         device = await Device.get_or_none(id=device_id)
         if device is None:
@@ -346,7 +363,7 @@ async def advance_on_signal(device_id: str, signal: str, ref: Optional[str] = No
                 if not _signal_expected(run, signal, ref):
                     continue
                 if signal not in _REFLESS_SIGNALS:
-                    # One piece of a barrier that may want several. Record the arrival before deciding anything: the
+                    # One piece of a barrier that may need several. Record the arrival before deciding anything: the
                     # rest of them come in on their own webhook calls, possibly after a restart.
                     arrived, total = await _record_satisfied(run, signal, ref)
                     if arrived < total:
@@ -429,7 +446,7 @@ async def sweep_timeouts(tenant: Tenant) -> int:
         except Exception:
             logger.exception("ATC: sweeping run %s failed", run.id)
 
-    # A NULL deadline never satisfies the <= above, and pre-ladder code parked every manual gate with none, so
+    # A NULL deadline never satisfies the <= above, and legacy manual gates were parked with none, so
     # adopt those onto the ladder here; from the next tick on they age like any other gate.
     try:
         legacy = await FlowRun.filter(
@@ -661,6 +678,9 @@ async def _advance(run: FlowRun, device: Device) -> None:
             # Raises an alert for someone to intervene.
             await _park_manual(run, device, node)
             return
+        if run_role(run) == "member" and admin_only_node(node):
+            await _refuse_member_node(run, node)
+            return
 
         try:
             next_id = await _execute_node(run, device, node)
@@ -675,6 +695,20 @@ async def _advance(run: FlowRun, device: Device) -> None:
         run.current_node = next_id
 
     await _fail(run, "flow exceeded the node-per-advance cap (possible loop)")
+
+
+async def _refuse_member_node(run: FlowRun, node: Dict[str, Any]) -> None:
+    """Fail a member-started run at an admin-only node, with an audit row naming the node."""
+    from controller.services.audit import record_system_audit
+    tenant = await Tenant.get_or_none(id=run.tenant_id)
+    if tenant is not None:
+        await record_system_audit(
+            tenant, "flow.node.refused", target_type="flow_run", target_id=str(run.id),
+            detail={"flow_id": run.flow_id, "node_id": node.get("id"), "node_type": node.get("type"),
+                    "device_id": str(run.device_id) if run.device_id else None,
+                    "started_by": run.started_by},
+        )
+    await _fail(run, FLOW_PERMISSION_ERRORS["node_refused"].format(node=node.get("id"), type=node.get("type")))
 
 
 async def _execute_node(run: FlowRun, device: Device, node: Dict[str, Any]) -> Optional[str]:
@@ -814,7 +848,7 @@ async def _sweep_manual_gate(run: FlowRun) -> int:
 
 
 async def _adopt_legacy_gate(run: FlowRun) -> int:
-    """Attach the escalation ladder to a gate parked by the pre-ladder code. Those rows carry
+    """Attach the escalation ladder to a legacy gate parked without one. Those rows carry
     waiting_signal='manual' with no deadline, so the sweep's deadline query never sees them and they wait
     forever. Adopted at rung 0, not failed, since the time to answer starts now."""
     claimed = await FlowRun.filter(
@@ -929,7 +963,7 @@ async def _wait_already_satisfied(run: FlowRun, device: Device, node: Dict[str, 
                 device_id=device.id, app_id__in=pending, status="installed"
             ).count() == len(pending)
         if signal == "command_ack":
-            # Failed counts as answered: the device had its say about the command, even if what it said was no.
+            # Failed counts as answered, since the device replied to the command, even with an error.
             return await Task.filter(
                 id__in=pending, status__in=["completed", "failed"]
             ).count() == len(pending)

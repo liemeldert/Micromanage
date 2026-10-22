@@ -116,6 +116,9 @@ _AUX_DDL = [
     # models.tenant.FlowRun.
     'ALTER TABLE "flow_runs" ADD COLUMN IF NOT EXISTS "start_node" VARCHAR(100) NULL',
     'ALTER TABLE "flow_runs" ADD COLUMN IF NOT EXISTS "event_kind" VARCHAR(20) NULL',
+    # Who started a run and with which role. See models.tenant.FlowRun.
+    'ALTER TABLE "flow_runs" ADD COLUMN IF NOT EXISTS "started_by" VARCHAR(255) NULL',
+    'ALTER TABLE "flow_runs" ADD COLUMN IF NOT EXISTS "started_role" VARCHAR(16) NULL',
     'CREATE INDEX IF NOT EXISTS "idx_flowruns_dev_flow_start_event" '
     'ON "flow_runs" (device_id, flow_id, start_node, event_kind, started_at)',
     'CREATE INDEX IF NOT EXISTS "idx_flowruns_tenant_flow_start_event_dev" '
@@ -279,8 +282,7 @@ _AUX_DDL = [
     'CREATE INDEX IF NOT EXISTS "idx_agent_events_device_received" ON "agent_events" (device_id, received_at)',
 ]
 
-# Best-effort DDL: applied where possible, logged and skipped where not. For constraints that existing data might
-# already violate.
+# DDL applied where possible, logged and skipped where not, for constraints that existing data might already violate.
 _BEST_EFFORT_DDL = [
     # A physical device is uniquely identified within a tenant by its serial. Enforces one record per serial so
     # placeholder adoption / re-enroll can't create duplicates. Excludes blank serials (placeholders always have one).
@@ -431,7 +433,7 @@ def schema_fingerprint() -> str:
 
 
 async def _record_schema_state(log, pinned=None) -> None:
-    """Record that this database is at the running code's schema. A failure is logged and swallowed, since the schema is
+    """Record that this database is at the running code's schema. A failure is logged and ignored, since the schema is
     applied either way. It writes SQL on the pinned connection, because an ORM query would need a second pooled one.
     """
     from controller.models.tenant import SchemaState
@@ -464,8 +466,8 @@ async def schema_status() -> dict:
     try:
         latest = await SchemaState.all().order_by("-applied_at").first()
     except Exception:
-        # A database from before this table existed, read without init_schema (tenant_cli schema status). Nothing
-        # recorded is the honest answer.
+        # A database from before this table existed, read without init_schema (tenant_cli schema status), reports
+        # nothing recorded.
         latest = None
     return {
         "expected_fingerprint": expected,
@@ -516,8 +518,7 @@ async def init_db():
 
 
 async def init_db_no_schema():
-    """Connect without touching the schema, for read-only tooling that wants to describe the database as it is
-    (tenant_cli schema status)."""
+    """Connect without modifying the schema, for read-only tooling (tenant_cli schema status)."""
     enforce_database_url()
     await Tortoise.init(
         db_url=_pooled_url(DATABASE_URL),

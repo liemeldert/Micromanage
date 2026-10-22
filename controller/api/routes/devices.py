@@ -218,7 +218,7 @@ async def forget_device(
         "device.forget",
         target_type="device",
         target_id=device_id,
-        # Which kinds went, never their values.
+        # Which kinds were removed, never their values.
         detail={
             "serial_number": serial,
             "discarded_secret_kinds": discarded_kinds,
@@ -356,7 +356,7 @@ def _explain_scope(
     if serial and serial in include:
         matched = evaluate_scope(device, device_groups, scope)
         cherry_pick_reason = f"included: serial {serial} is cherry-picked in include_devices"
-        if not matched:  # defensive; evaluate_scope agrees include wins outright
+        if not matched:  # evaluate_scope matches an included serial outright
             return {"matched": False, "reason": cherry_pick_reason}
     else:
         groups = scope.get("groups") or []
@@ -408,7 +408,7 @@ async def explain_device_scope(
     device_id: str, principal: Principal = Depends(get_current_principal),
 ):
     """Explain why this device does or does not get each scoped profile, app, group and declaration (read-only,
-    scoping only; GET /api/v1/devices/{device_id}/ddm answers whether a declaration actually reaches the device)."""
+    scoping only; GET /api/v1/devices/{device_id}/ddm returns whether a declaration actually reaches the device)."""
     tenant = principal.tenant
     device = await get_owned_or_404(Device, device_id, tenant, "Device not found")
 
@@ -605,7 +605,7 @@ async def update_device_tags(
     body: DeviceTagsUpdate,
     principal: Principal = Depends(get_current_principal),
 ):
-    """Add and/or remove imperative tags on a device (member+).
+    """Add and/or remove imperative tags on a device. Admin only.
 
     Since tags can drive group membership, the write is followed by a group recompute and reactive reconcile.
     """
@@ -631,6 +631,15 @@ async def update_device_tags(
     if not add and not remove:
         raise HTTPException(status_code=400, detail="No tags to add or remove")
 
+    if not principal.is_admin:
+        await record_audit(
+            principal, "device.tags_refused", target_type="device", target_id=str(device.id),
+            detail={"add": add, "remove": remove, "serial_number": device.serial_number},
+        )
+        raise HTTPException(
+            status_code=403, detail="Only an admin can add or remove device tags. Ask an admin to change them.",
+        )
+
     written = await write_tags(device, add=add, remove=remove)
     if written is None:
         # Nothing changed, so skip the write, the reconcile and the audit.
@@ -638,8 +647,8 @@ async def update_device_tags(
                 "added": [], "removed": []}
     result, added, removed = written
 
-    # Recompute groups so profile and app scoping follows the new tags. Best effort: a malformed groups.yaml must not
-    # fail the tag write.
+    # Recompute groups so profile and app scoping follows the new tags. A malformed groups.yaml does not fail the
+    # tag write.
     groups_changed = False
     try:
         from controller.services.group_manager import current_groups

@@ -10,7 +10,8 @@ from controller.api.ids import (
     get_owned_or_404,
 )
 from controller.auth.dependencies import Principal, get_current_principal, require_admin
-from controller.models.tenant import Alert, Device
+from controller.models.tenant import Alert, Device, FlowRun
+from controller.services import flow_permissions
 from controller.services.audit import record_audit
 from controller.utils.yaml_dispatcher_models import VALID_SEVERITIES
 
@@ -146,7 +147,13 @@ async def resolve_alert(
     # A manual_gate alert dismissed without a decision must not leave its run parked forever, so the run is failed. A
     # real decision comes through the run's own resume path, which resolves the alert itself.
     detail = alert.detail or {}
+    gate_run = None
     if detail.get("kind") == "atc_gate" and detail.get("flow_run_id"):
+        gate_run = await FlowRun.get_or_none(id=detail["flow_run_id"], tenant=principal.tenant)
+        if gate_run is not None:
+            refused = await flow_permissions.gate_refused(principal, gate_run, alert_id=str(alert.id), action="dismiss")
+            if refused is not None:
+                raise HTTPException(status_code=403, detail=refused)
         from controller.services import atc
         await atc.fail_gate_run(detail["flow_run_id"], f"gate dismissed by {principal.email}")
     from controller.services import dispatcher
@@ -169,6 +176,14 @@ async def resolve_alert(
                     "reveal_count": detail.get("reveal_count"),
                     "last_revealed_by": detail.get("last_revealed_by"),
                     "reason": reason or None},
+        )
+    if gate_run is not None:
+        await gate_run.refresh_from_db()
+        await record_audit(
+            principal, "flow.gate.alert", target_type="flow_run", target_id=str(gate_run.id),
+            detail={"alert_id": str(alert.id), "flow_id": gate_run.flow_id,
+                    "device_id": str(gate_run.device_id) if gate_run.device_id else None,
+                    "action": "dismiss", "status": gate_run.status},
         )
     return alert.to_dict()
 
@@ -210,9 +225,22 @@ async def alert_action(
         run_id = detail.get("flow_run_id")
         if not run_id:
             raise HTTPException(status_code=400, detail="Gate alert has no linked run")
-        result = await atc.resume_manual_gate(run_id, body.action_key.strip(), principal.email)
+        run = await FlowRun.get_or_none(id=run_id, tenant=principal.tenant)
+        if run is None:
+            raise HTTPException(status_code=404, detail="Flow run not found")
+        edge = body.action_key.strip()
+        refused = await flow_permissions.gate_refused(principal, run, alert_id=str(alert.id), action=edge)
+        if refused is not None:
+            raise HTTPException(status_code=403, detail=refused)
+        result = await atc.resume_manual_gate(run_id, edge, principal.email)
         if result is None:
             raise HTTPException(status_code=400, detail="Could not resume run")
+        await record_audit(
+            principal, "flow.gate.alert", target_type="flow_run", target_id=str(result.id),
+            detail={"alert_id": str(alert.id), "flow_id": result.flow_id,
+                    "device_id": str(result.device_id) if result.device_id else None,
+                    "action": edge, "status": result.status},
+        )
         return {"message": "Decision recorded", "run": result.to_dict()}
     raise HTTPException(status_code=400, detail="This alert has no typed actions")
 
