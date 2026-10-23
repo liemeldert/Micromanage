@@ -2,45 +2,33 @@
 
 Micromanage is an open source MDM platform for Apple devices. It aims to be simple to run and easy to extend.
 
+<img width="5960" height="3200" alt="image" src="https://github.com/user-attachments/assets/fa0c1fbf-2919-46d5-b556-a9bb6ed7da2b" />
+*try out a (very very staged and fake) demo version [here](https://demo.micromanage.app)*
+The data is just randomly generated automatically, so if this was a real company they'd be totally screwed 
+since they have hundreds of errors.
+
 Micromanage at its heart is built off of the NanoMDM project, and is designed to be an orchestration layer and interface
-on top of their work.
+on top of their work. They originally started with MicroMDM, which is where the Micro- in Micromanage is from.
+This is a rewrite from a version that used MicroMDM, and Nanomanage does not have as good of a ring to it...
 
 I have spent a good deal of effort getting things to the state they are in now, but I am just one person. I
-do not have the budget or time of a commercial team to dedicate to this project. I have already spent a decent amount of
-my personal funds on testing devices and accounts to get things working. Micromanage is and will always be free and
+do not have the budget or time of a commercial team to dedicate to this project. Micromanage is and will always be free and
 open-source software with no expectation of payment. However, should you want to support me and this project, I have
-a [Ko-fi page here](https://ko-fi.com/beomm) if you would like to donate, which I would dedicate to the continued
-development of Micromanage including testing devices etc.
+a [Ko-fi page here](https://ko-fi.com/beomm) if you would like to donate. Also, anyone that happens to be decommissioning
+devices and aren't sure what to do with them, I would be interested in some more testing devices 👀
 
-Micromanage began as a personal project a few years back because I was working for a team under leadership that was much
-too cheap to pay for anything but the bare minimum number of licenses to cover in-use iPads.
-
-This older iteration was based off of MicroMDM, which was helpful to give me an idea as to how an MDM should be
-designed, but also felt like putting effort into a dead end.
-
-While working on the original MicroMDM-based Micromanage version, I quickly began to notice how many little details in
-the commercial MDM product we used bothered me, and turned me into the MDM version of discount Martin Luther leading me
-to pinning my own 95 theses to JAMF's front door. They called the police on me after I broke a pane of glass on their
-revolving door. <sub>may or may not be a true story</sub>
-I built this project to get more familiar with MDM and to cosplay as a sysadmin at home; it is not a commercial product
-or something I profit from. That said, as someone that's been around school IT a lot, more affordable and
-especially open-source options for device management are sorely needed. It's hard to justify the cost of a commercial
-MDM solution for a small school where they only have a few hundred devices, and very few shared devices that someone
-*could* just set up manually (but where's the fun in that).
+Micromanage began as a personal project a few years back because I was working for a school that didn't have management
+on their Apple TVs and did not have the budget to pay an MDM license. I did not want to have to manually go and update
+each one slowly, so I started writing a simple MDM. It never actually ended up being used on those Apple TVs though.
 
 Most of my time still goes into the project rather than the docs, because writing documentation is really boring.
-[DEPLOY.md](DEPLOY.md) has some instructions on how to deploy Micromanage, but it is only a starting point for
-your own deployment.
 
-I am personally eating the Micromanage dog food by running all my personal Apple stuff on it, as well as a few testing
-labs with VMs for development reasons. While so far it is running quite nicely, it does not mean there is a support
-contract behind it. As such, I would not recommend using it for anything high stakes.
+[DEPLOY.md](DEPLOY.md) has some instructions on how to deploy Micromanage, but it is only a starting point for
+your own deployment. Better documentation is something that will be coming soon™️
 
 * I am not responsible for any damage or data loss that may occur from using this software. Use at your own risk.
 * Should your iPhone turn into an evil dragon which then snatches your wig in front of someone you're trying to impress,
   I will not be here to provide emotional support or give you a new wig unless the story is particularly funny.
-* I still eat my own dogfood. My roommate is not amused that our Apple TV randomly reset itself in the middle of an
-  episode of Love Island.
 * Read "What it does not do yet" before you use this for anything more important.
 
 ## What it does
@@ -106,7 +94,7 @@ with what I own.
 macOS installs packages (`InstallApplication` with a manifest URL) only when it is a product archive:
 build it with `productbuild` and sign it with a Developer ID Installer certificate.
 
-At the moment, packages have to be signed and silently fail if not. Soon I plan to add better checks overall for apps.
+At the moment, packages have to be signed as Micromanage cannot sign them itself.
 
 ## Micromanage IAC Controller
 
