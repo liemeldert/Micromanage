@@ -3,7 +3,7 @@
 Micromanage is an open source MDM platform for Apple devices. It aims to be simple to run and easy to extend.
 
 <img width="5960" height="3200" alt="image" src="https://github.com/user-attachments/assets/fa0c1fbf-2919-46d5-b556-a9bb6ed7da2b" />
-*try out a (very very staged and fake) demo version [here](https://demo.micromanage.app)*
+*try out a (very very staged and fake) demo version [here](https://demo.micromanage.app) *
 The data is just randomly generated automatically, so if this was a real company they'd be totally screwed 
 since they have hundreds of errors.
 
