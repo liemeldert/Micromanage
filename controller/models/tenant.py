@@ -15,8 +15,7 @@ class Tenant(Model):
     # controller.auth.
     auth_config = fields.JSONField(default=dict)
     dep_enabled = fields.BooleanField(default=False)
-    # Dynamic device naming: a template such as IT-{serial} plus apply_on_enroll. Mirrored from config.yaml. See
-    # services.naming.
+    # Dynamic device naming: a template such as IT-{serial}, mirrored from config.yaml. See services.naming.
     device_naming = fields.JSONField(default=dict)
     # The tenant default agent policy; null when config.yaml has no agent block.
     agent_policy = fields.JSONField(null=True)
@@ -24,11 +23,12 @@ class Tenant(Model):
     # mirrored from the linked DepServer on upload and admin-entered otherwise.
     apns_cert_expires_at = fields.DatetimeField(null=True)
     dep_token_expires_at = fields.DatetimeField(null=True)
-    # Declarative Device Management master switch (services.ddm_manager). Off by default: enabling queues a
+    # Declarative Device Management master switch (services.ddm_manager), off by default. Enabling it queues a
     # DeclarativeManagement sync to every supported device on the next reconcile.
     ddm_enabled = fields.BooleanField(default=False)
     # Reverse-DNS base for every PayloadIdentifier profile_manager composes, e.g. "com.acme.mdm". Null means the
-    # built-in "com.mdm.<tenant id>" base. Changing it while profiles are deployed strands the installed copies.
+    # built-in "com.mdm.<tenant id>" base. Changing it while profiles are deployed leaves the installed copies under the
+    # old identifiers.
     payload_identifier_prefix = fields.CharField(max_length=120, null=True)
     # Ceiling on the bytes this tenant may keep in its object store prefix. Null falls back to
     # MDM_DEFAULT_STORAGE_QUOTA_BYTES. Set by the operator only; tenant admins can read it, not change it.
@@ -80,9 +80,9 @@ class User(Model):
 
 
 class UserMFA(Model):
-    """A user's console two-factor enrollment. One row per user. secret_enc is Fernet-encrypted at rest, like
-    the DEP token. confirmed_at stays null until one accepted code, and an unconfirmed row never blocks
-    login. last_step rejects replay of an observed code within its tolerated step window."""
+    """A user's console two-factor enrollment, one row per user. secret_enc is Fernet-encrypted at rest like the DEP
+    token, confirmed_at stays null until a code is accepted, and an unconfirmed row does not block login. last_step
+    rejects replay of an observed code within its tolerated step window."""
     id = fields.UUIDField(pk=True)
     user = fields.ForeignKeyField("models.User", related_name="mfa", unique=True)
     secret_enc = fields.TextField()
@@ -282,10 +282,9 @@ class EnrollmentProfile(Model):
 
 
 class EnrollmentAttempt(Model):
-    """A POST-SCEP webhook check-in that could not be turned into, or matched to, a Device row (the two silent drop
-    points inside _upsert_device). tenant is set only when a Tenant row was resolved. The request's tenant id is
-    unverified (anyone can pass ?tenant=), so on a no_tenant drop it is not stored in the FK or used to scope a
-    query."""
+    """A POST-SCEP webhook check-in that could not be turned into, or matched to, a Device row. tenant is set only when
+    a Tenant row was resolved; the request's tenant id is unverified, so on a no_tenant drop it is not stored in the FK
+    or used to scope a query."""
     id = fields.UUIDField(pk=True)
     tenant = fields.ForeignKeyField("models.Tenant", related_name="enrollment_attempts", null=True)
     udid = fields.CharField(max_length=40, null=True)
@@ -452,15 +451,15 @@ DEDUP_KEY_TYPES = ("profile_install", "profile_remove", "app_install")
 
 
 def task_dedup_key(task_type: str, details: Dict[str, Any]) -> Optional[str]:
-    """The duplicate key for a task, or None when it has no dedup identity. The reconciler queues no second task while
-    one with the same (device, type, key) is pending or running. Shared by four call sites, and never raises, as
-    Task.save() and the reconcile cycle call it."""
+    """The duplicate key for a task, or None when it has no dedup identity, and never raises, as Task.save() and the
+    reconcile cycle call it. The reconciler queues no second task while one with the same (device, type, key) is pending
+    or running."""
     if not isinstance(details, dict):
         # A JSONField holds whatever was put in it, and a list here would make every .get() below raise.
         return None
     if task_type == "profile_install":
         info = details.get("profile_info")
-        # .get() on a truthy non-object raises AttributeError, and this runs inside save().
+        # .get() on a truthy non-object raises AttributeError.
         if isinstance(info, dict) and info:
             return str(info.get("id"))
     elif task_type == "profile_remove":
@@ -487,7 +486,7 @@ class Task(Model):
     # if no command was enqueued.
     command_uuid = fields.CharField(max_length=64, null=True)
     # The reconciler's duplicate-task key, mirrored from details by save() so the guard does not read every pending
-    # task's details JSONB each cycle. Unbounded TEXT.
+    # task's details JSONB each cycle.
     dedup_key = fields.TextField(null=True)
     error = fields.TextField(null=True)
     created_at = fields.DatetimeField(auto_now_add=True)
@@ -852,7 +851,6 @@ class DeviceSecret(Model):
             "revealed_at": self.revealed_at.isoformat() if self.revealed_at else None,
             "revealed_by": self.revealed_by,
             "reveal_count": self.reveal_count,
-            # "sealed" = never revealed
             "sealed": self.revealed_at is None,
         }
 

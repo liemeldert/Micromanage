@@ -23,7 +23,6 @@ import {
 import {notifications} from "@mantine/notifications";
 import {IconArrowLeft, IconClockExclamation, IconExternalLink} from "@tabler/icons-react";
 import {api, ApiError, type DiscoveredTenant} from "../../../lib/api";
-import {SESSION_MARKER} from "../../../lib/auth-context";
 
 type Step = "email" | "tenant" | "password" | "external" | "mfa";
 
@@ -82,7 +81,7 @@ function LoginFlow() {
     // localStorage. The proxy has already set the session cookie. login() cannot serve the password step: it commits
     // to the response before a second factor is known to be needed.
     const finishLogin = async (tenantId: string) => {
-        const me = await api.me(SESSION_MARKER).catch(() => null);
+        const me = await api.me().catch(() => null);
         localStorage.setItem(
             AUTH_STORAGE_KEY,
             JSON.stringify({tenantId, email: email.trim(), role: me?.role ?? null}),

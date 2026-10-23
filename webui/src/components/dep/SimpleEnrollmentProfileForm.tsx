@@ -19,7 +19,6 @@ import type {Device} from "../../../lib/api";
 import {api, ApiError, configConflict, type DepSkipKey} from "../../../lib/api";
 import type {Profile, ProfilesConfig} from "../../../lib/config";
 import {renderNameTemplate, showConfigConflict, unknownNameVariables} from "../../../lib/config";
-import {useAuth} from "../../../lib/auth-context";
 import {NameTemplateInput} from "../config/NameTemplateInput";
 // Target platforms come from the shared vocabulary the full profile editor and
 // the controller's validator use, so both editors offer the same list.
@@ -78,7 +77,6 @@ export function SimpleEnrollmentProfileForm({
     onClose: () => void;
     onCreated: (profileId: string) => void;
 }) {
-    const {token} = useAuth();
     const [loading, setLoading] = useState(true);
     const [loadError, setLoadError] = useState<string | null>(null);
     const [existing, setExisting] = useState<Profile[]>([]);
@@ -100,11 +98,7 @@ export function SimpleEnrollmentProfileForm({
     const [skipItems, setSkipItems] = useState<string[]>([...DEFAULT_SKIP]);
     // Naming (tenant default).
     const [nameTemplate, setNameTemplate] = useState("");
-    const [applyOnEnroll, setApplyOnEnroll] = useState(true);
-    const [initialNaming, setInitialNaming] = useState<{ template: string; apply: boolean }>({
-        template: "",
-        apply: false,
-    });
+    const [initialTemplate, setInitialTemplate] = useState("");
     // Advanced.
     const [awaitConfigured, setAwaitConfigured] = useState(false);
     const [allowPairing, setAllowPairing] = useState(true);
@@ -114,14 +108,14 @@ export function SimpleEnrollmentProfileForm({
     const [department, setDepartment] = useState("");
 
     useEffect(() => {
-        if (!opened || !token) return;
+        if (!opened) return;
         let alive = true;
         setLoading(true);
         setLoadError(null);
         Promise.all([
-            api.getConfigWithVersion(token, "profiles"),
-            api.getDepSkipKeys(token).catch(() => ({skip_keys: [] as DepSkipKey[]})),
-            api.getTenant(token).catch(() => null),
+            api.getConfigWithVersion("profiles"),
+            api.getDepSkipKeys().catch(() => ({skip_keys: [] as DepSkipKey[]})),
+            api.getTenant().catch(() => null),
         ])
             .then(([cfg, skip, tenant]) => {
                 if (!alive) return;
@@ -131,17 +125,14 @@ export function SimpleEnrollmentProfileForm({
                 const dn = tenant?.device_naming ?? {};
                 const tpl = typeof dn.template === "string" ? dn.template : "";
                 setNameTemplate(tpl);
-                // The server reads a missing apply_on_enroll as false, so a stored template with the flag absent
-                // shows as off here too. Otherwise creating a profile would switch naming on unasked.
-                setApplyOnEnroll(tpl ? dn.apply_on_enroll === true : true);
-                setInitialNaming({template: tpl, apply: !!dn.apply_on_enroll});
+                setInitialTemplate(tpl);
             })
             .catch((e) => alive && setLoadError(e instanceof ApiError ? e.message : String(e)))
             .finally(() => alive && setLoading(false));
         return () => {
             alive = false;
         };
-    }, [opened, token]);
+    }, [opened]);
 
     const skipOptions =
         skipCatalog.length > 0
@@ -153,15 +144,13 @@ export function SimpleEnrollmentProfileForm({
 
     const namePreview = renderNameTemplate(nameTemplate, SAMPLE_DEVICE);
     const unknownVars = unknownNameVariables(nameTemplate);
-    const namingChanged =
-        nameTemplate.trim() !== initialNaming.template || applyOnEnroll !== initialNaming.apply;
+    const namingChanged = nameTemplate.trim() !== initialTemplate;
 
     // Re-read profiles.yaml without touching the form, which is what the conflict modal's Reload does: the
     // filled-in fields stay, and the next attempt is written on top of the other profile rather than over it.
     async function reloadExisting() {
-        if (!token) return;
         try {
-            const res = await api.getConfigWithVersion(token, "profiles");
+            const res = await api.getConfigWithVersion("profiles");
             setExisting(((res.data as unknown as ProfilesConfig).profiles ?? []) as Profile[]);
             setVersion(res.version);
         } catch (e) {
@@ -173,7 +162,6 @@ export function SimpleEnrollmentProfileForm({
     }
 
     async function create() {
-        if (!token) return;
         const trimmed = name.trim();
         if (!trimmed) {
             notifications.show({color: "red", message: "Give the profile a name."});
@@ -210,14 +198,14 @@ export function SimpleEnrollmentProfileForm({
                 payload,
             };
 
-            await api.updateConfig(token, "profiles", {profiles: [...existing, profile]},
+            await api.updateConfig("profiles", {profiles: [...existing, profile]},
                 undefined, {ifMatch: version});
 
             // Tenant-default naming template, applied to all devices at enrollment. Written only when it was set or
             // changed here.
             if (namingChanged && nameTemplate.trim()) {
-                await api.updateTenant(token, {
-                    device_naming: {template: nameTemplate.trim(), apply_on_enroll: applyOnEnroll},
+                await api.updateTenant({
+                    device_naming: {template: nameTemplate.trim()},
                 });
             }
 
@@ -332,8 +320,8 @@ export function SimpleEnrollmentProfileForm({
 
                     <Divider label="Device naming" labelPosition="left"/>
                     <Text size="xs" c="dimmed" mt={-8}>
-                        Sets the tenant-wide default name applied to devices as they enroll. A group-specific
-                        naming rule (Groups → device naming) overrides this for its members.
+                        Names a device when it enrolls without a name. A group-specific naming rule (Groups →
+                        device naming) takes precedence for its members.
                     </Text>
                     <NameTemplateInput
                         label="Device name template"
@@ -352,12 +340,6 @@ export function SimpleEnrollmentProfileForm({
                                     as empty.
                                 </Alert>
                             )}
-                            <Switch
-                                label="Apply automatically on enrollment"
-                                description="When off, the template is only offered as a suggested name in the rename dialog."
-                                checked={applyOnEnroll}
-                                onChange={(e) => setApplyOnEnroll(e.currentTarget.checked)}
-                            />
                         </>
                     )}
 

@@ -36,7 +36,6 @@ import {
 import {api, ApiError, type DepDevice, type DepServerDetail} from "../../../lib/api";
 import {saveTextFile} from "../../../lib/download";
 import type {Profile} from "../../../lib/config";
-import {useAuth} from "../../../lib/auth-context";
 import {SimpleEnrollmentProfileForm} from "./SimpleEnrollmentProfileForm";
 import {GlassCard} from "../ui/GlassCard";
 
@@ -73,7 +72,6 @@ export function DepServerPanel({
     onChanged: (s: DepServerDetail) => void;
     onUnlinked: () => void;
 }) {
-    const {token} = useAuth();
     const [server, setServer] = useState<DepServerDetail>(initial);
     const [devices, setDevices] = useState<DepDevice[]>([]);
     const [depProfiles, setDepProfiles] = useState<{ id: string; name: string }[]>([]);
@@ -89,13 +87,12 @@ export function DepServerPanel({
     useEffect(() => setServer(initial), [initial]);
 
     const reload = useCallback(async () => {
-        if (!token) return;
         setLoading(true);
         try {
             const [detail, devs, cfg] = await Promise.all([
-                api.getDepServer(token, initial.id),
-                api.listDepDevices(token, initial.id),
-                api.getConfig(token, "profiles").catch(() => ({profiles: []})),
+                api.getDepServer(initial.id),
+                api.listDepDevices(initial.id),
+                api.getConfig("profiles").catch(() => ({profiles: []})),
             ]);
             setServer(detail);
             onChanged(detail);
@@ -115,7 +112,7 @@ export function DepServerPanel({
             setLoading(false);
         }
         // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [token, initial.id]);
+    }, [initial.id]);
 
     useEffect(() => {
         reload();
@@ -128,10 +125,9 @@ export function DepServerPanel({
     }, [server.profiles]);
 
     async function sync() {
-        if (!token) return;
         setSyncing(true);
         try {
-            const res = await api.syncDepServer(token, server.id);
+            const res = await api.syncDepServer(server.id);
             if (res.ok) {
                 notifications.show({
                     color: "green",
@@ -158,10 +154,9 @@ export function DepServerPanel({
     }
 
     async function pushProfile(profileId: string) {
-        if (!token) return;
         setBusy(true);
         try {
-            await api.pushDepProfile(token, server.id, profileId);
+            await api.pushDepProfile(server.id, profileId);
             notifications.show({color: "green", message: `Pushed "${profileId}" to Apple.`});
             await reload();
         } catch (e) {
@@ -176,9 +171,8 @@ export function DepServerPanel({
     }
 
     async function setDefault(profileId: string | null) {
-        if (!token) return;
         try {
-            const updated = await api.setDepDefaultProfile(token, server.id, profileId);
+            const updated = await api.setDepDefaultProfile(server.id, profileId);
             setServer((s) => ({...s, default_profile_id: updated.default_profile_id}));
             onChanged({...server, default_profile_id: updated.default_profile_id});
             notifications.show({
@@ -197,7 +191,7 @@ export function DepServerPanel({
         devices.filter((d) => selected.has(d.id)).map((d) => d.serial_number);
 
     async function assignSelected() {
-        if (!token || !assignProfileId) return;
+        if (!assignProfileId) return;
         const serials = selectedSerials();
         if (!serials.length) return;
         setBusy(true);
@@ -205,7 +199,7 @@ export function DepServerPanel({
             const {
                 results,
                 retry_after_seconds
-            } = await api.assignDepProfile(token, server.id, assignProfileId, serials);
+            } = await api.assignDepProfile(server.id, assignProfileId, serials);
             const ok = Object.values(results).filter((r) => r === "SUCCESS").length;
             // Apple returns this only when at least one device came back THROTTLED rather than assigned. Wait the
             // stated interval before retrying those serials.
@@ -231,12 +225,11 @@ export function DepServerPanel({
     }
 
     async function unassignSelected() {
-        if (!token) return;
         const serials = selectedSerials();
         if (!serials.length) return;
         setBusy(true);
         try {
-            await api.unassignDepProfile(token, server.id, serials);
+            await api.unassignDepProfile(server.id, serials);
             notifications.show({color: "green", message: `Unassigned ${serials.length} device(s).`});
             setSelected(new Set());
             await reload();
@@ -265,10 +258,9 @@ export function DepServerPanel({
             labels: {confirm: "Release (disown)", cancel: "Cancel"},
             confirmProps: {color: "red"},
             onConfirm: async () => {
-                if (!token) return;
                 setBusy(true);
                 try {
-                    await api.disownDepDevices(token, server.id, serials);
+                    await api.disownDepDevices(server.id, serials);
                     notifications.show({color: "green", message: `Released ${serials.length} device(s).`});
                     setSelected(new Set());
                     await reload();
@@ -282,10 +274,10 @@ export function DepServerPanel({
     }
 
     async function uploadTokenRenewal(file: File | null) {
-        if (!token || !file) return;
+        if (!file) return;
         setBusy(true);
         try {
-            await api.uploadDepToken(token, server.id, file);
+            await api.uploadDepToken(server.id, file);
             notifications.show({color: "green", message: "Server token renewed."});
             await reload();
         } catch (e) {
@@ -311,9 +303,8 @@ export function DepServerPanel({
             labels: {confirm: "Unlink", cancel: "Cancel"},
             confirmProps: {color: "red"},
             onConfirm: async () => {
-                if (!token) return;
                 try {
-                    await api.unlinkDepServer(token, server.id);
+                    await api.unlinkDepServer(server.id);
                     notifications.show({color: "green", message: "Unlinked."});
                     onUnlinked();
                 } catch (e) {

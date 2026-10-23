@@ -60,8 +60,8 @@ async def _confirm_accepted_apps(device: Device) -> list:
         fingerprint = _version_fingerprint(versions)
         previous = deployment.reported_version
         if previous is not None and (not fingerprint or fingerprint == previous):
-            # Confirmed before, and the device reports what it reported then, so the app being present says nothing
-            # about the version just sent. Leave it accepted for the next inventory or the confirmation timeout.
+            # Confirmed before and the device reports the version it reported then, so presence does not confirm the
+            # version just sent. The row stays accepted for the next inventory or the confirmation timeout.
             logger.info(
                 "webhook: %s still reports %s at %s, which is what it reported "
                 "when %s was last confirmed; not confirming this attempt",
@@ -70,8 +70,8 @@ async def _confirm_accepted_apps(device: Device) -> list:
             )
             continue
         if versions and deployment.app_version and deployment.app_version not in versions:
-            # Either the two version strings are written differently or the device holds a different build than the one
-            # sent, and this line is how the second case is found. Presence is confirmed either way.
+            # Either the version strings are formatted differently or the device holds a different build than the one
+            # sent, and this log line is how the second case shows up. Presence is confirmed in both cases.
             logger.info(
                 "webhook: %s reports %s at %s, deployed as %s; confirming presence anyway",
                 device.udid, bundle_id, fingerprint, deployment.app_version,
@@ -80,8 +80,8 @@ async def _confirm_accepted_apps(device: Device) -> list:
         deployment.install_date = datetime.utcnow()
         deployment.reported_version = fingerprint
         deployment.last_error = None
-        # The device holds the app, so the retry ladder starts over. The only place this is cleared: clearing it on the
-        # install command's acknowledgement lets a package that can never install cycle without the backoff growing.
+        # The device holds the app, so the retry backoff restarts. Cleared only here, as clearing it on the install
+        # acknowledgement would let a package that never installs retry without the backoff growing.
         deployment.failed_attempts = 0
         await deployment.save()
         promoted.append(deployment.app_id)
@@ -92,9 +92,10 @@ async def _confirm_accepted_apps(device: Device) -> list:
 
 async def _refresh_reported_inventory(device_id: Any, query_type: str,
                                       reason: str) -> None:
-    """Re-query what a device says it holds, after something changed it.
+    """Re-query what a device reports holding, after something changed it.
 
-    Without this the reported inventory disagrees with the deployment rows until the next manual refresh. Best-effort.
+    Without this the reported inventory disagrees with the deployment rows until the next manual refresh. A failure is
+    logged.
     """
     device = await Device.get_or_none(id=device_id)
     if device is None or not device.udid or device.enrollment_state != "enrolled":
@@ -199,7 +200,7 @@ def _defer(device_id: Any, coro) -> None:
 async def drain_deferred() -> None:
     """Wait until every deferred fan-out coroutine has finished. Test hook.
 
-    Deferred work rides the reconciler's shared background set, so this also drains anything else spawned there.
+    Deferred work runs in the reconciler's shared background set, so this also drains anything else spawned there.
     Production code never calls it."""
     from controller.services import reconciler
     while reconciler._background_tasks:
@@ -207,9 +208,9 @@ async def drain_deferred() -> None:
 
 
 async def _atc_signal(device_id: Any, signal: str, ref: Optional[str] = None) -> None:
-    """Best-effort: advance any ATC flow runs waiting on a device signal.
+    """Advance any ATC flow runs waiting on a device signal.
 
-    Runs deferred (see _defer), so it logs failures and swallows them. The webhook returns 200 either way."""
+    Runs deferred (see _defer), so failures are logged and ignored."""
     try:
         from controller.services import atc
         await atc.advance_on_signal(str(device_id), signal, ref)
@@ -218,10 +219,9 @@ async def _atc_signal(device_id: Any, signal: str, ref: Optional[str] = None) ->
 
 
 async def _dispatcher_eval(device_id: Any) -> None:
-    """Best-effort: re-evaluate Dispatcher compliance rules against fresh device state. Runs deferred (see _defer).
+    """Re-evaluate Dispatcher compliance rules against fresh device state. Runs deferred (see _defer).
 
-    Takes the id, not the object: re-reading keeps the queue entry id-sized rather than pinning the JSONB blobs just
-    persisted, and rules see committed state rather than what the capturing request held in memory."""
+    Takes the id rather than the object, so rules see committed state rather than what the request held in memory."""
     try:
         from controller.services import dispatcher
         await dispatcher.evaluate_device_id(device_id, "inventory")
@@ -326,8 +326,8 @@ async def _keep_push_token(device: Device, udid: str) -> None:
 
 
 async def _capture_bootstrap_token(device: Device, udid: str, *, locked: bool) -> None:
-    """Best-effort identity.capture_bootstrap_token. Unless locked, takes the device lock and identity.udid_lock and
-    refreshes the row first."""
+    """identity.capture_bootstrap_token with failures logged and ignored. Unless locked, takes the device lock and
+    identity.udid_lock and refreshes the row first."""
     try:
         if locked:
             await identity.capture_bootstrap_token(device, udid)
@@ -448,7 +448,6 @@ class WebhookHandler:
                     except Exception as exc:
                         logger.error("webhook: clearing the bootstrap token for %s failed: %s", udid, exc)
                 # A copy that could not be sealed is dropped, as the stored one no longer matches the device's token.
-                # token.
                 device.bootstrap_token_enc = sealed
                 fields.append("bootstrap_token_enc")
             device.bootstrap_token_escrowed = escrowed
@@ -460,7 +459,7 @@ class WebhookHandler:
                              topic: Optional[str] = None) -> None:
         """Record that a known device was heard from, and nothing else.
 
-        Only touches an existing row, and still runs the tenant-claim guard, so last_seen is not an unguarded write.
+        Only updates an existing row, and still runs the tenant-claim guard, so last_seen is not an unguarded write.
         """
         device = await Device.get_or_none(udid=udid)
         if device is None:
@@ -474,8 +473,7 @@ class WebhookHandler:
         self, udid: str, url_params: Dict[str, Any], info: Dict[str, Any],
         topic: Optional[str] = None,
     ) -> Optional[Device]:
-        # Unscoped by tenant: a udid is globally unique and survives an erase, so this is the normal re-enrollment
-        # path, not an edge case.
+        # Unscoped by tenant, as a udid is globally unique and survives an erase.
         device = await Device.get_or_none(udid=udid)
 
         # A verifiable tenant claim has to agree with the row before anything the caller sent reaches it. See
@@ -519,8 +517,8 @@ class WebhookHandler:
 
         device.enrollment_state = "enrolled"
         device.unenrolled_at = None
-        # Tracked rather than a full-row save: every Connect, including a bare Idle poll, comes through here, and a
-        # full save would rewrite the multi-KB JSONB columns each time.
+        # Tracked fields rather than a full-row save, as every Connect, including a bare Idle poll, comes through here
+        # and a full save would rewrite the multi-KB JSONB columns each time.
         dirty = {"udid", "enrollment_state", "unenrolled_at", "last_seen"}
         if was_inactive and (device.attributes or {}).get("bypass_code_attempted"):
             device.attributes = {**(device.attributes or {}), "bypass_code_attempted": False}
@@ -548,15 +546,15 @@ class WebhookHandler:
             if "dep" not in (device.tags or []):
                 device.tags = list(device.tags or []) + ["dep"]
                 dirty.add("tags")
-        # The ABM linkage above is an inference; a device's own SecurityInfo answer wins. The dep tag is left alone,
-        # since it marks the ABM/ASM assignment and not the path the device took.
+        # The ABM linkage above is an inference and a device's own SecurityInfo answer takes precedence. The dep tag is
+        # kept, since it marks the ABM/ASM assignment and not the path the device took.
         reconciled = _reconciled_enrollment_source(device.attributes or {})
         if reconciled and (device.attributes or {}).get("enrollment_source") != reconciled:
             device.attributes = {**(device.attributes or {}),
                                  "enrollment_source": reconciled}
             dirty.add("attributes")
-        # Re-match groups every check-in so membership follows the facts refreshed above, and feed the group-scoped
-        # naming template below. Best-effort, and never blocks the save.
+        # Re-match groups every check-in so membership follows the facts refreshed above and the group-scoped naming
+        # template below sees it. A failure is logged and the save goes ahead.
         groups_config = []
         try:
             from controller.services.group_manager import GroupManager
@@ -572,9 +570,9 @@ class WebhookHandler:
         except Exception:
             logger.exception(f"webhook: group match failed for udid={udid}")
 
-        # Derive the managed name from the first matching group's template or else the tenant template, gated by
-        # apply_on_enroll. Runs on every check-in with a null name so a template added later still reaches existing
-        # devices; the Tenant fetch is cached (_TENANT_NAMING_CACHE).
+        # Derive the managed name from the first matching group's template or else the tenant template. Runs on every
+        # check-in with a null name so a template added later still reaches existing devices; the Tenant fetch is
+        # cached (_TENANT_NAMING_CACHE).
         if not device.name:
             try:
                 from controller.services.naming import resolve_name, select_naming_config
@@ -592,7 +590,7 @@ class WebhookHandler:
                             fp, now + _naming_cache_ttl(), tenant_cfg,
                         )
                 cfg, _source = select_naming_config(tenant_cfg, groups_config, device.groups)
-                if cfg and cfg.get("apply_on_enroll"):
+                if cfg:
                     derived = resolve_name(cfg.get("template"), device)
                     if derived:
                         device.name = derived
@@ -620,8 +618,8 @@ class WebhookHandler:
                 return None
             await device.save(update_fields=sorted(dirty))  # last_seen is in there
 
-        # On a fresh (re)enroll, query full device state while it is still connected. Best-effort, never blocks
-        # enrollment.
+        # On a fresh (re)enroll, query full device state while it is still connected. A failure is logged and the
+        # enrollment stands.
         if fresh_enrollment:
             if was_inactive:
                 logger.info(f"webhook: device udid={udid} re-enrolled (history retained)")
@@ -629,8 +627,8 @@ class WebhookHandler:
             await _capture_bootstrap_token(device, udid, locked=False)
             try:
                 from controller.services.poller import on_device_enrolled
-                # Inline, under the same per-device lock the deferred fan-out uses: overlapping a deferred advance
-                # for the same device can lose a tag write.
+                # Runs inline under the same per-device lock the deferred fan-out uses, as overlapping a deferred
+                # advance for the same device can lose a tag write.
                 async with _device_lock(str(device.id)):
                     await on_device_enrolled(device)
             except Exception:
@@ -682,7 +680,7 @@ class WebhookHandler:
             logger.warning(
                 f"webhook: no tenant resolvable for new device {udid} (reason={reason}); skipping"
             )
-            # The requested tenant id is unverified, so it goes in the detail and not the FK, where it could pollute
+            # The requested tenant id is unverified, so it goes in the detail and not the FK, where it would appear in
             # another tenant's attempt log.
             requested = _first_param(url_params, "tenant")
             # bad_signature means a real tenant was claimed without a valid signature; every other reason is a
@@ -712,8 +710,8 @@ class WebhookHandler:
             )
         if device is not None:
             if decision.origin == "manual" and getattr(device, "dep_server_id", None):
-                # A self-reported serial does not earn a manual enrollment the ABM assignment of that serial, and
-                # the tenant and serial unique index leaves no room for a second row.
+                # A manual enrollment does not take over an ADE row on a self-reported serial, and the tenant and serial
+                # unique index leaves no room for a second row.
                 logger.warning("webhook: refusing a manual enrollment of udid=%s onto ADE device %s (serial=%r)",
                                udid, device.id, serial)
                 await identity.apply_serial_refusal(decision, udid, serial, reason="ade_row_refused", topic=topic)
@@ -870,8 +868,8 @@ class WebhookHandler:
         device = await Device.get_or_none(udid=udid)
         if not device:
             return
-        # The same guard the check-in upsert applies, and for a stronger reason: this path cancels the device's
-        # pending work and deletes its deployment rows. NanoMDM forwards the same url_params on a CheckOut
+        # The same guard as the check-in upsert, as this path cancels the device's pending work and deletes its
+        # deployment rows. NanoMDM forwards the same url_params on a CheckOut
         # (https://github.com/micromdm/nanomdm/blob/v0.9.0/service/webhook/service.go).
         if await _refuse_conflicting_claim(device, url_params, topic=topic):
             return
@@ -910,7 +908,7 @@ class WebhookHandler:
         if not _is_device_channel(event):
             await self._note_liveness(udid, url_params, topic=topic)
             return
-        # Idle polls land here too, so make sure the device exists and is fresh.
+        # Idle polls arrive here too, so upsert the device row.
         device = await self._upsert_device(udid, url_params, {}, topic=topic)
         command_uuid = event.get("command_uuid")
         status = event.get("status")
@@ -923,7 +921,7 @@ class WebhookHandler:
     async def _find_task(device: Device, command_uuid: str) -> Optional[Task]:
         """The task waiting on this CommandUUID, if there is one.
 
-        Exact lookup on the command_uuid column, which Task.save keeps in step with details (no JSONB fallback needed).
+        Exact lookup on the command_uuid column, which Task.save keeps in step with details.
         """
         return await (
             Task.filter(device=device, command_uuid=command_uuid)
@@ -933,9 +931,8 @@ class WebhookHandler:
 
     @staticmethod
     async def _dispatch_in_flight(device: Device) -> bool:
-        """True while some dispatch for this device sits between creating its task row and recording the CommandUUID.
-
-        That is the whole window a late response can arrive in.
+        """True while some dispatch for this device sits between creating its task row and recording the CommandUUID,
+        the window a late response can arrive in.
         """
         return await Task.filter(
             device=device, status__in=("pending", "running"),
@@ -972,7 +969,8 @@ class WebhookHandler:
     ) -> None:
         """Wait briefly for a task row another process is still writing.
 
-        Spawned directly, not through _defer, so a burst of orphaned responses does not tie up the lock and semaphore.
+        Started directly rather than through _defer, so a burst of responses without a task row does not hold the
+        lock and semaphore.
         """
         deadline = time.monotonic() + _LATE_RESPONSE_WAIT_SECONDS
         grace = _LATE_RESPONSE_GRACE_POLLS
@@ -995,8 +993,8 @@ class WebhookHandler:
                 continue
             if not await self._dispatch_in_flight(device):
                 break
-        # WARNING, not INFO: a device answers once, so nothing will ever attribute this answer. The usual cause is
-        # benign, a command whose task aged out while the device was away, but a truly lost answer looks the same.
+        # A device answers once, so this answer will never be attributed. Usually its task aged out while the device was
+        # away, which looks the same as a lost answer.
         logger.warning(
             "webhook: no task for command %s on device %s; the answer is discarded",
             command_uuid, device.udid,
@@ -1010,7 +1008,7 @@ class WebhookHandler:
         _defer(device.id, _atc_signal(device.id, "checkin"))
         task = await self._find_task(device, command_uuid)
         if not task:
-            # Not necessarily an unknown command: the task row may still be mid-write. Retry off the request path.
+            # The task row may still be mid-write, so retry off the request path.
             _defer(device.id,
                    self._resolve_late_response(device, command_uuid, status, response))
             return
@@ -1048,9 +1046,9 @@ class WebhookHandler:
             # so nothing above matches them and without this branch they sit at "running" forever.
             await self._handle_generic_response(task, response, status)
 
-        # A profile the device accepted or gave up changes what it would report holding, so ask now. Keyed on the
-        # task type, not hung off the profile handlers: a reconciler-queued removal carries only a profile_id and
-        # takes the generic branch instead, never reaching _handle_profile_remove_response.
+        # A profile the device accepted or gave up changes what it reports holding, so ask now. Keyed on the task type,
+        # as a reconciler-queued removal carries only a profile_id and takes the generic branch, never reaching
+        # _handle_profile_remove_response.
         if status == "Acknowledged" and task.type in _PROFILE_INVENTORY_TASK_TYPES:
             _defer(task.device_id, _refresh_profile_inventory(task.device_id))
         # Only once the renewed certificate is bound; before that identity_sha256 still names the old one.
@@ -1178,8 +1176,8 @@ class WebhookHandler:
             await task.update_progress(task.progress, "failed")
             if task.type in enrollment_links.ERASE_TASK_TYPES:
                 await enrollment_links.expire_rts_challenges(utcnow(), task_ids=[task.id])
-            # A rejected command is an answer too: a wait_for(command_ack) barrier treats completed or failed alike
-            # as answered, and escrow reconciliation hangs off the same signal.
+            # A rejected command is an answer too, as a wait_for(command_ack) barrier treats completed and failed alike
+            # and escrow reconciliation runs on the same signal.
             _defer(task.device_id, _atc_signal(task.device_id, "command_ack", ref=str(task.id)))
         # NotNow means busy. NanoMDM redelivers on the next connect, so wait.
 
@@ -1187,7 +1185,7 @@ class WebhookHandler:
     async def _escrow_filevault_key(device: Device, sec: Dict[str, Any]) -> None:
         """Escrow a FileVault recovery key a SecurityInfo answer carries, before _json_safe strips the raw CMS bytes.
 
-        Swallows its own errors, so a failure here does not undo the rest of the posture update.
+        Errors are logged and ignored, so a failure here does not undo the rest of the posture update.
         """
         try:
             from controller.services import filevault_escrow
@@ -1410,8 +1408,8 @@ class WebhookHandler:
                     deployment.status = 'failed'
                     deployment.last_error = refusal
                     await deployment.save()
-                # No app_installed signal: the device has said it will not install this, so a waiting flow times out
-                # rather than advancing, as it does for a rejected command.
+                # No app_installed signal, as the device rejected the install. A waiting flow times out rather than
+                # advancing, as it does for a rejected command.
                 return
             # The command succeeded, so the task is done. It does not say the app is on the device, which is what the
             # note records.
@@ -1429,11 +1427,10 @@ class WebhookHandler:
                 # 'accepted', not 'installed': an acknowledgement is not evidence of an install.
                 previous_status = deployment.status
                 deployment.status = 'accepted'
-                # Whatever went wrong before is over, including a reconciler timeout, or the row would show an
-                # accepted app with a failure hanging off it.
+                # Clears any earlier error, a reconciler timeout included, so an accepted row carries no stale failure.
                 deployment.last_error = None
-                # failed_attempts is not cleared here, or the retry backoff would hold at its first rung; it clears
-                # only on device confirmation. reported_version resets unless this row was already installed.
+                # failed_attempts is cleared only on device confirmation, or the retry backoff would never grow.
+                # reported_version resets unless this row was already installed.
                 if previous_status != 'installed':
                     deployment.reported_version = None
                 await deployment.save()

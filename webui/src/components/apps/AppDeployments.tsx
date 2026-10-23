@@ -20,18 +20,17 @@ const DEPLOYMENT_STATUS_WORDS: Record<string, string> = {
 const WORKING_STATUSES = ["pending", "installing", "accepted"];
 
 // The install state of this app on each device it targets.
-export function AppDeployments({token, appId}: { token: string | null; appId: string }) {
+export function AppDeployments({appId}: { appId: string }) {
     const router = useRouter();
     const [devices, setDevices] = useState<AppDeploymentDevice[] | null>(null);
     const [loading, setLoading] = useState(true);
     const [loadError, setLoadError] = useState(false);
 
     useEffect(() => {
-        if (!token) return;
         let cancelled = false;
         setLoading(true);
         setLoadError(false);
-        api.getAppDeployments(token, appId)
+        api.getAppDeployments(appId)
             .then((r) => {
                 if (!cancelled) setDevices(r.devices);
             })
@@ -44,7 +43,7 @@ export function AppDeployments({token, appId}: { token: string | null; appId: st
         return () => {
             cancelled = true;
         };
-    }, [token, appId]);
+    }, [appId]);
 
     const counts = useMemo(() => {
         const rows = devices ?? [];

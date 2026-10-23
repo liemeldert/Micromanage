@@ -3,7 +3,6 @@ import {Button} from "@mantine/core";
 import {notifications} from "@mantine/notifications";
 import {IconRefresh} from "@tabler/icons-react";
 import {api, type CatalogCommand, type Device} from "../../../../lib/api";
-import {useAuth} from "../../../../lib/auth-context";
 import {withPushStatus} from "./command-support";
 
 // Runs one contextual command, such as an inventory refresh, from the tab whose data it updates.
@@ -26,16 +25,14 @@ export function RefreshButton({
     disabled?: boolean;
     onDispatched: () => void;
 }) {
-    const {token} = useAuth();
     const [busy, setBusy] = useState(false);
     const entry = catalog.find((c) => c.type === commandType);
     if (!entry) return null;
 
     const run = async () => {
-        if (!token) return;
         setBusy(true);
         try {
-            const res = await api.sendCommand(token, device.id, commandType, {});
+            const res = await api.sendCommand(device.id, commandType, {});
             notifications.show({
                 color: "teal",
                 message: withPushStatus(res, `${entry.label} requested. Updates when the device responds.`),

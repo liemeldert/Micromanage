@@ -47,11 +47,11 @@ export function openCommandPaletteWith(query: string) {
 }
 
 const ACTIONS_LIST_ID = "mm-palette-actions";
-// Eight device rows is what fits without the list turning into the devices page.
+// Maximum device rows shown.
 const DEVICE_LIMIT = 8;
-// A little tighter than the devices page (300 ms there), so the palette keeps up with typing.
+// Debounce in milliseconds; the devices page uses 300.
 const DEVICE_DEBOUNCE_MS = 250;
-// Rows per config group. Past this, the entity's own page is the place to look.
+// Rows per config group.
 const ENTITY_LIMIT = 6;
 // How long loaded config documents are reused before the next open refetches. They are a few kB each and change
 // only when an editor saves.
@@ -92,7 +92,7 @@ function deviceDescription(device: Device, label: string): string {
 
 export function CommandPalette() {
     const router = useRouter();
-    const {token, isAdmin} = useAuth();
+    const {isAdmin} = useAuth();
     const {opened} = useSpotlight(paletteStore);
     // Controlled, so a filter chip can open the palette with the query already written.
     const [query, setQuery] = useState("");
@@ -125,14 +125,14 @@ export function CommandPalette() {
     // == Config documents ==
 
     const loadEntities = useCallback(async () => {
-        if (!token || entitiesInFlight.current) return;
+        if (entitiesInFlight.current) return;
         if (entitiesReady && Date.now() - entitiesFetchedAt.current < ENTITY_TTL_MS) return;
         entitiesInFlight.current = true;
         // A config file that does not exist yet is a 404, which reads as an empty list rather than an error worth
         // a notification.
         const read = async <T, >(type: "groups" | "apps" | "profiles" | "tags", key: string): Promise<T[]> => {
             try {
-                const res = (await api.getConfig(token, type)) as Record<string, unknown> | null;
+                const res = (await api.getConfig(type)) as Record<string, unknown> | null;
                 const list = res?.[key];
                 return Array.isArray(list) ? (list as T[]) : [];
             } catch {
@@ -152,12 +152,12 @@ export function CommandPalette() {
         } finally {
             entitiesInFlight.current = false;
         }
-    }, [token, entitiesReady]);
+    }, [entitiesReady]);
 
     // == Devices ==
 
     useEffect(() => {
-        if (!opened || !token || !debouncedQuery) {
+        if (!opened || !debouncedQuery) {
             setDeviceLoading(false);
             return;
         }
@@ -165,7 +165,7 @@ export function CommandPalette() {
         setDeviceLoading(true);
         api
             // The same filter syntax the devices page takes, so "tag:quarantine" narrows these rows too.
-            .listDevices(token, {...deviceQueryParams(debouncedQuery), limit: DEVICE_LIMIT})
+            .listDevices({...deviceQueryParams(debouncedQuery), limit: DEVICE_LIMIT})
             .then((res) => {
                 if (!cancelled) setDeviceResults({query: debouncedQuery, devices: res.devices});
             })
@@ -180,7 +180,7 @@ export function CommandPalette() {
         return () => {
             cancelled = true;
         };
-    }, [opened, token, debouncedQuery]);
+    }, [opened, debouncedQuery]);
 
     // == Rows ==
 
@@ -252,9 +252,8 @@ export function CommandPalette() {
         tagMatches.length;
 
     // Nothing counts as not found until every source has answered for this query, or the empty state flashes while
-    // the device search and the config documents are still pending. Without a token neither can answer, so fall back
-    // to the pages, which need no server.
-    const settled = !q || !token || (devicesSettled && entitiesReady);
+    // the device search and the config documents are still pending.
+    const settled = !q || (devicesSettled && entitiesReady);
     const busy = !!q && (!settled || deviceLoading);
     // Reported even when pages or config entities matched, since a short list does not show that device rows are
     // missing.
@@ -312,7 +311,7 @@ export function CommandPalette() {
         if (event.key !== "Enter" || event.nativeEvent.isComposing) return;
         // A barcode scanner sends Enter inside the debounce window, before the matching row exists. The lookup runs
         // only then, since Enter belongs to a page or config entity row whenever one already matches.
-        if (!token || !q || rowCount > 0 || devicesSettled || enterLookup.current) return;
+        if (!q || rowCount > 0 || devicesSettled || enterLookup.current) return;
         enterLookup.current = true;
         clearSelection();
         setDeviceLoading(true);
@@ -324,7 +323,7 @@ export function CommandPalette() {
             return !state.opened || state.query.trim() !== q;
         };
         api
-            .listDevices(token, {search: q, limit: DEVICE_LIMIT})
+            .listDevices({search: q, limit: DEVICE_LIMIT})
             .then((res) => {
                 if (stale()) return;
                 const hit = exactSerialMatch(res.devices, q);

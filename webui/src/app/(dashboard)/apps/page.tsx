@@ -28,7 +28,7 @@ const ADMIN_ONLY_REASON =
     "Editing apps is restricted to administrators.";
 
 export default function AppsPage() {
-    const {token, isAdmin} = useAuth();
+    const {isAdmin} = useAuth();
     const router = useRouter();
     const {data, loading, save, reload, currentDocText, version} =
         useConfigResource<AppsConfig>("apps", {apps: []});
@@ -46,16 +46,15 @@ export default function AppsPage() {
     const [peekAppId, setPeekAppId] = useState<string | null>(null);
 
     useEffect(() => {
-        if (!token) return;
-        api.getConfig(token, "groups")
+        api.getConfig("groups")
             .then((g) => setAllGroups((g as { groups?: GroupDef[] }).groups ?? []))
             .catch(() => {
             });
-        api.listDevices(token, {state: "enrolled", limit: 500})
+        api.listDevices({state: "enrolled", limit: 500})
             .then((r) => setDevices(r.devices))
             .catch(() => {
             });
-    }, [token]);
+    }, []);
 
     const apps = useMemo(() => data?.apps ?? [], [data]);
     const peekApp = apps.find((a) => a.id === peekAppId) ?? null;
@@ -66,8 +65,7 @@ export default function AppsPage() {
             | { kind: "app"; app: App }
             | { kind: "version"; appId: string; version: AppVersion },
     ): Promise<boolean> {
-        // Only the new-app path runs from this page; versions are added in the editor. The wizard reports both
-        // results, so both are handled.
+        // Only the new-app path runs from this page, but the wizard reports both results.
         if (result.kind === "app") {
             return save({apps: [...apps, result.app]});
         }
@@ -166,7 +164,7 @@ export default function AppsPage() {
                 <AppWizard
                     opened={wizardOpen}
                     onClose={() => setWizardOpen(false)}
-                    token={token ?? ""}
+
                     allGroups={allGroups}
                     devices={devices}
                     uploadBlockedReason={uploadBlockedReason}

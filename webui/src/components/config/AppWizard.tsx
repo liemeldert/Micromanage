@@ -56,7 +56,6 @@ function humanBytes(n: number): string {
 export interface AppWizardProps {
     opened: boolean;
     onClose: () => void;
-    token: string;
     allGroups: GroupDef[];
     devices: Device[];
     // Why uploading is unavailable, from GET /api/v1/readiness, or null when it is not blocked.
@@ -76,7 +75,6 @@ export interface AppWizardProps {
 export function AppWizard({
                               opened,
                               onClose,
-                              token,
                               allGroups,
                               devices,
                               uploadBlockedReason,
@@ -206,11 +204,10 @@ export function AppWizard({
     const current = steps[active];
 
     const loadPackages = useCallback(async () => {
-        if (!token) return;
         setPackagesLoading(true);
         setPackagesError(null);
         try {
-            const res = await api.listAppPackages(token);
+            const res = await api.listAppPackages();
             setPackages(res.packages);
             setUsage({used: res.usage_bytes, quota: res.quota_bytes});
         } catch (e: unknown) {
@@ -220,7 +217,7 @@ export function AppWizard({
         } finally {
             setPackagesLoading(false);
         }
-    }, [token]);
+    }, []);
 
     // Read the bucket when the package step comes up, not when the wizard opens.
     useEffect(() => {
@@ -260,7 +257,7 @@ export function AppWizard({
         if (!s3Key) return;
         setChecksumming(true);
         try {
-            const res = await api.checksumAppPackage(token, s3Key);
+            const res = await api.checksumAppPackage(s3Key);
             setSha256(res.sha256);
             setPackages((prev) =>
                 prev ? prev.map((p) => (p.key === res.s3_key ? {...p, sha256: res.sha256} : p)) : prev,
@@ -285,7 +282,7 @@ export function AppWizard({
         setUploading(true);
         setUploadError(null);
         try {
-            const res = await api.uploadApp(token, file, effectiveAppId, version.trim());
+            const res = await api.uploadApp(file, effectiveAppId, version.trim());
             setS3Key(res.s3_key);
             // The digest is the server's, taken from the bytes it stored.
             setSha256(res.sha256);
@@ -367,13 +364,13 @@ export function AppWizard({
                 <Stack gap="md">
                     <TextInput
                         label="App ID"
-                        description="Internal identifier. Letters, numbers, '.', '_', '-'."
+                        description="App ID supports only letters, numbers, periods, hyphens and underscores."
                         placeholder="company-app"
                         value={id}
-                        onChange={(e) => setId(e.currentTarget.value)}
+                        onChange={(e) => setId(e.currentTarget.value.replace(/ /g, "-"))}
                         error={
                             id && !SLUG_RE.test(id)
-                                ? "Invalid characters"
+                                ? "Contains a character that is not allowed"
                                 : takenIds.includes(id)
                                     ? "An app with this ID already exists."
                                     : null
@@ -399,8 +396,8 @@ export function AppWizard({
                     <Switch
                         label="Install as managed (macOS)"
                         description={
-                            'Off lets macOS install packages that contain no .app, such as config or script ' +
-                            "packages; on is required for the app to be removable by MDM."
+                            "Unmanaged installs allow packages with no .app, such as configuration or script " +
+                            "packages. Only managed apps can be removed by MDM."
                         }
                         checked={installAsManaged}
                         onChange={(e) => setInstallAsManaged(e.currentTarget.checked)}

@@ -72,7 +72,7 @@ export default function AppEditorPage() {
 }
 
 function AppEditorInner() {
-    const {token, isAdmin} = useAuth();
+    const {isAdmin} = useAuth();
     const router = useRouter();
     const searchParams = useSearchParams();
     const wide = useMediaQuery("(min-width: 62em)") ?? true;
@@ -112,16 +112,15 @@ function AppEditorInner() {
     const [newAppOpen, setNewAppOpen] = useState(false);
 
     useEffect(() => {
-        if (!token) return;
-        api.getConfig(token, "groups")
+        api.getConfig("groups")
             .then((g) => setAllGroups((g as { groups?: GroupDef[] }).groups ?? []))
             .catch(() => {
             });
-        api.listDevices(token, {state: "enrolled", limit: 500})
+        api.listDevices({state: "enrolled", limit: 500})
             .then((r) => setDevices(r.devices))
             .catch(() => {
             });
-    }, [token]);
+    }, []);
 
     // Selects the first app when the page opens with no ?app=, with replace so Back skips the default selection.
     useEffect(() => {
@@ -391,8 +390,8 @@ function AppEditorInner() {
                                 <Switch
                                     label="Install as managed (macOS)"
                                     description={
-                                        "Off lets macOS install packages that contain no .app, such as config or " +
-                                        "script packages; on is required for the app to be removable by MDM."
+                                        "Unmanaged installs allow packages with no .app, such as configuration or " +
+                                        "script packages. Only managed apps can be removed by MDM."
                                     }
                                     checked={draft.managed}
                                     disabled={!isAdmin}
@@ -509,7 +508,7 @@ function AppEditorInner() {
                                     </Table.ScrollContainer>
                                 )}
 
-                                <AppDeployments key={selected.id} token={token} appId={selected.id}/>
+                                <AppDeployments key={selected.id} appId={selected.id}/>
                             </Stack>
                         )}
                     </GlassCard>
@@ -521,7 +520,7 @@ function AppEditorInner() {
                 <AppWizard
                     opened={wizardOpen}
                     onClose={() => setWizardOpen(false)}
-                    token={token ?? ""}
+
                     allGroups={allGroups}
                     devices={devices}
                     uploadBlockedReason={uploadBlockedReason}
@@ -537,7 +536,7 @@ function AppEditorInner() {
                 <AppWizard
                     opened={newAppOpen}
                     onClose={() => setNewAppOpen(false)}
-                    token={token ?? ""}
+
                     allGroups={allGroups}
                     devices={devices}
                     uploadBlockedReason={uploadBlockedReason}

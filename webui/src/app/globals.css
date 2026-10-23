@@ -244,8 +244,8 @@ body {
    Deliberately says nothing about the tint: that is set per scheme further down, and naming it here would
    take the colour back off a red or orange control in the dark scheme. */
 .mm-glass-surface-soft .mm-glass-control.mm-glass-control {
-    --mm-glass-peak: 7%;
-    --mm-glass-wash-strength: 8%;
+    --mm-glass-peak: 5%;
+    --mm-glass-wash-strength: 5%;
     --mm-glass-press-reach: 7rem;
     --mm-glass-press-peak: 8%;
 }
@@ -255,8 +255,8 @@ body {
 .mm-glass-surface-soft .mm-glass-control.mm-glass-control:hover,
 .mm-glass-surface-soft .mm-glass-control.mm-glass-control:focus-visible,
 .mm-glass-surface-soft .mm-glass-control.mm-glass-control:focus-within {
-    --mm-glass-peak: 7%;
-    --mm-glass-wash-strength: 8%;
+    --mm-glass-peak: 5%;
+    --mm-glass-wash-strength: 5%;
     --mm-glass-lift-scale: 1;
     box-shadow: none;
 }
@@ -841,7 +841,8 @@ html {
     /* Tinted rather than white, since a white bloom on a light card is invisible. Dark mode swaps to white
        below, where a tint would read as a colour change instead of a highlight. */
     --mm-glass-glow-tint: var(--mantine-primary-color-filled);
-    --mm-glass-peak: 6%;
+    --mm-glass-peak: 4%;
+    --mm-glass-wash-strength: 3%;
     /* A press on something that is only being read still moves the light, just barely. Anything interactive
        raises both of these below. */
     --mm-glass-press-reach: 6rem;
@@ -853,16 +854,16 @@ html {
            grows, since a ring shrinking back to the cursor reads as a mistake. */ radial-gradient(
         calc(16rem + var(--mm-glass-spread) * 34rem
         + var(--mm-glass-press) * var(--mm-glass-press-reach, 13rem)) circle at var(--mm-glass-px, 50%) var(--mm-glass-py, -30%),
-        color-mix(in srgb, var(--mm-glass-glow-tint) calc(var(--mm-glass-near) * (var(--mm-glass-peak) + var(--mm-glass-spread) * 5%
+        color-mix(in srgb, var(--mm-glass-glow-tint) calc(var(--mm-glass-near) * (var(--mm-glass-peak) + var(--mm-glass-spread) * 3%
         + var(--mm-glass-press-glow) * var(--mm-glass-press) * var(--mm-glass-press-peak, 7%))),
         transparent),
         transparent 70%
     ),
     radial-gradient(
         circle calc(var(--mm-glass-wash) * 2600px) at var(--mm-glass-px, 50%) var(--mm-glass-py, 50%),
-        color-mix(in srgb, var(--mm-glass-glow-tint) var(--mm-glass-wash-strength, 4.5%),
+        color-mix(in srgb, var(--mm-glass-glow-tint) var(--mm-glass-wash-strength, 3%),
         transparent) 0%,
-        color-mix(in srgb, var(--mm-glass-glow-tint) var(--mm-glass-wash-strength, 4.5%),
+        color-mix(in srgb, var(--mm-glass-glow-tint) var(--mm-glass-wash-strength, 3%),
         transparent) 99%,
         transparent 100%
     );
@@ -881,9 +882,10 @@ html {
     --mm-glass-wash 190ms cubic-bezier(0.22, 1, 0.36, 1), --mm-glass-press-glow 460ms ease;
 }
 
-.mm-glass-interactive:hover,
-.mm-glass-interactive:focus-visible,
-.mm-glass-interactive:focus-within {
+.mm-glass-interactive:hover:not(:where(:has(.mm-glass-nested:hover, .mm-glass-control:hover,
+        .mm-glass-interactive:hover, button:hover, [role="button"]:hover))),
+.mm-glass-interactive:focus-visible:not(:where(:has(.mm-glass-nested:hover, .mm-glass-control:hover,
+        .mm-glass-interactive:hover, button:hover, [role="button"]:hover))) {
     --mm-glass-spread: 1;
     /* Arrives almost at once, so the row under the pointer is readable before the bloom has finished. */
     --mm-glass-wash: 1;
@@ -907,7 +909,7 @@ html {
 
 [data-mantine-color-scheme="dark"] .mm-glass-reactive {
     --mm-glass-glow-tint: #fff;
-    --mm-glass-peak: 8%;
+    --mm-glass-peak: 6%;
 }
 
 /* Alert colour mixed into the glass fill rather than painted over it, so the surface stays translucent and
@@ -1066,16 +1068,18 @@ html {
 }
 
 /* A card that does something when clicked rises toward the reader and leans after the pointer, the way a
-   focused target does on iPadOS. The lean is written per frame by glass-pointer; the rise is the hover. */
+   focused target does on iPadOS. The lean is written per frame by glass-pointer; the rise is the hover, skipped
+   while something interactive inside is hovered, with :where() keeping the hover rules' specificity. */
 .mm-glass-lift {
     transform: translate3d(var(--mm-glass-lean-x, 0), var(--mm-glass-lean-y, 0), 0) scale(var(--mm-glass-lift-scale, 1));
     /* Short, so the lean keeps up with the pointer rather than trailing it. */
     transition: transform 130ms ease-out, box-shadow 220ms ease;
 }
 
-.mm-glass-lift:hover,
-.mm-glass-lift:focus-visible,
-.mm-glass-lift:focus-within {
+.mm-glass-lift:hover:not(:where(:has(.mm-glass-nested:hover, .mm-glass-control:hover,
+        .mm-glass-interactive:hover, button:hover, [role="button"]:hover))),
+.mm-glass-lift:focus-visible:not(:where(:has(.mm-glass-nested:hover, .mm-glass-control:hover,
+        .mm-glass-interactive:hover, button:hover, [role="button"]:hover))) {
     /* Hover raises it; pressure raises it further, so leaning on the trackpad pushes the card up at you. */
     --mm-glass-lift-scale: calc(1.008 + var(--mm-glass-press) * 0.013);
     box-shadow: var(--mm-glass-tone-shadow, 0 0 0 0 transparent),
@@ -1085,9 +1089,10 @@ html {
 
 /* A large surface carries text, so it answers the pointer with less movement and a fainter tint than a small
    card does. */
-.mm-glass-lift-quiet:hover,
-.mm-glass-lift-quiet:focus-visible,
-.mm-glass-lift-quiet:focus-within {
+.mm-glass-lift-quiet:hover:not(:where(:has(.mm-glass-nested:hover, .mm-glass-control:hover,
+        .mm-glass-interactive:hover, button:hover, [role="button"]:hover))),
+.mm-glass-lift-quiet:focus-visible:not(:where(:has(.mm-glass-nested:hover, .mm-glass-control:hover,
+        .mm-glass-interactive:hover, button:hover, [role="button"]:hover))) {
     --mm-glass-lift-scale: calc(1.003 + var(--mm-glass-press) * 0.006);
     --mm-glass-peak: 3.5%;
     --mm-glass-wash-strength: 2.5%;
@@ -1278,8 +1283,8 @@ html {
     border-radius: var(--mantine-radius-md) var(--mantine-radius-md) var(--mantine-radius-sm) var(--mantine-radius-sm);
     cursor: pointer;
     min-width: 0;
-    --mm-glass-peak: 7%;
-    --mm-glass-wash-strength: 8%;
+    --mm-glass-peak: 5%;
+    --mm-glass-wash-strength: 5%;
     --mm-glass-press-reach: 7rem;
     transition: box-shadow 140ms ease;
 }
@@ -1287,7 +1292,9 @@ html {
 .mm-glass-nested:hover,
 .mm-glass-nested:focus-visible {
     z-index: 1;
-    box-shadow: inset 0 1px 0 color-mix(in srgb, var(--mm-glass-glow-tint) 20%, transparent);
+    --mm-glass-spread: 1;
+    --mm-glass-wash: 1;
+    box-shadow: inset 0 1px 0 color-mix(in srgb, var(--mm-glass-glow-tint) 32%, transparent);
 }
 
 /* A value in a table row that also names a filter. Small enough that a ring reads better than a top edge, so
@@ -1298,8 +1305,8 @@ html {
     align-items: center;
     padding: 2px 6px;
     border-radius: var(--mantine-radius-sm);
-    --mm-glass-peak: 11%;
-    --mm-glass-wash-strength: 11%;
+    --mm-glass-peak: 7%;
+    --mm-glass-wash-strength: 7%;
     --mm-glass-press-reach: 4.5rem;
     --mm-glass-press-peak: 9%;
 }
@@ -1331,4 +1338,33 @@ html {
     .mm-flow-delete {
         opacity: 1;
     }
+}
+
+/* An icon-only control with no glass fill, lift or shadow, where hover changes only the icon colour. Repeated to
+   outrank the glass control rules. */
+.mm-icon-plain.mm-icon-plain.mm-icon-plain.mm-icon-plain.mm-icon-plain,
+.mm-icon-plain.mm-icon-plain.mm-icon-plain.mm-icon-plain.mm-icon-plain:hover,
+.mm-icon-plain.mm-icon-plain.mm-icon-plain.mm-icon-plain.mm-icon-plain:focus-visible,
+.mm-icon-plain.mm-icon-plain.mm-icon-plain.mm-icon-plain.mm-icon-plain:disabled,
+.mm-icon-plain.mm-icon-plain.mm-icon-plain.mm-icon-plain.mm-icon-plain[data-disabled],
+.mm-icon-plain.mm-icon-plain.mm-icon-plain.mm-icon-plain.mm-icon-plain[data-disabled]:hover {
+    background-color: transparent;
+    background-image: none;
+    box-shadow: none;
+    transform: none;
+    color: var(--mantine-color-dimmed);
+}
+
+.mm-icon-plain.mm-icon-plain.mm-icon-plain.mm-icon-plain.mm-icon-plain:hover:not(:disabled):not([data-disabled]) {
+    color: var(--mantine-color-text);
+}
+
+.mm-icon-plain.mm-icon-plain.mm-icon-plain.mm-icon-plain.mm-icon-plain:disabled,
+.mm-icon-plain.mm-icon-plain.mm-icon-plain.mm-icon-plain.mm-icon-plain[data-disabled] {
+    opacity: 0.4;
+}
+
+.mm-icon-plain.mm-icon-plain.mm-icon-plain.mm-icon-plain.mm-icon-plain:focus-visible {
+    outline: 2px solid var(--mantine-primary-color-filled);
+    outline-offset: 1px;
 }

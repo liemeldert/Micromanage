@@ -11,7 +11,7 @@ import {PageSkeleton} from "@/components/layout/PageSkeleton";
 import {PageHeader} from "@/components/layout/PageHeader";
 
 export default function DepPage() {
-    const {token, isAdmin} = useAuth();
+    const {isAdmin} = useAuth();
     const [servers, setServers] = useState<DepServer[]>([]);
     const [detail, setDetail] = useState<DepServerDetail | null>(null);
     const [selectedId, setSelectedId] = useState<string | null>(null);
@@ -20,11 +20,10 @@ export default function DepPage() {
     const [addingNew, setAddingNew] = useState(false);
 
     const load = useCallback(async () => {
-        if (!token) return;
         setLoading(true);
         setError(null);
         try {
-            const {servers: list} = await api.listDepServers(token);
+            const {servers: list} = await api.listDepServers();
             setServers(list);
             // Prefer a linked server; else fall back to whatever exists (to resume linking).
             const linked = list.find((s) => s.status === "linked");
@@ -35,30 +34,30 @@ export default function DepPage() {
         } finally {
             setLoading(false);
         }
-    }, [token]);
+    }, []);
 
     useEffect(() => {
         if (isAdmin) load();
         else setLoading(false);
     }, [isAdmin, load]);
 
-    // Load the full detail for the selected server, clearing the old detail first so the panel never
-    // shows the previous server's data and the wizard remounts with the right resume state.
+    // Load the full detail for the selected server, clearing the old detail first so the panel never shows the
+    // previous server's data.
     useEffect(() => {
-        if (!token || !selectedId) {
+        if (!selectedId) {
             setDetail(null);
             return;
         }
         let alive = true;
         setDetail(null);
         api
-            .getDepServer(token, selectedId)
+            .getDepServer(selectedId)
             .then((d) => alive && setDetail(d))
             .catch(() => alive && setDetail(null));
         return () => {
             alive = false;
         };
-    }, [token, selectedId]);
+    }, [selectedId]);
 
     if (!isAdmin) {
         return (

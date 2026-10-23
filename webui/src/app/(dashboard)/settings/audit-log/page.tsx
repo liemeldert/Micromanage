@@ -205,7 +205,7 @@ function DetailCell({entry}: { entry: AuditLogEntry }) {
                 const text = typeof v === "object" ? JSON.stringify(v) : String(v);
                 return (
                     <Text key={k} fz="xs" style={{wordBreak: "break-word"}}>
-                        <Text span c="dimmed">{k}:</Text> {text}
+                        <Text span inherit c="dimmed">{k}:</Text> {text}
                     </Text>
                 );
             })}
@@ -214,7 +214,7 @@ function DetailCell({entry}: { entry: AuditLogEntry }) {
 }
 
 export default function AuditLogPage() {
-    const {token, isAdmin} = useAuth();
+    const {isAdmin} = useAuth();
     const [entries, setEntries] = useState<AuditLogEntry[]>([]);
     const [total, setTotal] = useState(0);
     const [page, setPage] = useState(1);
@@ -228,11 +228,11 @@ export default function AuditLogPage() {
 
     const load = useCallback(async () => {
         // The endpoint is admin-only, so a member would get a 403 toast next to the message rendered below.
-        if (!token || !isAdmin) return;
+        if (!isAdmin) return;
         const seq = ++reqSeq.current;
         setLoading(true);
         try {
-            const res = await api.listAuditLog(token, {
+            const res = await api.listAuditLog({
                 skip: (page - 1) * PAGE_SIZE,
                 limit: PAGE_SIZE,
                 ...(filters.action ? {action: filters.action} : {}),
@@ -254,7 +254,7 @@ export default function AuditLogPage() {
         } finally {
             if (seq === reqSeq.current) setLoading(false);
         }
-    }, [token, page, isAdmin, filters]);
+    }, [page, isAdmin, filters]);
 
     useEffect(() => {
         load();
@@ -334,25 +334,35 @@ export default function AuditLogPage() {
                     <Stack gap={2}>
                         <Text fz="xs">{e.target_type}</Text>
                         {e.target_id && (
-                            <Group gap={4} wrap="nowrap">
+                            <>
                                 {/* Shown whole, as a truncated id looks the same on every row of a busy device. */}
                                 <Code fz="xs" style={{wordBreak: "break-all"}}>{e.target_id}</Code>
-                                {e.target_type === "device" && (
-                                    <Anchor component={Link} href={`/devices/${e.target_id}`} fz="xs">
-                                        open
-                                    </Anchor>
-                                )}
-                            </Group>
-                        )}
-                        {e.target_id && (
-                            <Anchor
-                                fz="xs"
-                                onClick={() =>
-                                    applyFilters({...filters, target_type: e.target_type!, target_id: e.target_id!})
-                                }
-                            >
-                                everything done to this
-                            </Anchor>
+                                <Group gap={4} wrap="wrap">
+                                    {e.target_type === "device" && (
+                                        <Button
+                                            component={Link}
+                                            href={`/devices/${e.target_id}`}
+                                            size="compact-xs"
+                                            variant="subtle"
+                                        >
+                                            Open device
+                                        </Button>
+                                    )}
+                                    <Button
+                                        size="compact-xs"
+                                        variant="subtle"
+                                        onClick={() =>
+                                            applyFilters({
+                                                ...filters,
+                                                target_type: e.target_type!,
+                                                target_id: e.target_id!,
+                                            })
+                                        }
+                                    >
+                                        Filter to this target
+                                    </Button>
+                                </Group>
+                            </>
                         )}
                     </Stack>
                 ) : (
@@ -466,7 +476,7 @@ export default function AuditLogPage() {
                 <Text fz="xs" c="dimmed" mt="sm">
                     Action, actor and target match the whole value, because the server writes all three rather than
                     anyone typing them. To follow one administrator, filter by their email; to see what was done to
-                    one device, use the &quot;everything done to this&quot; link on any of its
+                    one device, use the &quot;Filter to this target&quot; button on any of its
                     rows. <b>Written by</b> separates what a person did from what Micromanage did on its own, and the
                     dates bound both ends of the window.
                 </Text>

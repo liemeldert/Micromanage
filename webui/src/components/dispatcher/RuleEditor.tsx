@@ -66,7 +66,7 @@ const severityRank = (s: string) => {
 const swatchColor = (severity: string) => `var(--mantine-color-${SEVERITY_COLORS[severity] ?? "gray"}-6)`;
 
 export function RuleEditor({initialRuleId}: { initialRuleId?: string | null }) {
-    const {token, isAdmin} = useAuth();
+    const {isAdmin} = useAuth();
     const {data, setData, loading, saving, save, reload} = useConfigResource<DispatcherConfig>("dispatcher", {
         rules: [],
         webhooks: [],
@@ -86,22 +86,21 @@ export function RuleEditor({initialRuleId}: { initialRuleId?: string | null }) {
     const wide = useMediaQuery("(min-width: 1100px)", true);
 
     useEffect(() => {
-        if (!token) return;
         const ids = (list: unknown) => ((list as { id: string }[] | undefined) ?? []).map((x) => x.id);
-        api.getDispatcherCheckCatalog(token).then((c) => setChecks(c.checks)).catch(() => {
+        api.getDispatcherCheckCatalog().then((c) => setChecks(c.checks)).catch(() => {
         });
-        api.getCommandCatalog(token).then((c) => setCommands(c.commands)).catch(() => {
+        api.getCommandCatalog().then((c) => setCommands(c.commands)).catch(() => {
         });
-        api.getConfig(token, "profiles").then((p) => setProfileIds(ids(p?.profiles))).catch(() => {
+        api.getConfig("profiles").then((p) => setProfileIds(ids(p?.profiles))).catch(() => {
         });
-        api.getConfig(token, "apps").then((a) => setAppIds(ids(a?.apps))).catch(() => {
+        api.getConfig("apps").then((a) => setAppIds(ids(a?.apps))).catch(() => {
         });
-        api.getConfig(token, "groups").then((g) => setGroups((g?.groups as GroupDef[]) ?? [])).catch(() => {
+        api.getConfig("groups").then((g) => setGroups((g?.groups as GroupDef[]) ?? [])).catch(() => {
         });
         // Enrolled only, as the dispatcher evaluates no other devices.
-        api.listDevices(token, {state: "enrolled", limit: 500}).then((r) => setDevices(r.devices)).catch(() => {
+        api.listDevices({state: "enrolled", limit: 500}).then((r) => setDevices(r.devices)).catch(() => {
         });
-    }, [token]);
+    }, []);
 
     const rules = useMemo(() => data?.rules ?? [], [data]);
     const webhooks = useMemo(() => data?.webhooks ?? [], [data]);

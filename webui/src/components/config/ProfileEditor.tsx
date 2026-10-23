@@ -82,8 +82,8 @@ function readTypeStore(): Record<string, PlistTypes> {
     }
 }
 
-// The date types recorded for a saved profile, for export. Filtered on the way out as well as in, so
-// a stale entry cannot type a data key behind data_keys' back.
+// The date types recorded for a saved profile, for export. Filtered on the way out as well as in, so a stale entry
+// cannot mark a data key as a date.
 export function readDateTypes(id: string): PlistTypes | undefined {
     const t = dateTypes(readTypeStore()[id] ?? {});
     return Object.keys(t).length ? t : undefined;
@@ -94,7 +94,7 @@ function writeDateTypes(id: string, types: PlistTypes) {
     try {
         sessionStorage.setItem(PLIST_TYPES_KEY, JSON.stringify({...readTypeStore(), [id]: types}));
     } catch {
-        // A full or disabled sessionStorage costs the hints, nothing else.
+        // A full or disabled sessionStorage loses only the hints.
     }
 }
 
@@ -138,7 +138,7 @@ interface DraftState {
     // Key names whose base64 values must reach the device as plist <data>. Saved as the profile's data_keys.
     dataKeys: string[];
     // Keys of the saved profile this form doesn't model (payload_type, and anything a YAML author wrote by hand).
-    // Carried through the round-trip so opening a profile and saving it can't silently delete parts of it.
+    // Carried through the round-trip so saving a profile keeps them.
     extra: Record<string, unknown>;
     // What an import said each date key was. Stripped from what gets saved; see PLIST_TYPES_KEY above.
     dates: PlistTypes;
@@ -213,7 +213,7 @@ const ADMIN_ONLY_REASON =
 
 export function ProfileEditor({profileId}: { profileId?: string }) {
     const router = useRouter();
-    const {token, isAdmin} = useAuth();
+    const {isAdmin} = useAuth();
     const {data, loading, saving, save} = useConfigResource<ProfilesConfig>("profiles", {
         profiles: [],
     });
@@ -242,18 +242,17 @@ export function ProfileEditor({profileId}: { profileId?: string }) {
     const baseline = useRef("");
 
     useEffect(() => {
-        if (!token) return;
         api
-            .getConfig(token, "groups")
+            .getConfig("groups")
             .then((g) => setGroups((g as { groups?: GroupDef[] }).groups ?? []))
             .catch(() => {
             });
         api
-            .listDevices(token, {state: "enrolled", limit: 500})
+            .listDevices({state: "enrolled", limit: 500})
             .then((r) => setDevices(r.devices))
             .catch(() => {
             });
-    }, [token]);
+    }, []);
 
     // Live scope from the draft, and the on-disk scope (for the change diff).
     const draftScope: Scope = useMemo(
@@ -478,7 +477,7 @@ export function ProfileEditor({profileId}: { profileId?: string }) {
                     ...(draft.rollout ? {rollout: draft.rollout} : {}),
                 }
                 : {};
-        // extra first, so anything the form owns wins over the loaded copy.
+        // extra first, so anything the form owns takes precedence over the loaded copy.
         const withPlatforms = {...draft.extra, ...common, ...scoping, platforms: draft.platforms};
         const profile: Profile =
             draft.kind === "enrollment"

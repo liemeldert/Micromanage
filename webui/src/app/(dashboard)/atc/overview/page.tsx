@@ -67,7 +67,7 @@ function StatTile({
 }
 
 export default function FlowsOverviewPage() {
-    const {token, isAdmin} = useAuth();
+    const {isAdmin} = useAuth();
     const router = useRouter();
     const {data, loading} = useConfigResource<FlowsConfig>("flows", {version: 2, flows: []});
     const [summary, setSummary] = useState<FlowsSummaryResponse | null>(null);
@@ -76,16 +76,14 @@ export default function FlowsOverviewPage() {
     const [summaryFailed, setSummaryFailed] = useState(false);
 
     useEffect(() => {
-        if (!token) return;
-        api.getFlowsSummary(token)
+        api.getFlowsSummary()
             .then(setSummary)
             .catch(() => setSummaryFailed(true));
-    }, [token]);
+    }, []);
 
     const flows = useMemo(() => flowsFromConfig(data), [data]);
 
-    // Live flows in name order, each with its own drafts behind it, so a flow and its drafts take one
-    // place in the grid as a pile. A draft whose flow is missing stands on its own at the end.
+    // Live flows in name order, each followed by its drafts. A draft whose flow is missing goes at the end.
     const stacks = useMemo(() => {
         const live = flows.filter((f) => !f.draft_of);
         live.sort((a, b) => {

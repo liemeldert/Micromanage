@@ -359,8 +359,8 @@ export function DeviceSearchBar({
 
                 <Tooltip label="Undo filter change" withArrow openDelay={400}>
                     <ActionIcon
-                        variant="subtle"
-                        color="gray"
+                        variant="transparent"
+                        className="mm-icon-plain"
                         size="sm"
                         disabled={!canUndo}
                         aria-label="Undo filter change"
@@ -373,8 +373,8 @@ export function DeviceSearchBar({
                 </Tooltip>
                 <Tooltip label="Redo filter change" withArrow openDelay={400}>
                     <ActionIcon
-                        variant="subtle"
-                        color="gray"
+                        variant="transparent"
+                        className="mm-icon-plain"
                         size="sm"
                         disabled={!canRedo}
                         aria-label="Redo filter change"

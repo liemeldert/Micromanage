@@ -1,5 +1,4 @@
-// API client. Everything goes through the Next.js proxy at /api/proxy/*, which forwards to the controller over the
-// internal Docker network. The browser never talks to the controller directly.
+// API client. Everything goes through the Next.js proxy at /api/proxy/*, which forwards to the controller.
 
 function proxyPath(controllerPath: string) {
     // /api/v1/devices -> /api/proxy/api/v1/devices
@@ -22,8 +21,8 @@ export class ApiError extends Error {
 // state-changing call without this header, which a cross-site form cannot set.
 const WEB_CLIENT_HEADERS = {"X-MM-Client": "web"};
 
-// A 401 on any authenticated call means the session is dead, expired or revoked. Clear it and force a fresh sign-in
-// rather than leave the page toasting errors.
+// A 401 on any authenticated call means the session is dead, expired or revoked. The session is cleared and the user
+// is sent to sign in.
 function handleUnauthorized(path: string, method = "GET") {
     if (typeof window === "undefined") return;
     // login, discover, password-change and MFA-verify return 401 for bad input; anywhere else it means a dead session.
@@ -67,7 +66,6 @@ function validationLine(item: ValidationItem): string {
 // (X-Config-Version on a config read or save).
 async function requestWithResponse<T>(
     path: string,
-    token: string | undefined,
     options: RequestInit = {},
 ): Promise<{ data: T; res: Response }> {
     const headers: Record<string, string> = {
@@ -112,10 +110,9 @@ async function requestWithResponse<T>(
 
 async function request<T>(
     path: string,
-    token: string | undefined,
     options: RequestInit = {},
 ): Promise<T> {
-    return (await requestWithResponse<T>(path, token, options)).data;
+    return (await requestWithResponse<T>(path, options)).data;
 }
 
 // Config documents editable through the validated PUT, with version history. "config" is readable but not editable,
@@ -152,12 +149,10 @@ export interface StatsOverview {
 }
 
 export const api = {
-    // Auth
-    // The proxy keeps the session token in its cookie and removes it from the body.
+    // Auth The proxy keeps the session token in its cookie and removes it from the body.
     login(tenantId: string, email: string, password: string) {
         return request<{ token_type: string; expires_in: number }>(
             "/api/v1/auth/login",
-            undefined,
             {
                 method: "POST",
                 body: JSON.stringify({tenant_id: tenantId, user_email: email, password}),
@@ -165,7 +160,7 @@ export const api = {
         );
     },
 
-    me(token: string) {
+    me() {
         return request<{
             tenant_id: string;
             email: string;
@@ -175,15 +170,13 @@ export const api = {
             has_password: boolean;
         }>(
             "/api/v1/auth/me",
-            token,
         );
     },
 
     // Ends every other session for the account; the proxy replaces this browser's session cookie.
-    changePassword(token: string, currentPassword: string, newPassword: string) {
+    changePassword(currentPassword: string, newPassword: string) {
         return request<{ token_type: string; expires_in: number }>(
             "/api/v1/auth/password",
-            token,
             {
                 method: "POST",
                 body: JSON.stringify({current_password: currentPassword, new_password: newPassword}),
@@ -193,7 +186,7 @@ export const api = {
 
     // Email discovery (which tenants, local or external IdP).
     discoverLogin(email: string) {
-        return request<{ tenants: DiscoveredTenant[] }>("/api/v1/auth/discover", undefined, {
+        return request<{ tenants: DiscoveredTenant[] }>("/api/v1/auth/discover", {
             method: "POST",
             body: JSON.stringify({email}),
         });
@@ -206,17 +199,16 @@ export const api = {
             expires_in?: number;
             mfa_required?: boolean;
             mfa_token?: string;
-        }>("/api/v1/auth/login", undefined, {
+        }>("/api/v1/auth/login", {
             method: "POST",
             body: JSON.stringify({tenant_id: tenantId, user_email: email, password}),
         });
     },
 
-    // Verify MFA code (TOTP or recovery; same generic failure either way).
+    // Verify MFA code (TOTP or recovery; the same generic failure for both).
     verifyMfa(mfaToken: string, code: string) {
         return request<{ token_type: string; expires_in: number }>(
             "/api/v1/auth/mfa/verify",
-            undefined,
             {
                 method: "POST",
                 body: JSON.stringify({mfa_token: mfaToken, code}),
@@ -225,28 +217,26 @@ export const api = {
     },
 
     // Current MFA status for signed-in account.
-    getMfaStatus(token: string) {
+    getMfaStatus() {
         return request<{
             enabled: boolean;
             confirmed_at: string | null;
             recovery_codes_remaining: number;
-        }>("/api/v1/auth/mfa", token);
+        }>("/api/v1/auth/mfa");
     },
 
     // Start MFA enrollment (secret and provisioning URI; not active until confirmed).
-    enrollMfa(token: string, password: string) {
+    enrollMfa(password: string) {
         return request<{ secret: string; provisioning_uri: string }>(
             "/api/v1/auth/mfa/enroll",
-            token,
             {method: "POST", body: JSON.stringify({password})},
         );
     },
 
     // Confirm MFA enrollment (recovery codes returned once, never refetchable).
-    confirmMfaEnrollment(token: string, code: string) {
+    confirmMfaEnrollment(code: string) {
         return request<{ recovery_codes: string[] }>(
             "/api/v1/auth/mfa/confirm",
-            token,
             {
                 method: "POST",
                 body: JSON.stringify({code}),
@@ -255,10 +245,9 @@ export const api = {
     },
 
     // Disable two-factor (controller re-asks password).
-    disableMfa(token: string, password: string) {
+    disableMfa(password: string) {
         return request<{ token_type: string; expires_in: number }>(
             "/api/v1/auth/mfa",
-            token,
             {
                 method: "DELETE",
                 body: JSON.stringify({password}),
@@ -267,40 +256,36 @@ export const api = {
     },
 
     // Stats
-    getStats(token: string) {
-        return request<StatsOverview>("/api/v1/stats/overview", token);
+    getStats() {
+        return request<StatsOverview>("/api/v1/stats/overview");
     },
 
     // Admin-only health check. 404 without session (security), 404 without data (not a readiness answer).
-    getReadiness(token: string) {
-        return request<Readiness>("/api/v1/readiness", token);
+    getReadiness() {
+        return request<Readiness>("/api/v1/readiness");
     },
 
-    getDevicesByModel(token: string) {
+    getDevicesByModel() {
         return request<{ device_model: string; count: number }[]>(
             "/api/v1/stats/devices/by-model",
-            token,
         );
     },
 
-    getDevicesByOs(token: string) {
+    getDevicesByOs() {
         return request<{ os_version: string; count: number }[]>(
             "/api/v1/stats/devices/by-os",
-            token,
         );
     },
 
     // Per-app/profile deployment rollup (grouped query, not device-by-device).
-    getRolloutStats(token: string, kind: "app" | "profile") {
+    getRolloutStats(kind: "app" | "profile") {
         return request<RolloutStatsResponse>(
             `/api/v1/stats/rollout?kind=${kind}`,
-            token,
         );
     },
 
     // Devices
     listDevices(
-        token: string,
         params: {
             skip?: number;
             limit?: number;
@@ -321,66 +306,61 @@ export const api = {
             total: number;
             counts: { all: number; enrolled: number; unenrolled: number; pending: number };
             devices: Device[];
-        }>(`/api/v1/devices${qs ? `?${qs}` : ""}`, token);
+        }>(`/api/v1/devices${qs ? `?${qs}` : ""}`);
     },
 
     createPlaceholderDevice(
-        token: string,
         body: { serial_number: string; device_model?: string; management_type?: string; groups?: string[] },
     ) {
-        return request<Device>("/api/v1/devices", token, {
+        return request<Device>("/api/v1/devices", {
             method: "POST",
             body: JSON.stringify(body),
         });
     },
 
-    getDevice(token: string, id: string) {
-        return request<DeviceDetail>(`/api/v1/devices/${id}`, token);
+    getDevice(id: string) {
+        return request<DeviceDetail>(`/api/v1/devices/${id}`);
     },
 
     // Lets the device enroll again with a new profile during the next 24 hours.
-    allowReenrollment(token: string, id: string) {
+    allowReenrollment(id: string) {
         return request<{ device: Device; reenrollment_allowed_until: string }>(
             `/api/v1/devices/${id}/allow-reenrollment`,
-            token,
             {method: "POST"},
         );
     },
 
     // Delete device (admin only). 409 if enrolled or holds escrowed secrets (retryable with discardSecrets).
-    deleteDevice(token: string, id: string, discardSecrets = false) {
+    deleteDevice(id: string, discardSecrets = false) {
         const qs = discardSecrets ? "?discard_secrets=true" : "";
         return request<{ message: string; discarded_secret_kinds: string[] }>(
             `/api/v1/devices/${id}${qs}`,
-            token,
             {method: "DELETE"},
         );
     },
 
     // Read-only "why does / doesn't this device receive X" troubleshooting.
-    explainDeviceScope(token: string, id: string) {
-        return request<ScopeExplain>(`/api/v1/devices/${id}/scope-explain`, token);
+    explainDeviceScope(id: string) {
+        return request<ScopeExplain>(`/api/v1/devices/${id}/scope-explain`);
     },
 
     // Scope preview (read-only). empty_scope is required: "all" for flows, "none" for profiles.
-    previewScope(token: string, body: ScopePreviewRequest) {
-        return request<ScopePreview>("/api/v1/scope/preview", token, {
+    previewScope(body: ScopePreviewRequest) {
+        return request<ScopePreview>("/api/v1/scope/preview", {
             method: "POST",
             body: JSON.stringify(body),
         });
     },
 
     // Set the managed name and send it to the device, when it is enrolled and supervised.
-    renameDevice(token: string, id: string, name: string) {
+    renameDevice(id: string, name: string) {
         return request<{ device: Device; pushed: boolean; task_id: string | null }>(
             `/api/v1/devices/${id}/name`,
-            token,
             {method: "PATCH", body: JSON.stringify({name})},
         );
     },
 
     sendCommand(
-        token: string,
         deviceId: string,
         commandType: string,
         parameters: Record<string, unknown> = {},
@@ -395,14 +375,12 @@ export const api = {
             warning_codes?: string[];
         }>(
             `/api/v1/devices/${deviceId}/command`,
-            token,
             {method: "POST", body: JSON.stringify({command_type: commandType, parameters})},
         );
     },
 
     // Add/remove tags; triggers group recompute and reconcile.
     updateDeviceTags(
-        token: string,
         id: string,
         body: { add?: string[]; remove?: string[] },
     ) {
@@ -412,28 +390,27 @@ export const api = {
             added: string[];
             removed: string[];
             groups_changed?: boolean;
-        }>(`/api/v1/devices/${id}/tags`, token, {
+        }>(`/api/v1/devices/${id}/tags`, {
             method: "POST",
             body: JSON.stringify(body),
         });
     },
 
     // YAML configs
-    getConfig(token: string, type: ReadableConfigType) {
-        return request<Record<string, unknown>>(`/api/v1/config/${type}`, token);
+    getConfig(type: ReadableConfigType) {
+        return request<Record<string, unknown>>(`/api/v1/config/${type}`);
     },
 
     // Config read with version (from X-Config-Version header) for optimistic locking.
-    async getConfigWithVersion(token: string, type: ReadableConfigType) {
+    async getConfigWithVersion(type: ReadableConfigType) {
         const {data, res} = await requestWithResponse<Record<string, unknown>>(
             `/api/v1/config/${type}`,
-            token,
         );
         return {data, version: res.headers.get(CONFIG_VERSION_HEADER) ?? undefined};
     },
 
     // Raw YAML text for the YAML viewer, with the same version. Credential redaction still applies to config.yaml.
-    async getConfigRaw(token: string, type: ReadableConfigType) {
+    async getConfigRaw(type: ReadableConfigType) {
         const res = await fetch(proxyPath(`/api/v1/config/${type}?raw=true`), {
             headers: WEB_CLIENT_HEADERS,
         });
@@ -454,7 +431,7 @@ export const api = {
     },
 
     // Reconcile declared state against devices now (also runs after each config save).
-    syncNow(token: string) {
+    syncNow() {
         return request<{
             message: string;
             profiles_queued: number;
@@ -463,12 +440,11 @@ export const api = {
             tasks_timed_out: number;
             devices: number;
             errors: number;
-        }>("/api/v1/sync", token, {method: "POST"});
+        }>("/api/v1/sync", {method: "POST"});
     },
 
     // ifMatch (document version for optimistic locking); returned version for continued saves.
     async updateConfig(
-        token: string,
         type: EditableConfigType,
         data: Record<string, unknown>,
         yamlText?: string,
@@ -481,7 +457,7 @@ export const api = {
             message: string;
             warnings: string[];
             flow_warnings?: FlowWarning[];
-        }>(`/api/v1/config/${type}`, token, {
+        }>(`/api/v1/config/${type}`, {
             method: "PUT",
             body: JSON.stringify(body),
             headers: opts.ifMatch ? {"If-Match": opts.ifMatch} : undefined,
@@ -491,7 +467,6 @@ export const api = {
 
     // Dry-run validate (same validation as save, nothing written).
     validateConfig(
-        token: string,
         type: EditableConfigType,
         data: Record<string, unknown>,
     ) {
@@ -500,37 +475,33 @@ export const api = {
             errors: string[];
             warnings: string[];
             flow_warnings: FlowWarning[];
-        }>(`/api/v1/config/${type}?dry_run=true`, token, {
+        }>(`/api/v1/config/${type}?dry_run=true`, {
             method: "PUT",
             body: JSON.stringify(data),
         });
     },
 
     // Config version history (every save snapshots previous document).
-    listConfigHistory(token: string, type: EditableConfigType) {
+    listConfigHistory(type: EditableConfigType) {
         return request<{ versions: ConfigVersion[] }>(
             `/api/v1/config/${type}/history`,
-            token,
         );
     },
 
-    getConfigVersion(token: string, type: EditableConfigType, id: string) {
+    getConfigVersion(type: EditableConfigType, id: string) {
         return request<ConfigVersion & { content: string }>(
             `/api/v1/config/${type}/history/${encodeURIComponent(id)}`,
-            token,
         );
     },
 
     // Restore runs same validate/snapshot/write/reconcile as save (itself undoable, conflicts like save).
     async restoreConfigVersion(
-        token: string,
         type: EditableConfigType,
         id: string,
         opts: { ifMatch?: string } = {},
     ) {
         const {data, res} = await requestWithResponse<{ message: string; warnings: string[] }>(
             `/api/v1/config/${type}/history/${encodeURIComponent(id)}/restore`,
-            token,
             {
                 method: "POST",
                 headers: opts.ifMatch ? {"If-Match": opts.ifMatch} : undefined,
@@ -540,7 +511,7 @@ export const api = {
     },
 
     // App package upload (multipart). Returns S3 key and warnings from .pkg ToC.
-    async uploadApp(token: string, file: File, appId: string, version: string) {
+    async uploadApp(file: File, appId: string, version: string) {
         const fd = new FormData();
         fd.append("file", file);
         const qs = new URLSearchParams({app_id: appId, version}).toString();
@@ -570,21 +541,20 @@ export const api = {
     },
 
     // List tenant's object store, newest first (admin only). 400 if no bucket configured.
-    listAppPackages(token: string) {
-        return request<AppPackageList>("/api/v1/apps/packages", token);
+    listAppPackages() {
+        return request<AppPackageList>("/api/v1/apps/packages");
     },
 
     // Every device this app has a deployment row on, one row per device.
-    getAppDeployments(token: string, appId: string) {
+    getAppDeployments(appId: string) {
         return request<AppDeploymentsResponse>(
             `/api/v1/apps/${encodeURIComponent(appId)}/deployments`,
-            token,
         );
     },
 
     // Checksum of package arriving outside upload endpoint (server streams and records digest).
-    checksumAppPackage(token: string, s3Key: string) {
-        return request<{ s3_key: string; sha256: string }>("/api/v1/apps/packages/checksum", token, {
+    checksumAppPackage(s3Key: string) {
+        return request<{ s3_key: string; sha256: string }>("/api/v1/apps/packages/checksum", {
             method: "POST",
             body: JSON.stringify({s3_key: s3Key}),
         });
@@ -592,7 +562,6 @@ export const api = {
 
     // Tasks
     listTasks(
-        token: string,
         params: { skip?: number; limit?: number; status?: string; device_id?: string; user?: string } = {},
     ) {
         const qs = new URLSearchParams(
@@ -602,43 +571,39 @@ export const api = {
         ).toString();
         return request<{ total: number; tasks: Task[] }>(
             `/api/v1/tasks${qs ? `?${qs}` : ""}`,
-            token,
         );
     },
 
-    getTask(token: string, id: string) {
-        return request<Task>(`/api/v1/tasks/${id}`, token);
+    getTask(id: string) {
+        return request<Task>(`/api/v1/tasks/${id}`);
     },
 
     // Server-published device command catalog (role-aware). The UI builds its
     // command menus from this, so new server commands appear automatically.
-    getCommandCatalog(token: string) {
-        return request<{ commands: CatalogCommand[] }>("/api/v1/commands/catalog", token);
+    getCommandCatalog() {
+        return request<{ commands: CatalogCommand[] }>("/api/v1/commands/catalog");
     },
 
     // Kinds, labels, and reveal ledger (never plaintext).
-    getDeviceSecrets(token: string, deviceId: string) {
+    getDeviceSecrets(deviceId: string) {
         return request<{ secrets: DeviceSecret[] }>(
             `/api/v1/devices/${deviceId}/secrets`,
-            token,
         );
     },
     // Reveal plaintext (once, audited, raises alert).
-    revealDeviceSecret(token: string, deviceId: string, kind: string) {
+    revealDeviceSecret(deviceId: string, kind: string) {
         return request<RevealedSecret>(
             `/api/v1/devices/${deviceId}/secrets/${kind}/reveal`,
-            token,
             {method: "POST"},
         );
     },
 
     // Node palette and wait-signal registry (for visual editor).
-    getFlowStepCatalog(token: string) {
-        return request<FlowStepCatalog>("/api/v1/flows/step-catalog", token);
+    getFlowStepCatalog() {
+        return request<FlowStepCatalog>("/api/v1/flows/step-catalog");
     },
     // Fleet-wide flow runs (per-device endpoint shows which one device did not provision).
     listFlowRuns(
-        token: string,
         params: {
             skip?: number;
             limit?: number;
@@ -659,28 +624,26 @@ export const api = {
                 .filter(([, v]) => v !== undefined && v !== false && v !== "")
                 .map(([k, v]) => [k, String(v)]),
         ).toString();
-        return request<FlowRunList>(`/api/v1/flow-runs${qs ? `?${qs}` : ""}`, token);
+        return request<FlowRunList>(`/api/v1/flow-runs${qs ? `?${qs}` : ""}`);
     },
     // Flow runs for one device (for run viewer).
-    getDeviceFlowRuns(token: string, deviceId: string) {
+    getDeviceFlowRuns(deviceId: string) {
         return request<{ flow_runs: FlowRunSummary[] }>(
             `/api/v1/devices/${deviceId}/flow-runs`,
-            token,
         );
     },
     // Single run (includes pinned flow snapshot).
-    getFlowRun(token: string, runId: string) {
-        return request<FlowRunDetail>(`/api/v1/flow-runs/${runId}`, token);
+    getFlowRun(runId: string) {
+        return request<FlowRunDetail>(`/api/v1/flow-runs/${runId}`);
     },
     // All flows and drafts (for switcher and limits).
-    getFlowsSummary(token: string) {
-        return request<FlowsSummaryResponse>("/api/v1/flows/summary", token);
+    getFlowsSummary() {
+        return request<FlowsSummaryResponse>("/api/v1/flows/summary");
     },
     // Create flow draft.
-    async createFlowDraft(token: string, flowId: string, note?: string, ifMatch?: string) {
+    async createFlowDraft(flowId: string, note?: string, ifMatch?: string) {
         const {data, res} = await requestWithResponse<FlowDoc>(
             `/api/v1/flows/${flowId}/draft`,
-            token,
             {
                 method: "POST",
                 body: JSON.stringify({note: note ?? ""}),
@@ -690,12 +653,11 @@ export const api = {
         return {data, version: res.headers.get(CONFIG_VERSION_HEADER) ?? null};
     },
     // Semantic diff (live flow vs draft).
-    getFlowDraftDiff(token: string, flowId: string) {
-        return request<DraftDiff>(`/api/v1/flows/${flowId}/draft/diff`, token);
+    getFlowDraftDiff(flowId: string) {
+        return request<DraftDiff>(`/api/v1/flows/${flowId}/draft/diff`);
     },
     // Promote draft to replace live flow.
     async promoteFlowDraft(
-        token: string,
         flowId: string,
         options: { acknowledge?: string[]; force?: boolean } = {},
         ifMatch?: string,
@@ -707,7 +669,6 @@ export const api = {
             gate_findings?: GateFinding[];
         }>(
             `/api/v1/flows/${flowId}/promote-draft`,
-            token,
             {
                 method: "POST",
                 body: JSON.stringify({
@@ -720,10 +681,9 @@ export const api = {
         return {...data, version: res.headers.get(CONFIG_VERSION_HEADER) ?? null};
     },
     // Discard draft.
-    async discardFlowDraft(token: string, flowId: string, ifMatch?: string) {
+    async discardFlowDraft(flowId: string, ifMatch?: string) {
         const {data, res} = await requestWithResponse<{ deleted: boolean }>(
             `/api/v1/flows/${flowId}/draft`,
-            token,
             {
                 method: "DELETE",
                 headers: ifMatch ? {"If-Match": ifMatch} : undefined,
@@ -733,11 +693,10 @@ export const api = {
     },
 
     // == Dispatcher (compliance) ==
-    getDispatcherCheckCatalog(token: string) {
-        return request<{ checks: DispatcherCheckSpec[] }>("/api/v1/dispatcher/check-catalog", token);
+    getDispatcherCheckCatalog() {
+        return request<{ checks: DispatcherCheckSpec[] }>("/api/v1/dispatcher/check-catalog");
     },
     listAlerts(
-        token: string,
         params: { severity?: string; status?: string; device_id?: string } = {},
     ) {
         const qs = new URLSearchParams(
@@ -745,92 +704,84 @@ export const api = {
         ).toString();
         return request<{ alerts: DispatcherAlert[]; counts: Record<string, number>; active: number }>(
             `/api/v1/alerts${qs ? `?${qs}` : ""}`,
-            token,
         );
     },
-    acknowledgeAlert(token: string, id: string) {
-        return request<DispatcherAlert>(`/api/v1/alerts/${id}/acknowledge`, token, {method: "POST"});
+    acknowledgeAlert(id: string) {
+        return request<DispatcherAlert>(`/api/v1/alerts/${id}/acknowledge`, {method: "POST"});
     },
-    unacknowledgeAlert(token: string, id: string) {
-        return request<DispatcherAlert>(`/api/v1/alerts/${id}/unacknowledge`, token, {method: "POST"});
+    unacknowledgeAlert(id: string) {
+        return request<DispatcherAlert>(`/api/v1/alerts/${id}/unacknowledge`, {method: "POST"});
     },
     // Dismissing a credential reveal alert takes an admin, and only that kind of alert reads the reason.
-    resolveAlert(token: string, id: string, reason?: string) {
-        return request<DispatcherAlert>(`/api/v1/alerts/${id}/resolve`, token, {
+    resolveAlert(id: string, reason?: string) {
+        return request<DispatcherAlert>(`/api/v1/alerts/${id}/resolve`, {
             method: "POST",
             ...(reason ? {body: JSON.stringify({reason})} : {}),
         });
     },
     // Action on ATC alert (in-setup release or gate decision).
-    alertAction(token: string, id: string, actionKey: string) {
+    alertAction(id: string, actionKey: string) {
         return request<{ message: string; alert?: DispatcherAlert; run?: FlowRunSummary }>(
             `/api/v1/alerts/${id}/action`,
-            token,
             {method: "POST", body: JSON.stringify({action_key: actionKey})},
         );
     },
     // Admin-approve a queued destructive remediation.
-    approveRemediation(token: string, id: string, actionKey: string) {
+    approveRemediation(id: string, actionKey: string) {
         return request<{ message: string; outcome: string; alert: DispatcherAlert }>(
             `/api/v1/alerts/${id}/remediate`,
-            token,
             {method: "POST", body: JSON.stringify({action_key: actionKey})},
         );
     },
     // Veto queued remediation (allowed on resolved alerts, unlike approval).
-    rejectRemediation(token: string, id: string, actionKey: string, reason?: string) {
+    rejectRemediation(id: string, actionKey: string, reason?: string) {
         return request<{ message: string; alert: DispatcherAlert }>(
             `/api/v1/alerts/${id}/remediation/reject`,
-            token,
             {
                 method: "POST",
                 body: JSON.stringify({action_key: actionKey, ...(reason ? {reason} : {})}),
             },
         );
     },
-    dispatcherEvaluate(token: string) {
+    dispatcherEvaluate() {
         return request<{ message: string; devices_evaluated: number }>(
             "/api/v1/dispatcher/evaluate",
-            token,
             {method: "POST"},
         );
     },
 
-    cancelTask(token: string, id: string) {
-        return request<{ message: string }>(`/api/v1/tasks/${id}/cancel`, token, {
+    cancelTask(id: string) {
+        return request<{ message: string }>(`/api/v1/tasks/${id}/cancel`, {
             method: "POST",
         });
     },
 
     // Retry failed or cancelled task through original handler.
-    retryTask(token: string, id: string) {
+    retryTask(id: string) {
         return request<{ task_id: string; message: string }>(
             `/api/v1/tasks/${id}/retry`,
-            token,
             {method: "POST"},
         );
     },
 
     // Tenant
-    getTenant(token: string) {
-        return request<TenantInfo>("/api/v1/tenant", token);
+    getTenant() {
+        return request<TenantInfo>("/api/v1/tenant");
     },
 
     // == FileVault recovery-key escrow (admin only) ==
-    getFileVaultEscrow(token: string) {
-        return request<FileVaultEscrowStatus>("/api/v1/tenant/filevault-escrow", token);
+    getFileVaultEscrow() {
+        return request<FileVaultEscrowStatus>("/api/v1/tenant/filevault-escrow");
     },
     // Create keypair (409 if one exists; replace=true creates a new one).
-    generateFileVaultEscrow(token: string, replace = false) {
+    generateFileVaultEscrow(replace = false) {
         return request<FileVaultEscrowStatus>(
             `/api/v1/tenant/filevault-escrow?replace=${replace}`,
-            token,
             {method: "POST"},
         );
     },
     // Certificate as PEM text, fetched rather than linked.
-    // eslint-disable-next-line @typescript-eslint/no-unused-vars
-    async getFileVaultCertificate(token: string) {
+    async getFileVaultCertificate() {
         const res = await fetch(proxyPath("/api/v1/tenant/filevault-escrow/certificate"), {
             headers: WEB_CLIENT_HEADERS,
         });
@@ -848,23 +799,22 @@ export const api = {
     },
 
     // == Enrollment profile signing identity (admin only). The private key is write-only. ==
-    getProfileSigning(token: string) {
-        return request<ProfileSigningStatus>("/api/v1/tenant/profile-signing", token);
+    getProfileSigning() {
+        return request<ProfileSigningStatus>("/api/v1/tenant/profile-signing");
     },
     // Files are sent as base64: a Keychain Access .p12 export and optional DER .cer intermediates.
-    importProfileSigning(token: string, body: { p12_b64: string; password: string; intermediates_b64: string[] }) {
-        return request<ProfileSigningStatus>("/api/v1/tenant/profile-signing", token, {
+    importProfileSigning(body: { p12_b64: string; password: string; intermediates_b64: string[] }) {
+        return request<ProfileSigningStatus>("/api/v1/tenant/profile-signing", {
             method: "POST",
             body: JSON.stringify(body),
         });
     },
-    deleteProfileSigning(token: string) {
-        return request<ProfileSigningStatus>("/api/v1/tenant/profile-signing", token, {method: "DELETE"});
+    deleteProfileSigning() {
+        return request<ProfileSigningStatus>("/api/v1/tenant/profile-signing", {method: "DELETE"});
     },
 
     // Update tenant settings (admin only). Any omitted field is left unchanged.
     updateTenant(
-        token: string,
         body: {
             name?: string;
             allowed_users?: string[];
@@ -877,71 +827,68 @@ export const api = {
             apns_cert_expires_at?: string | null;
             dep_token_expires_at?: string | null;
             // Tenant-default device-naming template. An empty template clears it, omitting it leaves it unchanged.
-            device_naming?: { template: string; apply_on_enroll?: boolean };
+            device_naming?: { template: string };
             // Reverse-DNS base for PayloadIdentifiers (empty string clears back to built-in).
             payload_identifier_prefix?: string;
         },
     ) {
-        return request<{ message: string }>("/api/v1/tenant", token, {
+        return request<{ message: string }>("/api/v1/tenant", {
             method: "PUT",
             body: JSON.stringify(body),
         });
     },
 
     // Users, admin only; a non-admin call returns 403.
-    listUsers(token: string) {
-        return request<{ users: User[] }>("/api/v1/users", token);
+    listUsers() {
+        return request<{ users: User[] }>("/api/v1/users");
     },
 
     createUser(
-        token: string,
         body: { email: string; role: string; password?: string; external_id?: string },
     ) {
-        return request<{ id: string; email: string; role: string }>("/api/v1/users", token, {
+        return request<{ id: string; email: string; role: string }>("/api/v1/users", {
             method: "POST",
             body: JSON.stringify(body),
         });
     },
 
     updateUser(
-        token: string,
         id: string,
         body: { role?: string; password?: string; is_active?: boolean },
     ) {
-        return request<{ message: string }>(`/api/v1/users/${id}`, token, {
+        return request<{ message: string }>(`/api/v1/users/${id}`, {
             method: "PUT",
             body: JSON.stringify(body),
         });
     },
 
-    deleteUser(token: string, id: string) {
-        return request<{ message: string }>(`/api/v1/users/${id}`, token, {
+    deleteUser(id: string) {
+        return request<{ message: string }>(`/api/v1/users/${id}`, {
             method: "DELETE",
         });
     },
 
     // Enrollment
-    getEnrollment(token: string) {
-        return request<EnrollmentDetails>("/api/v1/enrollment", token);
+    getEnrollment() {
+        return request<EnrollmentDetails>("/api/v1/enrollment");
     },
-    listEnrollmentLinks(token: string) {
-        return request<{ links: EnrollmentLink[] }>("/api/v1/enrollment/links", token);
+    listEnrollmentLinks() {
+        return request<{ links: EnrollmentLink[] }>("/api/v1/enrollment/links");
     },
-    createEnrollmentLink(token: string, body: EnrollmentLinkCreate) {
-        return request<EnrollmentLink>("/api/v1/enrollment/links", token, {
+    createEnrollmentLink(body: EnrollmentLinkCreate) {
+        return request<EnrollmentLink>("/api/v1/enrollment/links", {
             method: "POST",
             body: JSON.stringify(body),
         });
     },
-    revokeEnrollmentLink(token: string, id: string) {
-        return request<EnrollmentLink>(`/api/v1/enrollment/links/${encodeURIComponent(id)}`, token, {
+    revokeEnrollmentLink(id: string) {
+        return request<EnrollmentLink>(`/api/v1/enrollment/links/${encodeURIComponent(id)}`, {
             method: "DELETE",
         });
     },
 
     // POST-SCEP check-ins that never became a device (diagnostic only).
     getEnrollmentAttempts(
-        token: string,
         params: { skip?: number; limit?: number; outcome?: string } = {},
     ) {
         const qs = new URLSearchParams(
@@ -951,13 +898,11 @@ export const api = {
         ).toString();
         return request<{ total: number; attempts: EnrollmentAttempt[] }>(
             `/api/v1/enrollment-attempts${qs ? `?${qs}` : ""}`,
-            token,
         );
     },
 
     // Check-ins with no tenant (admin only, all have null tenant_id).
     getUnattributedEnrollmentAttempts(
-        token: string,
         params: { skip?: number; limit?: number; outcome?: string } = {},
     ) {
         const qs = new URLSearchParams(
@@ -967,13 +912,11 @@ export const api = {
         ).toString();
         return request<{ total: number; attempts: EnrollmentAttempt[] }>(
             `/api/v1/enrollment-attempts/unattributed${qs ? `?${qs}` : ""}`,
-            token,
         );
     },
 
     // Audit log (admin only, tenant-scoped). Every filter is an exact match on server-written value.
     listAuditLog(
-        token: string,
         params: {
             skip?: number;
             limit?: number;
@@ -995,25 +938,24 @@ export const api = {
         ).toString();
         return request<{ total: number; entries: AuditLogEntry[] }>(
             `/api/v1/audit-log${qs ? `?${qs}` : ""}`,
-            token,
         );
     },
 
     // == Automated Device Enrollment (ADE/DEP) + ABM/ASM ==
-    listDepServers(token: string) {
-        return request<{ servers: DepServer[] }>("/api/v1/dep/servers", token);
+    listDepServers() {
+        return request<{ servers: DepServer[] }>("/api/v1/dep/servers");
     },
-    getDepServer(token: string, id: string) {
-        return request<DepServerDetail>(`/api/v1/dep/servers/${id}`, token);
+    getDepServer(id: string) {
+        return request<DepServerDetail>(`/api/v1/dep/servers/${id}`);
     },
     // Returns server + public_cert_pem; enroll_url and profiles from GET endpoint only.
-    createDepServer(token: string, name: string) {
-        return request<DepServerCreated>("/api/v1/dep/servers", token, {
+    createDepServer(name: string) {
+        return request<DepServerCreated>("/api/v1/dep/servers", {
             method: "POST",
             body: JSON.stringify({name}),
         });
     },
-    async uploadDepToken(token: string, id: string, file: File) {
+    async uploadDepToken(id: string, file: File) {
         const fd = new FormData();
         fd.append("file", file);
         // Direct fetch so the browser sets the multipart boundary itself.
@@ -1034,77 +976,75 @@ export const api = {
         }
         return res.json() as Promise<DepServer>;
     },
-    unlinkDepServer(token: string, id: string) {
-        return request<{ status: string }>(`/api/v1/dep/servers/${id}`, token, {method: "DELETE"});
+    unlinkDepServer(id: string) {
+        return request<{ status: string }>(`/api/v1/dep/servers/${id}`, {method: "DELETE"});
     },
     // Fully remove a connection (never-finished or retired), rather than unlinking it.
-    removeDepServer(token: string, id: string) {
-        return request<{ status: string }>(`/api/v1/dep/servers/${id}?purge=true`, token, {
+    removeDepServer(id: string) {
+        return request<{ status: string }>(`/api/v1/dep/servers/${id}?purge=true`, {
             method: "DELETE",
         });
     },
-    syncDepServer(token: string, id: string) {
-        return request<DepSyncSummary>(`/api/v1/dep/servers/${id}/sync`, token, {method: "POST"});
+    syncDepServer(id: string) {
+        return request<DepSyncSummary>(`/api/v1/dep/servers/${id}/sync`, {method: "POST"});
     },
-    listDepDevices(token: string, id: string) {
-        return request<{ devices: DepDevice[] }>(`/api/v1/dep/servers/${id}/devices`, token);
+    listDepDevices(id: string) {
+        return request<{ devices: DepDevice[] }>(`/api/v1/dep/servers/${id}/devices`);
     },
-    setDepDefaultProfile(token: string, id: string, profileId: string | null) {
-        return request<DepServer>(`/api/v1/dep/servers/${id}/default-profile`, token, {
+    setDepDefaultProfile(id: string, profileId: string | null) {
+        return request<DepServer>(`/api/v1/dep/servers/${id}/default-profile`, {
             method: "POST",
             body: JSON.stringify({profile_id: profileId}),
         });
     },
-    pushDepProfile(token: string, id: string, profileId: string) {
+    pushDepProfile(id: string, profileId: string) {
         return request<DepProfileMapping>(
             `/api/v1/dep/servers/${id}/profiles/${encodeURIComponent(profileId)}/push`,
-            token,
             {method: "POST"},
         );
     },
-    assignDepProfile(token: string, id: string, profileId: string, serials: string[]) {
+    assignDepProfile(id: string, profileId: string, serials: string[]) {
         // Apple sends retry_after_seconds only on assignment, only when at least one device came back THROTTLED,
         // and only above server protocol version 10. Unassign and disown never carry it.
         return request<{ results: Record<string, string>; retry_after_seconds?: number | null }>(
             `/api/v1/dep/servers/${id}/assign`,
-            token,
             {
                 method: "POST",
                 body: JSON.stringify({profile_id: profileId, serials}),
             },
         );
     },
-    unassignDepProfile(token: string, id: string, serials: string[]) {
-        return request<{ results: Record<string, string> }>(`/api/v1/dep/servers/${id}/unassign`, token, {
+    unassignDepProfile(id: string, serials: string[]) {
+        return request<{ results: Record<string, string> }>(`/api/v1/dep/servers/${id}/unassign`, {
             method: "POST",
             body: JSON.stringify({serials}),
         });
     },
-    disownDepDevices(token: string, id: string, serials: string[]) {
-        return request<{ results: Record<string, string> }>(`/api/v1/dep/servers/${id}/disown`, token, {
+    disownDepDevices(id: string, serials: string[]) {
+        return request<{ results: Record<string, string> }>(`/api/v1/dep/servers/${id}/disown`, {
             method: "POST",
             body: JSON.stringify({serials}),
         });
     },
-    getDepSkipKeys(token: string) {
-        return request<{ skip_keys: DepSkipKey[] }>("/api/v1/dep/skip-keys", token);
+    getDepSkipKeys() {
+        return request<{ skip_keys: DepSkipKey[] }>("/api/v1/dep/skip-keys");
     },
 
     // == Declarative Device Management (DDM) ==
     // Device DDM state (desired vs reported, sync status, drift); include_payloads returns payloads.
-    getDeviceDdm(token: string, deviceId: string, includePayloads = false) {
+    getDeviceDdm(deviceId: string, includePayloads = false) {
         const qs = includePayloads ? "?include_payloads=1" : "";
-        return request<DdmDeviceState>(`/api/v1/devices/${deviceId}/ddm${qs}`, token);
+        return request<DdmDeviceState>(`/api/v1/devices/${deviceId}/ddm${qs}`);
     },
     // Queue immediate DDM sync (admin).
-    syncDeviceDdm(token: string, deviceId: string) {
-        return request<{ queued: boolean }>(`/api/v1/devices/${deviceId}/ddm/sync`, token, {
+    syncDeviceDdm(deviceId: string) {
+        return request<{ queued: boolean }>(`/api/v1/devices/${deviceId}/ddm/sync`, {
             method: "POST",
         });
     },
     // Declarations catalog (one row per declaration with scope).
-    listDeclarations(token: string) {
-        return request<{ declarations: DeclarationSummary[] }>("/api/v1/declarations", token);
+    listDeclarations() {
+        return request<{ declarations: DeclarationSummary[] }>("/api/v1/declarations");
     },
 
     // Health
@@ -1590,7 +1530,7 @@ export interface DeclarationSummary {
     not_served?: string;
 }
 
-// Event in this tenant. null actor_email = system row (Dispatcher, ATC, enrollment webhook); retention prunes system rows only.
+// Event in this tenant. null actor_email = system row (Dispatcher, ATC, enrollment webhook), the only rows pruned.
 export interface AuditLogEntry {
     id: string;
     tenant_id: string | null;
@@ -1713,7 +1653,7 @@ export interface TenantInfo {
     apns_cert_expires_at: string | null;
     dep_token_expires_at: string | null;
     // Tenant-default device-naming template.
-    device_naming?: { template?: string; apply_on_enroll?: boolean };
+    device_naming?: { template?: string };
     // Reverse-DNS base for PayloadIdentifiers (null = built-in "com.mdm.<tenant id>").
     payload_identifier_prefix?: string | null;
     // FileVault escrow at a glance (details from getFileVaultEscrow).
@@ -1741,7 +1681,7 @@ export interface FlowNodeParamSpec {
     help?: string;
     // Marks a credential, which is stored in plain-text, versioned yaml.
     secret?: boolean;
-    // scope rides along on the start node's trigger options, which are the start kinds.
+    // scope is carried on the start node's trigger options, which are the start kinds.
     options?: { value: string; label: string; description?: string; scope?: string }[];
 }
 
@@ -2121,8 +2061,8 @@ export interface DispatcherConfig {
 }
 
 /** Resume run parked on manual gate (second call on decided run is idempotent). */
-export function resumeFlowRun(token: string, runId: string, edge: string) {
-    return request<FlowRunSummary>(`/api/v1/flow-runs/${runId}/resume`, token, {
+export function resumeFlowRun(runId: string, edge: string) {
+    return request<FlowRunSummary>(`/api/v1/flow-runs/${runId}/resume`, {
         method: "POST",
         body: JSON.stringify({edge}),
     });

@@ -32,16 +32,15 @@ export default function DeclarationsPage() {
     const router = useRouter();
     // A member cannot write declarations.yaml and the YAML page this hands off to is read-only for them, so the
     // buttons say View rather than Edit.
-    const {token, isAdmin} = useAuth();
+    const {isAdmin} = useAuth();
     const [declarations, setDeclarations] = useState<DeclarationSummary[]>([]);
     const [tenant, setTenant] = useState<TenantInfo | null>(null);
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState<string | null>(null);
 
     useEffect(() => {
-        if (!token) return;
         setLoading(true);
-        Promise.all([api.listDeclarations(token), api.getTenant(token)])
+        Promise.all([api.listDeclarations(), api.getTenant()])
             .then(([d, t]) => {
                 setDeclarations(d.declarations);
                 setTenant(t);
@@ -49,7 +48,7 @@ export default function DeclarationsPage() {
             })
             .catch((e: unknown) => setError(e instanceof ApiError ? e.message : (e as Error).message))
             .finally(() => setLoading(false));
-    }, [token]);
+    }, []);
 
     return (
         <Stack gap="lg">
@@ -120,7 +119,6 @@ export default function DeclarationsPage() {
                                         {d.not_served ? (
                                             // Scope matches, but something outside declarations.yaml (an environment
                                             // setting, a missing bridged profile) stops it being built for anyone.
-                                            // The device count moves into the tooltip rather than standing alone.
                                             <Tooltip
                                                 multiline
                                                 w={280}

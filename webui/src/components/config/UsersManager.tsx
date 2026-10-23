@@ -39,7 +39,7 @@ function errorMessage(e: unknown): string {
 }
 
 export function UsersManager() {
-    const {token, email: selfEmail, isAdmin} = useAuth();
+    const {email: selfEmail, isAdmin} = useAuth();
     const [users, setUsers] = useState<User[]>([]);
     const [loading, setLoading] = useState(true);
 
@@ -61,22 +61,22 @@ export function UsersManager() {
     // GET /users is admin-only, so a member never asks for it. The card below says as much in place,
     // instead of a 403 toast on a page they may open.
     const load = () => {
-        if (!token || !isAdmin) {
+        if (!isAdmin) {
             setLoading(false);
             return;
         }
         setLoading(true);
         api
-            .listUsers(token)
+            .listUsers()
             .then((r) => setUsers(r.users))
             .catch((e) => notifications.show({color: "red", message: errorMessage(e)}))
             .finally(() => setLoading(false));
     };
 
-    useEffect(load, [token, isAdmin]);
+    useEffect(load, [isAdmin]);
 
     if (!isAdmin) {
-        // No controls at all for a non-admin, since the API refuses them anyway. Same as RuleEditor.
+        // No controls at all for a non-admin, since the API refuses them anyway.
         return (
             <GlassCard withBorder p="md">
                 <Group mb="xs">
@@ -100,10 +100,9 @@ export function UsersManager() {
     }
 
     async function submitAdd() {
-        if (!token) return;
         setAdding(true);
         try {
-            await api.createUser(token, {
+            await api.createUser({
                 email: addEmail.trim(),
                 role: addRole,
                 password: addPassword || undefined,
@@ -119,10 +118,10 @@ export function UsersManager() {
     }
 
     async function changeRole(user: User, role: string) {
-        if (!token || role === user.role) return;
+        if (role === user.role) return;
         setBusyId(user.id);
         try {
-            await api.updateUser(token, user.id, {role});
+            await api.updateUser(user.id, {role});
             setUsers((us) => us.map((u) => (u.id === user.id ? {...u, role} : u)));
             notifications.show({color: "teal", message: `${user.email} is now ${role}`});
         } catch (e) {
@@ -133,11 +132,10 @@ export function UsersManager() {
     }
 
     async function toggleActive(user: User) {
-        if (!token) return;
         const nextActive = !user.is_active;
         setBusyId(user.id);
         try {
-            await api.updateUser(token, user.id, {is_active: nextActive});
+            await api.updateUser(user.id, {is_active: nextActive});
             setUsers((us) => us.map((u) => (u.id === user.id ? {...u, is_active: nextActive} : u)));
             notifications.show({
                 color: "teal",
@@ -156,10 +154,10 @@ export function UsersManager() {
     }
 
     async function submitReset() {
-        if (!token || !resetUser) return;
+        if (!resetUser) return;
         setResetting(true);
         try {
-            await api.updateUser(token, resetUser.id, {password: resetPassword});
+            await api.updateUser(resetUser.id, {password: resetPassword});
             notifications.show({color: "teal", message: `Password reset for ${resetUser.email}`});
             setResetUser(null);
         } catch (e) {
@@ -181,10 +179,9 @@ export function UsersManager() {
             labels: {confirm: "Delete", cancel: "Cancel"},
             confirmProps: {color: "red"},
             onConfirm: async () => {
-                if (!token) return;
                 setBusyId(user.id);
                 try {
-                    await api.deleteUser(token, user.id);
+                    await api.deleteUser(user.id);
                     setUsers((us) => us.filter((u) => u.id !== user.id));
                     notifications.show({color: "teal", message: `Deleted ${user.email}`});
                 } catch (e) {

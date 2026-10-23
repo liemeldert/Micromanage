@@ -1,6 +1,7 @@
 "use client";
 
-import {useCallback, useEffect, useMemo, useRef, useState} from "react";
+import {Suspense, useCallback, useEffect, useMemo, useRef, useState} from "react";
+import {useRouter, useSearchParams} from "next/navigation";
 import {
     ActionIcon,
     Alert,
@@ -146,12 +147,11 @@ interface ServerVerdict {
 }
 
 async function fetchServerVerdict(
-    token: string,
     doc: FlowsConfig,
 ): Promise<ServerVerdict | null> {
     try {
         const res = await Promise.race([
-            api.validateConfig(token, "flows", doc as unknown as Record<string, unknown>),
+            api.validateConfig("flows", doc as unknown as Record<string, unknown>),
             new Promise<null>((resolve) => setTimeout(() => resolve(null), WARNING_FETCH_TIMEOUT_MS)),
         ]);
         if (!res || typeof res.valid !== "boolean") return null;
@@ -169,10 +169,23 @@ async function fetchServerVerdict(
 // The editor fills the window: the canvas takes whatever the toolbar above it leaves, down to the bottom of the
 // window, so the page never scrolls and never ends short of the bottom.
 const CANVAS_STACK_GAP = 8;
+// One height for every control in the toolbar row, matching the tabs and the xs buttons.
+const TOOLBAR_CONTROL_HEIGHT = 30;
 const CANVAS_BOTTOM_SLACK = 8;
 
 export default function ATCPage() {
-    const {token, isAdmin} = useAuth();
+    return (
+        // useSearchParams requires a Suspense boundary during prerender.
+        <Suspense fallback={null}>
+            <ATCEditor/>
+        </Suspense>
+    );
+}
+
+function ATCEditor() {
+    const {isAdmin} = useAuth();
+    const router = useRouter();
+    const urlFlowId = useSearchParams().get("flow");
     const {data, setData, loading, saving, save, version, setVersion} = useConfigResource<FlowsConfig>("flows", {
         version: 2,
         flows: [defaultEnrollmentFlow()],
@@ -210,31 +223,30 @@ export default function ATCPage() {
     }, []);
 
     useEffect(() => {
-        if (!token) return;
         setCatalogState("loading");
         api
-            .getFlowStepCatalog(token)
+            .getFlowStepCatalog()
             .then((c) => {
                 setCatalog(c.nodes);
                 setStartKinds(c.start_kinds ?? []);
                 setCatalogState(c.nodes?.length ? "ready" : "error");
             })
             .catch(() => setCatalogState("error"));
-        api.getCommandCatalog(token).then((c) => setCommands(c.commands)).catch(() => {
+        api.getCommandCatalog().then((c) => setCommands(c.commands)).catch(() => {
         });
-        api.getConfig(token, "profiles").then((p) => setProfileIds(((p?.profiles as {
+        api.getConfig("profiles").then((p) => setProfileIds(((p?.profiles as {
             id: string
         }[]) ?? []).map((x) => x.id))).catch(() => {
         });
-        api.getConfig(token, "apps").then((a) => setAppIds(((a?.apps as {
+        api.getConfig("apps").then((a) => setAppIds(((a?.apps as {
             id: string
         }[]) ?? []).map((x) => x.id))).catch(() => {
         });
-        api.getConfig(token, "groups").then((g) => setGroups(((g?.groups as GroupDef[]) ?? []))).catch(() => {
+        api.getConfig("groups").then((g) => setGroups(((g?.groups as GroupDef[]) ?? []))).catch(() => {
         });
-        api.listDevices(token, {state: "enrolled", limit: 500}).then((r) => setDevices(r.devices)).catch(() => {
+        api.listDevices({state: "enrolled", limit: 500}).then((r) => setDevices(r.devices)).catch(() => {
         });
-    }, [token]);
+    }, []);
 
     // The flow list, whatever the server sent. flowsFromConfig carries the permanent flag through a legacy
     // single-flow response, which is what keeps the enrollment flow pinned and its tab un-closable.
@@ -337,7 +349,6 @@ export default function ATCPage() {
      * disk and the triggering edit goes into the draft, so the live flow runs unchanged until the draft is promoted. */
     const handOffToDraft = useCallback(
         async (live: FlowDoc, patch: Partial<FlowDoc>, note = "") => {
-            if (!token) return;
             const inFlight = handoffInFlight.current;
             if (inFlight) {
                 if (inFlight.liveId === live.id) {
@@ -355,7 +366,7 @@ export default function ATCPage() {
             }
             handoffInFlight.current = {liveId: live.id, patches: []};
             try {
-                const res = await api.createFlowDraft(token, live.id, note, version);
+                const res = await api.createFlowDraft(live.id, note, version);
                 if (res.version) setVersion(res.version);
                 // Edits queued while the POST was outstanding replay in order on top of the triggering one: later
                 // patches win per key.
@@ -394,7 +405,7 @@ export default function ATCPage() {
                 handoffInFlight.current = null;
             }
         },
-        [token, version, setVersion, setData],
+        [version, setVersion, setData],
     );
 
     /** An edit to nodes, name or description never reaches a live flow. It goes to that flow's draft, created on the
@@ -499,9 +510,9 @@ export default function ATCPage() {
     const [serverGateFindings, setServerGateFindings] = useState<GateFinding[]>([]);
 
     useEffect(() => {
-        if (!token || !data || docRevision === 0) return;
+        if (!data || docRevision === 0) return;
         let stale = false;
-        fetchServerVerdict(token, data).then((v) => {
+        fetchServerVerdict(data).then((v) => {
             if (!stale && v) {
                 setServerWarnings(v.flowWarnings);
                 setServerGateFindings(v.gateFindings);
@@ -510,7 +521,7 @@ export default function ATCPage() {
         return () => {
             stale = true;
         };
-    }, [token, data, docRevision]);
+    }, [data, docRevision]);
 
     const nodeWarnings = useMemo(() => {
         const m: Record<string, string[]> = {};
@@ -573,7 +584,7 @@ export default function ATCPage() {
                 if (f.draft_of) continue;
                 reasons.push(...saveGuardReasons(f));
             }
-            const fetched = token && data ? await fetchServerVerdict(token, data) : null;
+            const fetched = data ? await fetchServerVerdict(data) : null;
             if (fetched) {
                 setServerWarnings(fetched.flowWarnings);
                 setServerGateFindings(fetched.gateFindings);
@@ -610,10 +621,8 @@ export default function ATCPage() {
 
     const openSwitcher = () => {
         setSwitcherOpen(true);
-        if (token) {
-            api.getFlowsSummary(token).then(setFlowsSummary).catch(() => {
-            });
-        }
+        api.getFlowsSummary().then(setFlowsSummary).catch(() => {
+        });
     };
 
     // New flow modal
@@ -722,12 +731,14 @@ export default function ATCPage() {
         setActiveFlowId(id);
     };
 
-    // ?flow=<id> from the flows overview opens that flow selected, and ?new=1 opens the create dialog. Read once
-    // the document has loaded, and only once: after that the tab bar owns which flow is active.
+    // ?flow=<id> opens that flow selected, and ?new=1 opens the create dialog. Read once the document has loaded,
+    // and only once; after that the selected tab sets the active flow.
     const deepLinked = useRef(false);
+    const [urlRead, setUrlRead] = useState(false);
     useEffect(() => {
         if (deepLinked.current || loading) return;
         deepLinked.current = true;
+        setUrlRead(true);
         const params = new URLSearchParams(window.location.search);
         if (params.has("new")) {
             setNewFlowOpen(true);
@@ -738,6 +749,13 @@ export default function ATCPage() {
         setOpenFlowIds((prev) => (prev.includes(wanted) ? prev : [...prev, wanted]));
         setActiveFlowId(wanted);
     }, [loading, flows]);
+
+    // The URL names the active flow, so a reload opens the same one, and a navigation to bare /atc gets it back.
+    // Replaced, not pushed, so switching tabs adds no history entries.
+    useEffect(() => {
+        if (!urlRead || urlFlowId === activeFlow.id) return;
+        router.replace(`/atc?flow=${encodeURIComponent(activeFlow.id)}`, {scroll: false});
+    }, [urlRead, urlFlowId, activeFlow.id, router]);
 
     const handleCloseTab = (id: string) => {
         const nextOpen = openFlowIds.filter((fid) => fid !== id);
@@ -755,7 +773,7 @@ export default function ATCPage() {
     // The same path an edit takes, asked for up front. Whatever is on the canvas goes into the draft, not a copy of
     // the file on disk.
     const handleCreateDraft = async () => {
-        if (!token || !activeFlow) return;
+        if (!activeFlow) return;
         setCreatingDraft(true);
         try {
             await handOffToDraft(
@@ -774,9 +792,9 @@ export default function ATCPage() {
     const [currentDiff, setCurrentDiff] = useState<DraftDiff | null>(null);
 
     const handleOpenDiff = async () => {
-        if (!token || !activeFlow?.draft_of) return;
+        if (!activeFlow?.draft_of) return;
         try {
-            const diff = await api.getFlowDraftDiff(token, activeFlow.draft_of);
+            const diff = await api.getFlowDraftDiff(activeFlow.draft_of);
             setCurrentDiff(diff);
             setDiffDrawerOpen(true);
         } catch (e) {
@@ -788,9 +806,9 @@ export default function ATCPage() {
     const [promoting, setPromoting] = useState(false);
 
     const handleOpenPromote = async () => {
-        if (!token || !activeFlow?.draft_of) return;
+        if (!activeFlow?.draft_of) return;
         try {
-            const diff = await api.getFlowDraftDiff(token, activeFlow.draft_of);
+            const diff = await api.getFlowDraftDiff(activeFlow.draft_of);
             setCurrentDiff(diff);
             setPromoteModalOpen(true);
         } catch (e) {
@@ -799,16 +817,16 @@ export default function ATCPage() {
     };
 
     const handleConfirmPromote = async (options: { acknowledge: string[]; force: boolean }) => {
-        if (!token || !activeFlow?.draft_of) return;
+        if (!activeFlow?.draft_of) return;
         setPromoting(true);
         try {
             const targetId = activeFlow.draft_of;
             const draftId = activeFlow.id;
-            const res = await api.promoteFlowDraft(token, targetId, options, version);
+            const res = await api.promoteFlowDraft(targetId, options, version);
             if (res.version) setVersion(res.version);
             notifications.show({color: "teal", message: `Published the draft onto ${targetId}`});
             setPromoteModalOpen(false);
-            const cfg = await api.getConfigWithVersion(token, "flows");
+            const cfg = await api.getConfigWithVersion("flows");
             setData(cfg.data as FlowsConfig);
             // What came back is what is on disk, so it is also the new baseline.
             setSavedSnapshot(normalizedDoc(cfg.data as FlowsConfig));
@@ -824,11 +842,11 @@ export default function ATCPage() {
     };
 
     const discardDraft = async () => {
-        if (!token || !activeFlow?.draft_of) return;
+        if (!activeFlow?.draft_of) return;
         try {
             const targetId = activeFlow.draft_of;
             const draftId = activeFlow.id;
-            const res = await api.discardFlowDraft(token, targetId, version);
+            const res = await api.discardFlowDraft(targetId, version);
             if (res.version) setVersion(res.version);
             setData((prev) => ({
                 version: 2,
@@ -1060,7 +1078,8 @@ export default function ATCPage() {
                 <Box style={{position: "absolute", top: 0, left: 0, right: 0, zIndex: 5}}>
                     <FlowTabs
                         flows={flows}
-                        openFlowIds={openFlowIds}
+                        // The flow list is a placeholder until the document loads, so no tab is named before then.
+                        openFlowIds={loading ? [] : openFlowIds}
                         activeFlowId={activeFlow.id}
                         onSelectFlow={handleSelectFlow}
                         onCloseTab={handleCloseTab}
@@ -1079,7 +1098,12 @@ export default function ATCPage() {
                                 <Popover width={340} position="bottom-end" withArrow shadow="md" trapFocus>
                                     <Popover.Target>
                                         <Tooltip label="Flow details" withArrow position="top">
-                                            <ActionIcon size="md" variant="default">
+                                            <ActionIcon
+                                                size={TOOLBAR_CONTROL_HEIGHT}
+                                                variant="subtle"
+                                                color="gray"
+                                                aria-label="Flow details"
+                                            >
                                                 <IconInfoCircle size={16}/>
                                             </ActionIcon>
                                         </Tooltip>
@@ -1127,7 +1151,13 @@ export default function ATCPage() {
                                 {isCurrentDraft ? (
                                     <>
                                         <Tooltip label="Review changes against the live flow" withArrow position="top">
-                                            <ActionIcon size="md" variant="default" onClick={handleOpenDiff}>
+                                            <ActionIcon
+                                                size={TOOLBAR_CONTROL_HEIGHT}
+                                                variant="subtle"
+                                                color="gray"
+                                                onClick={handleOpenDiff}
+                                                aria-label="Review changes"
+                                            >
                                                 <IconEye size={16}/>
                                             </ActionIcon>
                                         </Tooltip>
@@ -1142,7 +1172,7 @@ export default function ATCPage() {
                                         </Button>
                                         <Tooltip label="Discard this draft" withArrow position="top">
                                             <ActionIcon
-                                                size="md"
+                                                size={TOOLBAR_CONTROL_HEIGHT}
                                                 variant="subtle"
                                                 color="red"
                                                 onClick={handleDiscardDraft}
@@ -1155,13 +1185,18 @@ export default function ATCPage() {
                                 ) : null}
 
                                 <Tooltip label={ADMIN_ONLY_REASON} withArrow disabled={isAdmin}>
-                                    <Box>
+                                    <Box
+                                        h={TOOLBAR_CONTROL_HEIGHT}
+                                        px={4}
+                                        style={{display: "flex", alignItems: "center"}}
+                                    >
                                         <Switch
                                             size="sm"
                                             label="Enabled"
                                             checked={activeFlow.enabled !== false}
                                             onChange={(e) => patchFlow(activeFlow.id, {enabled: e.currentTarget.checked})}
-                                            disabled={!isAdmin || isCurrentDraft}
+                                            disabled={loading || !isAdmin || isCurrentDraft}
+                                            styles={{label: {paddingInlineStart: 8}}}
                                         />
                                     </Box>
                                 </Tooltip>
@@ -1310,6 +1345,7 @@ function FlowStatusControl({
         return (
             <Tooltip label="Blocks that are not finished yet. Click for the list." withArrow>
                 <Button
+                    size="xs"
                     variant="light"
                     color="red"
                     leftSection={<IconExclamationCircle size={16}/>}
@@ -1324,6 +1360,7 @@ function FlowStatusControl({
         return (
             <Tooltip label="Advisory, from the server. Click for the list." withArrow>
                 <Button
+                    size="xs"
                     variant="light"
                     color="yellow"
                     leftSection={<IconAlertTriangle size={16}/>}
@@ -1335,9 +1372,8 @@ function FlowStatusControl({
         );
     }
     return (
-        <Group gap={6} c="dimmed" wrap="nowrap" align="center">
-            <IconCircleCheck size={16}/>
-            <Text fz="sm">No issues</Text>
-        </Group>
+        <Button size="xs" variant="subtle" color="gray" leftSection={<IconCircleCheck size={16}/>} onClick={onOpen}>
+            No issues
+        </Button>
     );
 }

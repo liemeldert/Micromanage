@@ -58,6 +58,8 @@ export interface PaletteDestination {
     group?: NavGroupId;
     // Sidebar label for when the group already names the subject
     navLabel?: string;
+    // Other paths on which this entry is the current sidebar row.
+    activeFor?: string[];
     // One short line under the label in the palette. Not shown in the sidebar.
     description?: string;
     // Extra search terms: old names, acronyms, and words the label does not contain.
@@ -164,23 +166,12 @@ export const PALETTE_DESTINATIONS: PaletteDestination[] = [
         label: "Flow Overview",
         navLabel: "Overview",
         href: "/atc/overview",
+        // The editor has no sidebar row of its own.
+        activeFor: ["/atc"],
         icon: IconTopologyStar3,
         group: "automation",
         description: "Every flow, what starts it, and how often it has run",
         keywords: ["atc", "flows", "overview", "automation", "list", "cards"],
-        sidebar: true,
-    },
-    {
-        // The product names (ATC, Dispatcher) are introduced on their own pages, next to what
-        // they do. The nav uses the plain word.
-        id: "flows",
-        label: "Flows",
-        navLabel: "Editor",
-        href: "/atc",
-        icon: IconVectorBezier2,
-        group: "automation",
-        description: "Automation flows and rules",
-        keywords: ["atc", "automation", "dispatcher", "workflow", "rules", "trigger"],
         sidebar: true,
     },
     {
@@ -207,16 +198,6 @@ export const PALETTE_DESTINATIONS: PaletteDestination[] = [
         group: "compliance",
     },
     {
-        id: "tasks",
-        label: "System tasks",
-        href: "/settings/tasks",
-        icon: IconListCheck,
-        description: "Queued and completed work",
-        keywords: ["queue", "job", "command", "history", "failed", "tasks"],
-        sidebar: true,
-        group: "admin",
-    },
-    {
         // Shown only when enabled in Settings, Interface.
         id: "yaml",
         label: "YAML",
@@ -241,6 +222,16 @@ export const PALETTE_DESTINATIONS: PaletteDestination[] = [
 
     // Pages and sections with no sidebar entry, found by name in the palette.
     {
+        // Without a flow in the URL the editor opens the enrollment flow; other flows open from the Overview cards.
+        id: "flows",
+        label: "Flow editor",
+        href: "/atc",
+        icon: IconVectorBezier2,
+        group: "automation",
+        description: "Edit the open flow, or the enrollment flow",
+        keywords: ["atc", "flows", "editor", "automation", "dispatcher", "workflow", "rules", "trigger", "enrollment"],
+    },
+    {
         id: "flow-runs",
         label: "Flow runs",
         navLabel: "Run history",
@@ -250,6 +241,16 @@ export const PALETTE_DESTINATIONS: PaletteDestination[] = [
         keywords: ["atc", "runs", "executions", "history", "automation"],
         sidebar: true,
         group: "automation",
+    },
+    {
+        id: "tasks",
+        label: "System tasks",
+        href: "/settings/tasks",
+        icon: IconListCheck,
+        description: "Queued and completed work",
+        keywords: ["queue", "job", "command", "history", "failed", "tasks"],
+        sidebar: true,
+        group: "admin",
     },
     {
         id: "audit-log",

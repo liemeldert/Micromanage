@@ -178,8 +178,8 @@ function pick(obj: unknown, ...keys: string[]): string {
 
 
 // Structured inventory values. Apple reports arrays and dictionaries for keys like the firewall app exceptions and
-// OSUpdateSettings, which reach the fact tables as one long line of raw JSON. Parsing that text back lets the row
-// show a summary with the formatted JSON behind a click.
+// OSUpdateSettings, which reach the fact tables as raw JSON text. Parsing it back lets the row show a summary with
+// the formatted JSON on click.
 function parseStructured(text: string): Record<string, unknown> | unknown[] | undefined {
     const t = text.trim();
     if (!t.startsWith("[") && !t.startsWith("{")) return undefined;
@@ -591,8 +591,7 @@ function ManagedDeploymentsCard({
                                             {r.name !== r.id && (
                                                 <Text fz="xs" c="dimmed" style={{fontFamily: "monospace"}}>{r.id}</Text>
                                             )}
-                                            {/* The row's own account of the failure, so a failed deployment
-                          explains itself here rather than in the Activity tab. */}
+                                            {/* The row's own failure reason. */}
                                             {r.lastError && (
                                                 <Text fz="xs" c="red" mt={2}
                                                       style={{maxWidth: 460, whiteSpace: "pre-wrap"}}>
@@ -698,8 +697,8 @@ const ACTOR_META: Record<ActorKind, { color: string; icon: React.FC<{ size?: num
     manual: {color: "gray", icon: IconUserCog},
 };
 
-// Compliance rules and automation flows in one place, with the device's tags attributed to whichever of them put
-// each one there. Nothing else in the product changes a device on its own.
+// Compliance rules and automation flows in one place, with the device's tags attributed to whichever of them set
+// each one.
 function AutomationSection({
                                device,
                                alerts,
@@ -1124,7 +1123,7 @@ const BANNER_GAP = 12;
 
 export default function DeviceDetailPage({params}: { params: Promise<{ id: string }> }) {
     const {id} = use(params);
-    const {token, isAdmin} = useAuth();
+    const {isAdmin} = useAuth();
     const router = useRouter();
     const [detail, setDetail] = useState<DeviceDetail | null>(null);
     const [catalog, setCatalog] = useState<CatalogCommand[]>([]);
@@ -1152,10 +1151,9 @@ export default function DeviceDetailPage({params}: { params: Promise<{ id: strin
     const [expandedDdmRow, setExpandedDdmRow] = useState<string | null>(null);
 
     const load = async (background = false) => {
-        if (!token) return;
         if (!background) setLoading(true);
         try {
-            const d = await api.getDevice(token, id);
+            const d = await api.getDevice(id);
             setDetail(d);
             setSelectedTask((cur) => (cur ? d.recent_tasks.find((t) => t.id === cur.id) ?? cur : cur));
         } catch (e: unknown) {
@@ -1167,14 +1165,13 @@ export default function DeviceDetailPage({params}: { params: Promise<{ id: strin
 
     useEffect(() => {
         load();
-    }, [token, id]); // eslint-disable-line react-hooks/exhaustive-deps
+    }, [id]); // eslint-disable-line react-hooks/exhaustive-deps
 
     // Command catalog is static per session, so fetch it once.
     useEffect(() => {
-        if (!token) return;
-        api.getCommandCatalog(token).then((r) => setCatalog(r.commands)).catch(() => {
+        api.getCommandCatalog().then((r) => setCatalog(r.commands)).catch(() => {
         });
-    }, [token]);
+    }, []);
 
     // Deployment rows carry only the config id, while install tasks are described by name. The names from apps.yaml and
     // profiles.yaml label a row and match it to a task whose details were never stamped.
@@ -1183,11 +1180,10 @@ export default function DeviceDetailPage({params}: { params: Promise<{ id: strin
         profiles: {},
     });
     useEffect(() => {
-        if (!token) return;
         type NamedList = { apps?: { id?: string; name?: string }[]; profiles?: { id?: string; name?: string }[] };
         Promise.all([
-            api.getConfig(token, "apps").catch(() => null),
-            api.getConfig(token, "profiles").catch(() => null),
+            api.getConfig("apps").catch(() => null),
+            api.getConfig("profiles").catch(() => null),
         ]).then(([a, p]) => {
             const index = (rows: { id?: string; name?: string }[] | undefined) => {
                 const out: Record<string, string> = {};
@@ -1199,10 +1195,10 @@ export default function DeviceDetailPage({params}: { params: Promise<{ id: strin
                 profiles: index((p as NamedList | null)?.profiles),
             });
         });
-    }, [token]);
+    }, []);
 
-    // Compliance alerts and ATC flow runs for this device, best-effort since either feature may be unconfigured.
-    // Both are re-fetched alongside the device, so a flow run a just-sent command started still appears.
+    // Compliance alerts and ATC flow runs for this device; either feature may be unconfigured.
+    // Both are re-fetched alongside the device, so a flow run started by a just-sent command still appears.
     const [deviceAlerts, setDeviceAlerts] = useState<DispatcherAlert[]>([]);
     const [deviceRuns, setDeviceRuns] = useState<FlowRunSummary[]>([]);
     // recent_tasks is capped at 10 with no total, so the real count comes from /api/v1/tasks with a limit of 1.
@@ -1212,19 +1208,18 @@ export default function DeviceDetailPage({params}: { params: Promise<{ id: strin
     // Automation tab then infers provenance from alerts, flow timelines and tasks.
     const [tagAudit, setTagAudit] = useState<TagAuditRow[] | null>(null);
     const loadActivity = useCallback(async () => {
-        if (!token) return;
         await Promise.all([
-            api.listAlerts(token, {device_id: id}).then((r) => setDeviceAlerts(r.alerts)).catch(() => {
+            api.listAlerts({device_id: id}).then((r) => setDeviceAlerts(r.alerts)).catch(() => {
             }),
-            api.getDeviceFlowRuns(token, id).then((r) => setDeviceRuns(r.flow_runs)).catch(() => {
+            api.getDeviceFlowRuns(id).then((r) => setDeviceRuns(r.flow_runs)).catch(() => {
             }),
-            api.listTasks(token, {
+            api.listTasks({
                 device_id: id,
                 limit: 1
             }).then((r) => setTaskTotal(r.total)).catch(() => setTaskTotal(null)),
             isAdmin
                 ? api
-                    .listAuditLog(token, {
+                    .listAuditLog({
                         action: AUDIT_TAG_ACTION,
                         target_type: "device",
                         target_id: id,
@@ -1234,7 +1229,7 @@ export default function DeviceDetailPage({params}: { params: Promise<{ id: strin
                     .catch(() => setTagAudit(null))
                 : (setTagAudit(null), Promise.resolve()),
         ]);
-    }, [token, id, isAdmin]);
+    }, [id, isAdmin]);
 
     useEffect(() => {
         loadActivity();
@@ -1263,13 +1258,12 @@ export default function DeviceDetailPage({params}: { params: Promise<{ id: strin
             cancelled = true;
             clearTimeout(timer);
         };
-    }, [token, id]); // eslint-disable-line react-hooks/exhaustive-deps
+    }, [id]); // eslint-disable-line react-hooks/exhaustive-deps
 
     const handleCancelTask = async (taskId: string) => {
-        if (!token) return;
         setCancellingTask(taskId);
         try {
-            const res = await api.cancelTask(token, taskId);
+            const res = await api.cancelTask(taskId);
             notifications.show({color: "teal", message: res.message});
         } catch (e: unknown) {
             notifications.show({color: "red", message: (e as Error).message});
@@ -1282,10 +1276,9 @@ export default function DeviceDetailPage({params}: { params: Promise<{ id: strin
     };
 
     const handleRetryTask = async (taskId: string) => {
-        if (!token) return;
         setRetryingTask(taskId);
         try {
-            const res = await api.retryTask(token, taskId);
+            const res = await api.retryTask(taskId);
             notifications.show({color: "teal", message: res.message});
             setSelectedTask(null); // close the drawer if the retried task was open
         } catch (e: unknown) {
@@ -1302,11 +1295,11 @@ export default function DeviceDetailPage({params}: { params: Promise<{ id: strin
 
     // Loaded on the first visit to the Scope section and not refetched on later visits in the same session.
     const loadScope = async () => {
-        if (!token || scope || scopeLoading) return;
+        if (scope || scopeLoading) return;
         setScopeLoading(true);
         setScopeError(null);
         try {
-            const r = await api.explainDeviceScope(token, id);
+            const r = await api.explainDeviceScope(id);
             if (shownIdRef.current !== id) return;
             setScope(r);
         } catch (e: unknown) {
@@ -1319,12 +1312,11 @@ export default function DeviceDetailPage({params}: { params: Promise<{ id: strin
 
     // Loaded on the first visit to the Declarations section; the section's own Refresh button re-pulls it.
     const loadDdm = async (force = false) => {
-        if (!token) return;
         if (!force && (ddm || ddmLoading)) return;
         setDdmLoading(true);
         setDdmError(null);
         try {
-            const r = await api.getDeviceDdm(token, id);
+            const r = await api.getDeviceDdm(id);
             if (shownIdRef.current !== id) return;
             setDdm(r);
         } catch (e: unknown) {
@@ -1359,16 +1351,15 @@ export default function DeviceDetailPage({params}: { params: Promise<{ id: strin
     const [errorDismissed, setErrorDismissed] = useState(false);
     const [stateDismissed, setStateDismissed] = useState(false);
 
-    // The banners can be put away. A different failure arriving brings the banner back, since dismissing one
-    // says nothing about the next.
+    // The banners can be dismissed; a different failure shows the banner again.
     const errorKey = detail?.device?.last_task_error?.task_id ?? null;
     const reenrollUntil = detail?.device?.reenrollment_allowed_until ?? null;
     useEffect(() => {
         setErrorDismissed(false);
     }, [errorKey]);
 
-    // How much of the columns the banners cover, measured rather than assumed: the text wraps to a different
-    // number of lines depending on the window and on what went wrong.
+    // Height of the columns covered by the banners, measured as the text wraps to a different number of lines by window
+    // width and message.
     useEffect(() => {
         const el = bannerRef.current;
         if (!el) {
@@ -1388,13 +1379,12 @@ export default function DeviceDetailPage({params}: { params: Promise<{ id: strin
         if (section === "scope" && !scope && !scopeError && !scopeLoading) loadScope();
         if (section === "declarations" && !ddm && !ddmError && !ddmLoading) loadDdm();
         // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [section, id, token, scope, scopeError, scopeLoading, ddm, ddmError, ddmLoading]);
+    }, [section, id, scope, scopeError, scopeLoading, ddm, ddmError, ddmLoading]);
 
     const handleDdmSync = async () => {
-        if (!token) return;
         setDdmSyncing(true);
         try {
-            const res = await api.syncDeviceDdm(token, id);
+            const res = await api.syncDeviceDdm(id);
             notifications.show({
                 color: res.queued ? "teal" : "gray",
                 message: res.queued ? "Declarative sync queued." : "Nothing to sync.",
@@ -1431,12 +1421,11 @@ export default function DeviceDetailPage({params}: { params: Promise<{ id: strin
         setRenaming(true);
     };
     const submitRename = async () => {
-        if (!token) return;
         const name = nameDraft.trim();
         if (!name) return;
         setSavingName(true);
         try {
-            const res = await api.renameDevice(token, id, name);
+            const res = await api.renameDevice(id, name);
             notifications.show({
                 color: "teal",
                 message: res.pushed ? "Name saved and rename pushed to the device" : "Name saved",
@@ -1453,10 +1442,9 @@ export default function DeviceDetailPage({params}: { params: Promise<{ id: strin
     // The server 409s a device still holding escrowed passwords nobody has read, since forgetting destroys the only
     // copy. That refusal is retryable with discard_secrets once an admin has confirmed the loss.
     const handleForget = async (discardSecrets = false) => {
-        if (!token) return;
         setForgetting(true);
         try {
-            const res = await api.deleteDevice(token, id, discardSecrets);
+            const res = await api.deleteDevice(id, discardSecrets);
             const kinds = res.discarded_secret_kinds ?? [];
             notifications.show({
                 color: "teal",
@@ -1487,7 +1475,7 @@ export default function DeviceDetailPage({params}: { params: Promise<{ id: strin
     const confirmDiscardSecrets = async () => {
         let labels: string[] = [];
         try {
-            const r = await api.getDeviceSecrets(token!, id);
+            const r = await api.getDeviceSecrets(id);
             labels = r.secrets.filter((s) => s.sealed).map((s) => s.kind_label);
         } catch {
             /* fall back to the generic wording below */
@@ -1526,10 +1514,9 @@ export default function DeviceDetailPage({params}: { params: Promise<{ id: strin
     };
 
     const handleAllowReenrollment = async () => {
-        if (!token) return;
         setAllowingReenroll(true);
         try {
-            const res = await api.allowReenrollment(token, id);
+            const res = await api.allowReenrollment(id);
             setDetail((cur) => cur
                 ? {...cur, device: {...cur.device, reenrollment_allowed_until: res.reenrollment_allowed_until}}
                 : cur);
@@ -1606,8 +1593,8 @@ export default function DeviceDetailPage({params}: { params: Promise<{ id: strin
     const activeAlerts = deviceAlerts.filter((a) => a.status !== "resolved");
     const automationCount = activeAlerts.length + deviceRuns.length;
 
-    // Join each deployment row to the install task that last tried to produce it, so the Apps and Profiles tabs
-    // cannot quietly contradict the Activity tab.
+    // Join each deployment row to the install task that last tried to produce it, so the Apps and Profiles tabs agree
+    // with the Activity tab.
     const appRows = reconcileDeployments(installed_apps, recent_tasks, "app", nameMaps.apps);
     const profileRows = reconcileDeployments(installed_profiles, recent_tasks, "profile", nameMaps.profiles);
     const appConflicts = appRows.filter((r) => r.conflicted).length;
@@ -1871,8 +1858,8 @@ export default function DeviceDetailPage({params}: { params: Promise<{ id: strin
                                         if (s.value === "scope") setScopeError(null);
                                         if (s.value === "declarations") setDdmError(null);
                                     }}
-                                    // A row inside a surface that is itself answering the pointer, so it answers more
-                                    // quietly and lends the card its colour rather than competing with it.
+                                    // A row inside a surface that already responds to the pointer, so its hover is
+                                    // subtler and uses the card's colour.
                                     className={glassClassName({material: "none", nested: true})}
                                     style={{borderRadius: "var(--mantine-radius-sm)"}}
                                 />
@@ -1916,8 +1903,8 @@ export default function DeviceDetailPage({params}: { params: Promise<{ id: strin
                                     value={new Date(device.enrollment_date).toLocaleDateString()}
                                     copyable={false}
                                 />
-                                {/* last_seen, in the header badge, is when the device last spoke on its own. This is
-                      the poll schedule, which backs off the longer a device stays quiet. */}
+                                {/* last_seen, in the header badge, is when the device last checked in. This is
+                                the poll schedule, which backs off the longer a device stays quiet. */}
                                 <FactRow
                                     label="Last polled"
                                     value={`${timeSince(device.last_polled_at)}, every ${device.poll_interval_minutes} min`}

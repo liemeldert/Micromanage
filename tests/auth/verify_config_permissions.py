@@ -247,10 +247,12 @@ async def main():
     check("TenantConfig declares 'device_naming'", "device_naming" in fields)
 
     parsed = TenantConfig(id="t1", name="T", allowed_users=[], ddm={"enabled": True},
-                          device_naming={"template": "{serial}-mac", "apply_on_enroll": True})
+                          device_naming={"template": "{serial}-mac", "apply_on_enroll": False})
     check("a tenant naming template survives validation instead of being dropped",
           parsed.device_naming is not None
           and parsed.device_naming.template == "{serial}-mac")
+    check("an apply_on_enroll key from an older config.yaml is accepted and ignored",
+          "apply_on_enroll" not in parsed.device_naming.dict())
     check("ddm.enabled survives validation", (parsed.ddm or {}).get("enabled") is True)
 
     # The mirror writes device_naming: {} to CLEAR the template, so empty must mean unset rather than "missing required

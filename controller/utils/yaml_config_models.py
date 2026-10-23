@@ -163,9 +163,8 @@ class Rollout(BaseModel):
 
 class DeviceNaming(BaseModel):
     """A naming template scope (per-group here; the tenant scope mirrors it from config.yaml). See
-    controller/services/naming.py."""
+    controller/services/naming.py. Unknown keys are ignored."""
     template: str
-    apply_on_enroll: Optional[bool] = False
 
     @validator('template')
     def validate_template(cls, v):

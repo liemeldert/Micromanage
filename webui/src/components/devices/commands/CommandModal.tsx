@@ -25,7 +25,6 @@ import {
     type DeviceSecret,
 } from "../../../../lib/api";
 import {devicePlatformCategory} from "../../../../lib/config";
-import {useAuth} from "../../../../lib/auth-context";
 import {commandWarning, isMac, KNOWN_FLOWS, withPushStatus} from "./command-support";
 import {EscrowNote} from "./EscrowNote";
 
@@ -52,7 +51,6 @@ export function CommandModal({
     onClose: () => void;
     onDone: () => void;
 }) {
-    const {token} = useAuth();
     const [values, setValues] = useState<Record<string, string>>({});
     const [serialText, setSerialText] = useState("");
     const [acked, setAcked] = useState(false);
@@ -66,10 +64,10 @@ export function CommandModal({
     const escrowKind = entry ? KNOWN_FLOWS[entry.type]?.escrowKind : undefined;
     useEffect(() => {
         setEscrow(undefined);
-        if (!opened || !escrowKind || !token) return;
+        if (!opened || !escrowKind) return;
         let live = true;
         api
-            .getDeviceSecrets(token, device.id)
+            .getDeviceSecrets(device.id)
             .then((r) => {
                 if (live) setEscrow(r.secrets.find((s) => s.kind === escrowKind) ?? null);
             })
@@ -78,7 +76,7 @@ export function CommandModal({
         return () => {
             live = false;
         };
-    }, [opened, escrowKind, token, device.id]);
+    }, [opened, escrowKind, device.id]);
 
     if (!entry) return null;
     const flow = KNOWN_FLOWS[entry.type];
@@ -116,7 +114,6 @@ export function CommandModal({
 
     // acknowledge re-sends the same parameters plus acknowledge_warnings, after the confirm step.
     const submit = async (acknowledge = false) => {
-        if (!token) return;
         setBusy(true);
         try {
             const parameters: Record<string, unknown> = {};
@@ -125,7 +122,7 @@ export function CommandModal({
                 if (v) parameters[p.name] = v;
             }
             if (acknowledge) parameters.acknowledge_warnings = "true";
-            const res = await api.sendCommand(token, device.id, entry.type, parameters);
+            const res = await api.sendCommand(device.id, entry.type, parameters);
             // The server's message reports what happened to the escrow.
             notifications.show({
                 color: "teal",

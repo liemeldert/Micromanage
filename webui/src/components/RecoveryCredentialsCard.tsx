@@ -1,11 +1,9 @@
-// Yes I stole the name from EPIC.
 
 import {useEffect, useState} from "react";
 import Link from "next/link";
 import {Alert, Anchor, Badge, Button, CopyButton, Group, Loader, Modal, Stack, Text,} from "@mantine/core";
 import {IconAlertTriangle, IconCheck, IconCopy, IconLockOpen, IconShieldLock,} from "@tabler/icons-react";
 import {api, type DeviceSecret, type RevealedSecret, secretLifecycle} from "../../lib/api";
-import {useAuth} from "../../lib/auth-context";
 import {GlassShatter} from "./GlassShatter";
 import {GlassCard} from "./ui/GlassCard";
 
@@ -65,7 +63,6 @@ function stateBadge(secret: DeviceSecret) {
 }
 
 export function RecoveryCredentialsCard({deviceId}: { deviceId: string }) {
-    const {token} = useAuth();
     const [secrets, setSecrets] = useState<DeviceSecret[] | null>(null);
     const [loadError, setLoadError] = useState<string | null>(null);
     const [target, setTarget] = useState<DeviceSecret | null>(null); // confirm modal
@@ -76,19 +73,17 @@ export function RecoveryCredentialsCard({deviceId}: { deviceId: string }) {
     const [pending, setPending] = useState<RevealedSecret | null>(null);
     const [broken, setBroken] = useState(false);
     // Why the last reveal was refused. It stays in the confirm modal rather than a toast, because a refusal runs to
-    // several sentences of instructions that a toast would take away after four seconds.
+    // several sentences of instructions that a toast would dismiss after four seconds.
     const [revealError, setRevealError] = useState<string | null>(null);
 
     const load = () => {
-        if (!token) return;
         api
-            .getDeviceSecrets(token, deviceId)
+            .getDeviceSecrets(deviceId)
             .then((r) => {
                 setSecrets(r.secrets);
                 setLoadError(null);
             })
-            // A failed fetch must not read as an empty list; loadError tells no recovery credentials apart from no
-            // answer.
+            // loadError separates an empty list from a failed fetch.
             .catch((e) => {
                 setSecrets([]);
                 setLoadError((e as Error).message);
@@ -98,14 +93,14 @@ export function RecoveryCredentialsCard({deviceId}: { deviceId: string }) {
     useEffect(() => {
         load();
         // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [token, deviceId]);
+    }, [deviceId]);
 
     const breakGlass = async () => {
-        if (!token || !target) return;
+        if (!target) return;
         setRevealing(true);
         setRevealError(null);
         try {
-            const res = await api.revealDeviceSecret(token, deviceId, target.kind);
+            const res = await api.revealDeviceSecret(deviceId, target.kind);
             // The password waits here while the glass breaks. A refusal leaves the pane intact.
             setPending(res);
             setBroken(true);
@@ -240,8 +235,8 @@ export function RecoveryCredentialsCard({deviceId}: { deviceId: string }) {
                 </Text>
             )}
 
-            {/* One pane for both steps. The glass breaks and the password appears behind it, rather than one
-                modal handing over to another and both cross-fading on the way. */}
+            {/* One pane for both steps. The glass breaks and the password appears behind it, rather than one modal
+            replacing another. */}
             <Modal
                 opened={target !== null || revealed !== null}
                 onClose={revealed ? () => setRevealed(null) : closeConfirm}

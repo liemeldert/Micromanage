@@ -12,7 +12,6 @@ import {
     Group,
     Modal,
     Stack,
-    Switch,
     Text,
     TextInput,
     Tooltip,
@@ -60,7 +59,7 @@ import {GlassCard} from "@/components/ui/GlassCard";
 const ADMIN_ONLY_REASON = "Group editing is only available to administrators.";
 
 export default function GroupsPage() {
-    const {token, isAdmin} = useAuth();
+    const {isAdmin} = useAuth();
     const {data, loading, saving, save, reload, currentDocText, version} =
         useConfigResource<GroupsConfig>("groups", {groups: []});
     const [devices, setDevices] = useState<Device[]>([]);
@@ -75,13 +74,12 @@ export default function GroupsPage() {
     const baseline = useRef("");
 
     useEffect(() => {
-        if (!token) return;
         api
-            .listDevices(token, {state: "enrolled", limit: 500})
+            .listDevices({state: "enrolled", limit: 500})
             .then((r) => setDevices(r.devices))
             .catch(() => {
             });
-    }, [token]);
+    }, []);
 
     const groups = useMemo(() => data?.groups ?? [], [data]);
 
@@ -122,15 +120,8 @@ export default function GroupsPage() {
 
     // == Naming template (optional per-group) ==
     const namingTemplate = draft.device_naming?.template ?? "";
-    const applyOnEnroll = draft.device_naming?.apply_on_enroll ?? false;
-    const setNaming = (patch: Partial<{ template: string; apply_on_enroll: boolean }>) =>
-        setDraft((d) => ({
-            ...d,
-            device_naming: {
-                template: patch.template ?? d.device_naming?.template ?? "",
-                apply_on_enroll: patch.apply_on_enroll ?? d.device_naming?.apply_on_enroll ?? false,
-            },
-        }));
+    const setNamingTemplate = (template: string) =>
+        setDraft((d) => ({...d, device_naming: {...d.device_naming, template}}));
     // Preview against a device that matches this group, else any loaded device.
     const namingSample = draftMatches[0] ?? devices[0] ?? null;
     const namingPreview =
@@ -167,7 +158,7 @@ export default function GroupsPage() {
 
     function validateName(name: string): string | null {
         if (!name.trim()) return "Name is required";
-        if (!GROUP_NAME_RE.test(name)) return "Only letters, numbers, hyphens and underscores";
+        if (!GROUP_NAME_RE.test(name)) return "Contains a character that is not allowed";
         const clash = groups.some((g, i) => g.name === name && i !== editIndex);
         if (clash) return "A group with this name already exists";
         return null;
@@ -186,14 +177,7 @@ export default function GroupsPage() {
             ...(draft.include_devices?.length ? {include_devices: draft.include_devices} : {}),
             ...(draft.exclude_devices?.length ? {exclude_devices: draft.exclude_devices} : {}),
             // Only persist a naming block when a template is actually set.
-            ...(tpl
-                ? {
-                    device_naming: {
-                        template: tpl,
-                        ...(draft.device_naming?.apply_on_enroll ? {apply_on_enroll: true} : {}),
-                    },
-                }
-                : {}),
+            ...(tpl ? {device_naming: {template: tpl}} : {}),
         };
         const next = [...groups];
         if (editIndex === null) next.push(cleaned);
@@ -284,11 +268,7 @@ export default function GroupsPage() {
                                         </Tooltip>
                                         {g.device_naming?.template && (
                                             <Tooltip
-                                                label={
-                                                    g.device_naming.apply_on_enroll
-                                                        ? "Names devices automatically on enrollment"
-                                                        : "Offered as a rename suggestion"
-                                                }
+                                                label="Names devices in this group that enroll without a name"
                                                 withArrow
                                             >
                                                 <Badge
@@ -310,7 +290,7 @@ export default function GroupsPage() {
                                     <Group gap={6} wrap="wrap">
                                         {(g.conditions?.length ?? 0) === 0 && !g.include_devices?.length ? (
                                             <Badge variant="outline" color="orange" size="sm">
-                                                no conditions, matches nothing
+                                                matches no devices
                                             </Badge>
                                         ) : (
                                             (g.conditions ?? []).map((c: Condition, ci: number) => (
@@ -372,19 +352,20 @@ export default function GroupsPage() {
                 <Stack gap="md">
                     <TextInput
                         label="Name"
-                        description="Referenced by apps and profiles. Letters, numbers, hyphens, underscores."
+                        description="Name supports only letters, numbers, hyphens and underscores."
                         placeholder="e.g. teachers"
                         value={draft.name}
                         error={nameError}
                         onChange={(e) => {
-                            setDraft({...draft, name: e.currentTarget.value});
-                            if (nameError) setNameError(validateName(e.currentTarget.value));
+                            const value = e.currentTarget.value.replace(/ /g, "-");
+                            setDraft({...draft, name: value});
+                            if (nameError) setNameError(validateName(value));
                         }}
                         withAsterisk
                     />
                     <TextInput
                         label="Description"
-                        placeholder="Optional, human-readable"
+                        placeholder="Optional"
                         value={draft.description ?? ""}
                         onChange={(e) => setDraft({...draft, description: e.currentTarget.value})}
                     />
@@ -477,7 +458,7 @@ export default function GroupsPage() {
                         <Group gap={6}>
                             <IconAlertTriangle size={14} color="var(--mantine-color-orange-6)"/>
                             <Text fz="xs" c="orange.7">
-                                A group with no conditions or included devices matches nothing.
+                                This group does not match any devices.
                             </Text>
                         </Group>
                     )}
@@ -485,7 +466,7 @@ export default function GroupsPage() {
                     <Divider label="Device naming (optional)" labelPosition="left"/>
                     <Stack gap="xs">
                         <Text fz="xs" c="dimmed">
-                            Sets a managed name for devices in this group from a template. Type{" "}
+                            Names a device in this group when it enrolls without a name. Type{" "}
                             <Code>{"{"}</Code> to insert a device variable. When a device matches several
                             groups, the first group from the top that defines a template wins.
                         </Text>
@@ -493,7 +474,7 @@ export default function GroupsPage() {
                             label="Name template"
                             placeholder="e.g. CART-A-{serial}"
                             value={namingTemplate}
-                            onChange={(template) => setNaming({template})}
+                            onChange={setNamingTemplate}
                         />
                         {unknownVars.length > 0 && (
                             <Group gap={6}>
@@ -539,12 +520,6 @@ export default function GroupsPage() {
                                 )}
                             </Group>
                         )}
-                        <Switch
-                            checked={applyOnEnroll}
-                            onChange={(e) => setNaming({apply_on_enroll: e.currentTarget.checked})}
-                            label="Apply automatically on enrollment"
-                            description="Names matching devices as they enroll, and only if they have no name yet. With this off, the template is a suggestion in the rename box and nothing applies it for you."
-                        />
                     </Stack>
 
                     <Group justify="flex-end">

@@ -3,12 +3,8 @@
 import {createContext, useCallback, useContext, useEffect, useState} from "react";
 import {api, ApiError} from "./api";
 
-// The session token is in an HttpOnly cookie the browser cannot read. token holds this marker while the session
-// is live and null otherwise, and api functions ignore its value.
-export const SESSION_MARKER = "cookie";
-
 interface AuthState {
-    token: string | null;
+    authenticated: boolean;
     tenantId: string | null;
     email: string | null;
     role: string | null;
@@ -20,7 +16,10 @@ interface StoredIdentity {
     role: string | null;
 }
 
-interface AuthContext extends AuthState {
+interface AuthContext {
+    tenantId: string | null;
+    email: string | null;
+    role: string | null;
     login: (tenantId: string, email: string, password: string) => Promise<void>;
     logout: () => Promise<void>;
     isAuthenticated: boolean;
@@ -32,7 +31,7 @@ const Ctx = createContext<AuthContext | null>(null);
 
 const STORAGE_KEY = "mm_auth";
 
-const SIGNED_OUT: AuthState = {token: null, tenantId: null, email: null, role: null};
+const SIGNED_OUT: AuthState = {authenticated: false, tenantId: null, email: null, role: null};
 
 function storeIdentity(identity: StoredIdentity) {
     const {tenantId, email, role} = identity;
@@ -60,11 +59,11 @@ export function AuthProvider({children}: { children: React.ReactNode }) {
             return;
         }
         const identity = stored;
-        api.me(SESSION_MARKER)
+        api.me()
             .then((me) => {
                 const next = {tenantId: me.tenant_id, email: me.email, role: me.role};
                 storeIdentity(next);
-                setState({token: SESSION_MARKER, ...next});
+                setState({authenticated: true, ...next});
             })
             .catch((e) => {
                 if (e instanceof ApiError && e.status === 401) {
@@ -72,7 +71,7 @@ export function AuthProvider({children}: { children: React.ReactNode }) {
                     setState(SIGNED_OUT);
                 } else {
                     // Any other failure keeps the session, and the pages report the error.
-                    setState({token: SESSION_MARKER, ...identity});
+                    setState({authenticated: true, ...identity});
                 }
             })
             .finally(() => setHydrated(true));
@@ -80,10 +79,10 @@ export function AuthProvider({children}: { children: React.ReactNode }) {
 
     const login = useCallback(async (tenantId: string, email: string, password: string) => {
         await api.login(tenantId, email, password);
-        const me = await api.me(SESSION_MARKER);
+        const me = await api.me();
         const next = {tenantId, email, role: me.role};
         storeIdentity(next);
-        setState({token: SESSION_MARKER, ...next});
+        setState({authenticated: true, ...next});
     }, []);
 
     const logout = useCallback(async () => {
@@ -95,10 +94,12 @@ export function AuthProvider({children}: { children: React.ReactNode }) {
     return (
         <Ctx.Provider
             value={{
-                ...state,
+                tenantId: state.tenantId,
+                email: state.email,
+                role: state.role,
                 login,
                 logout,
-                isAuthenticated: !!state.token,
+                isAuthenticated: state.authenticated,
                 isAdmin: state.role === "admin",
                 hydrated,
             }}

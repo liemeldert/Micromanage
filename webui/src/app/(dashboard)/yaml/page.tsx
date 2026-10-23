@@ -42,7 +42,6 @@ const TABS: { value: ConfigType; label: string; icon: React.FC<{ size?: number }
     {value: "groups", label: "groups.yaml", icon: IconStack2},
     {value: "apps", label: "apps.yaml", icon: IconApps},
     {value: "declarations", label: "declarations.yaml", icon: IconFileDescription},
-    // { value: "config",   label: "config.yaml",   icon: IconSettings }, // I see no need for this to be user-accessible at the moment.
 ];
 
 const EDITABLE: ConfigType[] = ["profiles", "groups", "apps", "declarations"];
@@ -66,7 +65,7 @@ const ADMIN_ONLY_REASON =
     "These documents decide what every managed device gets, so editing them is admin-only.";
 
 function YamlPageInner() {
-    const {token, isAdmin} = useAuth();
+    const {isAdmin} = useAuth();
     const searchParams = useSearchParams();
     const initialType = searchParams.get("type");
     const [active, setActive] = useState<ConfigType>(
@@ -91,7 +90,7 @@ function YamlPageInner() {
     const resetRef = useRef<() => void>(null);
 
     // The in-app discard confirmation only covers the Cancel button and the tab switcher, so a reload or a closed
-    // tab would drop the buffer without a word. Same dirty condition cancelEditing uses.
+    // tab would drop the buffer without a prompt. Same dirty condition cancelEditing uses.
     useEffect(() => {
         if (!editing || draft === baseline) return;
         const handler = (e: BeforeUnloadEvent) => {
@@ -105,11 +104,10 @@ function YamlPageInner() {
     // Returns the document text, null when there is no file, so a caller putting it back in the editor does not race
     // the state update.
     const load = useCallback(async (type: ConfigType, force = false) => {
-        if (!token) return null;
         if (!force && docs[type] !== undefined) return docs[type] ?? null; // cached for this visit
         setLoading(true);
         try {
-            const {text, version} = await api.getConfigRaw(token, type);
+            const {text, version} = await api.getConfigRaw(type);
             setDocs((d) => ({...d, [type]: text}));
             setVersions((v) => ({...v, [type]: version}));
             return text;
@@ -124,7 +122,7 @@ function YamlPageInner() {
         } finally {
             setLoading(false);
         }
-    }, [token, docs]);
+    }, [docs]);
 
     useEffect(() => {
         load(active);
@@ -152,7 +150,7 @@ function YamlPageInner() {
     };
 
     const cancelEditing = () => {
-        // Leaving edit mode throws the buffer away, so a changed one asks first.
+        // Leaving edit mode discards the buffer, so a changed one asks first.
         if (draft === baseline) {
             discardEditing();
             return;
@@ -193,7 +191,6 @@ function YamlPageInner() {
     // The same PUT the save makes, in the server's dry-run mode: errors and warnings come back and nothing is
     // written. Nothing is checked here beyond the parse.
     const handleValidate = async () => {
-        if (!token) return;
         const parsed = validateDraft(draft);
         // A document the YAML parser rejects has nothing to send, and the parse error is already on screen.
         if (!parsed) {
@@ -202,7 +199,7 @@ function YamlPageInner() {
         }
         setValidating(true);
         try {
-            const res = await api.validateConfig(token, active as EditableType, parsed);
+            const res = await api.validateConfig(active as EditableType, parsed);
             setValidation({
                 valid: res.valid,
                 errors: res.errors ?? [],
@@ -233,14 +230,13 @@ function YamlPageInner() {
     };
 
     const handleSave = async () => {
-        if (!token) return;
         const parsed = validateDraft(draft);
         if (!parsed) return;
         setSaving(true);
         try {
             // The server re-validates and, on success, reconciles devices against the new declared state. The raw
             // draft goes alongside the parsed structure so the document's comments survive the save.
-            const res = await api.updateConfig(token, active as EditableType, parsed, draft,
+            const res = await api.updateConfig(active as EditableType, parsed, draft,
                 {ifMatch: versions[active]});
             notifications.show({
                 color: "teal",

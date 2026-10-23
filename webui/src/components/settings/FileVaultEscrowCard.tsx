@@ -8,20 +8,17 @@ import {notifications} from "@mantine/notifications";
 import {IconAlertTriangle, IconCloudDownload, IconLockCog, IconRefresh} from "@tabler/icons-react";
 import {api, ApiError, type FileVaultEscrowStatus} from "../../../lib/api";
 import {saveTextFile} from "../../../lib/download";
-import {useAuth} from "../../../lib/auth-context";
 import {GlassCard} from "../ui/GlassCard";
 
 export function FileVaultEscrowCard() {
-    const {token} = useAuth();
     // null while loading, with loadError kept separate so a failed fetch never reads as not configured.
     const [status, setStatus] = useState<FileVaultEscrowStatus | null>(null);
     const [loadError, setLoadError] = useState<string | null>(null);
     const [busy, setBusy] = useState(false);
 
     const load = () => {
-        if (!token) return;
         api
-            .getFileVaultEscrow(token)
+            .getFileVaultEscrow()
             .then((s) => {
                 setStatus(s);
                 setLoadError(null);
@@ -30,15 +27,13 @@ export function FileVaultEscrowCard() {
     };
     useEffect(() => {
         load();
-        // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [token]);
+    }, []);
 
-    // Mint or replace the keypair. replace=true is only reachable from the confirm modal below.
+    // Create or replace the keypair. replace=true is only reachable from the confirm modal below.
     const generate = async (replace: boolean) => {
-        if (!token) return;
         setBusy(true);
         try {
-            setStatus(await api.generateFileVaultEscrow(token, replace));
+            setStatus(await api.generateFileVaultEscrow(replace));
             notifications.show({
                 color: "green",
                 message: replace ? "Escrow keypair replaced." : "Escrow keypair generated.",
@@ -71,9 +66,8 @@ export function FileVaultEscrowCard() {
     };
 
     const download = async () => {
-        if (!token) return;
         try {
-            const pem = await api.getFileVaultCertificate(token);
+            const pem = await api.getFileVaultCertificate();
             saveTextFile("filevault-escrow-certificate.pem", pem, "application/x-pem-file");
         } catch (e) {
             notifications.show({color: "red", message: e instanceof ApiError ? e.message : String(e)});

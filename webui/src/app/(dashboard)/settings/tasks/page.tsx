@@ -22,7 +22,6 @@ import {notifications} from "@mantine/notifications";
 import {IconRefresh, IconRotateClockwise, IconX} from "@tabler/icons-react";
 import {api, type Task} from "../../../../../lib/api";
 import {clickable} from "../../../../../lib/a11y";
-import {useAuth} from "../../../../../lib/auth-context";
 import {TaskDetailDrawer, taskTitle} from "@/components/TaskDetailDrawer";
 import {explainError} from "../../../../../lib/task-errors";
 import {TASK_STATUS_COLORS} from "../../../../../lib/status-labels";
@@ -52,7 +51,6 @@ export default function TasksPage() {
 }
 
 function TasksPageInner() {
-    const {token} = useAuth();
     const router = useRouter();
     const searchParams = useSearchParams();
     const [tasks, setTasks] = useState<Task[]>([]);
@@ -69,8 +67,8 @@ function TasksPageInner() {
     const [retrying, setRetrying] = useState<string | null>(null);
     const [syncing, setSyncing] = useState(false);
     const [selected, setSelected] = useState<Task | null>(null);
-    // Last request wins: dropping a load because another was still pending would leave the previous filter's rows
-    // on screen.
+    // Only the latest request's result is applied; dropping a load because another was pending would leave the previous
+    // filter's rows on screen.
     const reqSeq = useRef(0);
     const foregroundPending = useRef(false);
     const [debouncedUser] = useDebouncedValue(userFilter, 300);
@@ -91,8 +89,7 @@ function TasksPageInner() {
     };
 
     const load = useCallback(async (background = false) => {
-        if (!token) return;
-        // A quiet poll never competes with an interactive load.
+        // A background poll is skipped while an interactive load is pending.
         if (background && foregroundPending.current) return;
         const seq = ++reqSeq.current;
         if (!background) {
@@ -100,7 +97,7 @@ function TasksPageInner() {
             setLoading(true);
         }
         try {
-            const res = await api.listTasks(token, {
+            const res = await api.listTasks({
                 skip: (page - 1) * PAGE_SIZE,
                 limit: PAGE_SIZE,
                 ...(statusFilter ? {status: statusFilter} : {}),
@@ -127,7 +124,7 @@ function TasksPageInner() {
                 if (seq === reqSeq.current) setLoading(false);
             }
         }
-    }, [token, page, statusFilter, debouncedUser, deviceIdFilter]);
+    }, [page, statusFilter, debouncedUser, deviceIdFilter]);
 
     useEffect(() => {
         load();
@@ -142,10 +139,9 @@ function TasksPageInner() {
     }, [load]);
 
     const handleCancel = async (id: string) => {
-        if (!token) return;
         setCancelling(id);
         try {
-            const res = await api.cancelTask(token, id);
+            const res = await api.cancelTask(id);
             notifications.show({color: "teal", message: res.message});
         } catch (e: unknown) {
             notifications.show({color: "red", message: (e as Error).message});
@@ -157,10 +153,9 @@ function TasksPageInner() {
     };
 
     const handleRetry = async (id: string) => {
-        if (!token) return;
         setRetrying(id);
         try {
-            const res = await api.retryTask(token, id);
+            const res = await api.retryTask(id);
             notifications.show({color: "teal", message: res.message});
             setSelected(null); // close the drawer if the retried task was open
         } catch (e: unknown) {
@@ -172,10 +167,9 @@ function TasksPageInner() {
     };
 
     const handleSyncNow = async () => {
-        if (!token) return;
         setSyncing(true);
         try {
-            const res = await api.syncNow(token);
+            const res = await api.syncNow();
             const queued = res.profiles_queued + res.removals_queued + res.apps_queued;
             notifications.show({
                 color: "teal",

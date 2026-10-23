@@ -23,7 +23,6 @@ import {notifications} from "@mantine/notifications";
 import {IconCheck, IconCopy, IconPlus, IconQrcode, IconRefresh, IconTrash} from "@tabler/icons-react";
 import QRCode from "react-qr-code";
 import {api, ApiError, type EnrollmentLink, type EnrollmentLinkCreate} from "../../../lib/api";
-import {useAuth} from "../../../lib/auth-context";
 import {timeUntil} from "../../../lib/time";
 import {GlassCard} from "@/components/ui/GlassCard";
 
@@ -67,7 +66,6 @@ function NewLinkModal({
     onClose: () => void;
     onCreated: (link: EnrollmentLink) => void;
 }) {
-    const {token} = useAuth();
     const [label, setLabel] = useState("");
     const [expires, setExpires] = useState("7");
     const [limit, setLimit] = useState<number | string>("");
@@ -88,13 +86,13 @@ function NewLinkModal({
 
     const submit = async (e: FormEvent) => {
         e.preventDefault();
-        if (!token || saving || error) return;
+        if (saving || error) return;
         const body: EnrollmentLinkCreate = {expires_in_days: Number(expires) as 1 | 7 | 30};
         if (label.trim()) body.label = label.trim();
         if (typeof limit === "number") body.max_downloads = limit;
         setSaving(true);
         try {
-            const link = await api.createEnrollmentLink(token, body);
+            const link = await api.createEnrollmentLink(body);
             onCreated(link);
             onClose();
         } catch (e: unknown) {
@@ -205,32 +203,29 @@ function LinkActions({link, onRevoke}: { link: EnrollmentLink; onRevoke: (link: 
 }
 
 export function EnrollmentLinksCard() {
-    const {token} = useAuth();
     const [links, setLinks] = useState<EnrollmentLink[] | null>(null);
     const [loading, setLoading] = useState(true);
     const [creating, setCreating] = useState(false);
 
     const load = useCallback(async () => {
-        if (!token) return;
         setLoading(true);
         try {
-            const res = await api.listEnrollmentLinks(token);
+            const res = await api.listEnrollmentLinks();
             setLinks(res.links);
         } catch (e: unknown) {
             notifications.show({color: "red", message: (e as Error).message});
         } finally {
             setLoading(false);
         }
-    }, [token]);
+    }, []);
 
     useEffect(() => {
         load();
     }, [load]);
 
     const revoke = async (link: EnrollmentLink) => {
-        if (!token) return;
         try {
-            await api.revokeEnrollmentLink(token, link.id);
+            await api.revokeEnrollmentLink(link.id);
             setLinks((cur) => (cur ? cur.filter((l) => l.id !== link.id) : cur));
             notifications.show({color: "teal", message: "Link revoked."});
         } catch (e: unknown) {

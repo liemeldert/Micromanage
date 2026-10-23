@@ -41,7 +41,7 @@ import {DevicePeekModal} from "@/components/DevicePeekModal";
 import {DeviceSearchBar, type FilterValueSource} from "@/components/devices/DeviceSearchBar";
 import {useFilterHistory} from "@/components/devices/use-filter-history";
 import {openCommandPaletteWith} from "@/components/CommandPalette";
-import {glassClassName, glassToneStyle} from "@/components/ui/glass";
+import {glassClassName} from "@/components/ui/glass";
 import {Interactable} from "@/components/ui/Interactable";
 
 const PAGE_SIZE = 20;
@@ -131,7 +131,7 @@ function FilterChip({
 }
 
 export default function DevicesPage() {
-    const {token, isAdmin} = useAuth();
+    const {isAdmin} = useAuth();
     const router = useRouter();
 
     const [devices, setDevices] = useState<Device[]>([]);
@@ -181,11 +181,10 @@ export default function DevicesPage() {
     const reqSeq = useRef(0);
 
     const load = useCallback(async () => {
-        if (!token) return;
         const seq = ++reqSeq.current;
         setLoading(true);
         try {
-            const res = await api.listDevices(token, {
+            const res = await api.listDevices({
                 skip: (page - 1) * PAGE_SIZE,
                 limit: PAGE_SIZE,
                 ...deviceQueryParams(debounced),
@@ -202,20 +201,19 @@ export default function DevicesPage() {
         } finally {
             if (seq === reqSeq.current) setLoading(false);
         }
-    }, [token, page, debounced]);
+    }, [page, debounced]);
 
     useEffect(() => {
         load();
     }, [load]);
 
     useEffect(() => {
-        if (!token) return;
         api
-            .getConfig(token, "groups")
+            .getConfig("groups")
             .then((g) => setConfigGroups((((g as { groups?: GroupDef[] })?.groups) ?? []).map((x) => x.name)))
             .catch(() => {
             });
-    }, [token]);
+    }, []);
 
     // Defined groups first, plus any group seen on the loaded page, since a device can carry a group that is no
     // longer in groups.yaml.
@@ -246,10 +244,10 @@ export default function DevicesPage() {
     };
 
     const handleAdd = async () => {
-        if (!token || !addSerial.trim()) return;
+        if (!addSerial.trim()) return;
         setAdding(true);
         try {
-            await api.createPlaceholderDevice(token, {
+            await api.createPlaceholderDevice({
                 serial_number: addSerial.trim(),
                 device_model: addModel.trim() || undefined,
                 groups: addGroups,
@@ -353,9 +351,6 @@ export default function DevicesPage() {
     const rows = devices.map((d) => {
         const active = d.enrollment_state === "enrolled";
         const recent = active && new Date(d.last_seen).getTime() > Date.now() - 7 * 86400000;
-        // A check-in within the hour is worth a quiet green edge. Seven days is most of the fleet most of the
-        // time, which would make the glow mean nothing.
-        const justSeen = active && new Date(d.last_seen).getTime() > Date.now() - 3600000;
         return (
             <Table.Tr
                 key={d.id}
@@ -369,12 +364,11 @@ export default function DevicesPage() {
                 className={glassClassName({
                     material: "none",
                     interactive: true,
-                    tone: justSeen ? "positive" : "neutral",
+                    tone: "neutral",
                 })}
                 style={{
                     cursor: "pointer",
                     opacity: active ? 1 : 0.6,
-                    ...(justSeen ? glassToneStyle(0.4) : {}),
                 }}
             >
                 <Table.Td>

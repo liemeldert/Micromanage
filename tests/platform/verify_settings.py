@@ -19,7 +19,7 @@ from controller.models.tenant import Tenant, User  # noqa: E402
 from controller.services.app_manager import REQUIRED_TENANT_S3_KEYS  # noqa: E402
 from controller.api.config_io import _tenant_config_doc  # noqa: E402
 from controller.api.redaction import _REDACTED, _restore_tenant_s3_secrets  # noqa: E402
-from controller.api.routes.tenants import TenantUpdate, update_tenant  # noqa: E402
+from controller.api.routes.tenants import TenantUpdate, _naming_template_only, update_tenant  # noqa: E402
 from tests._verify_harness import make_check
 
 PASS, FAIL = [], []
@@ -166,22 +166,26 @@ async def test_device_naming():
     async def put(dn):
         return await update_tenant(TenantUpdate(device_naming=dn), admin)
 
-    await put({"template": "IT-{serial}", "apply_on_enroll": True})
-    check("template + apply_on_enroll stored",
-          (await Tenant.get(id="t2")).device_naming == {"template": "IT-{serial}", "apply_on_enroll": True})
+    await put({"template": "IT-{serial}"})
+    check("template stored", (await Tenant.get(id="t2")).device_naming == {"template": "IT-{serial}"})
 
+    # An older client still sends apply_on_enroll; the request succeeds and only the template is stored.
     await put({"template": "  Lab-{model}  ", "apply_on_enroll": False})
     dn = (await Tenant.get(id="t2")).device_naming
-    check("template trimmed + apply off", dn == {"template": "Lab-{model}", "apply_on_enroll": False})
+    check("template trimmed, apply_on_enroll dropped", dn == {"template": "Lab-{model}"})
 
     await put({"template": "   "})
     check("blank template clears to {}", (await Tenant.get(id="t2")).device_naming == {})
 
     # Omitting device_naming leaves it untouched.
-    await put({"template": "Kiosk-{udid_short}", "apply_on_enroll": True})
+    await put({"template": "Kiosk-{udid_short}"})
     await update_tenant(TenantUpdate(name="renamed"), admin)
     check("omitted device_naming untouched",
-          (await Tenant.get(id="t2")).device_naming == {"template": "Kiosk-{udid_short}", "apply_on_enroll": True})
+          (await Tenant.get(id="t2")).device_naming == {"template": "Kiosk-{udid_short}"})
+
+    check("a stored apply_on_enroll is left out of the GET response",
+          _naming_template_only({"template": "IT-{serial}", "apply_on_enroll": False}) == {"template": "IT-{serial}"}
+          and _naming_template_only({}) == {} and _naming_template_only(None) == {})
 
 
 async def test_expiry_reminders():

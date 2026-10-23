@@ -19,7 +19,6 @@ import {modals} from "@mantine/modals";
 import {IconCheck, IconCloudDownload, IconExternalLink, IconKey, IconTrash, IconUpload,} from "@tabler/icons-react";
 import {api, ApiError, type DepServerCreated, type DepServerDetail} from "../../../lib/api";
 import {saveTextFile} from "../../../lib/download";
-import {useAuth} from "../../../lib/auth-context";
 import {GlassCard} from "../ui/GlassCard";
 
 // Guided ABM/ASM link flow, following Apple's own: name the connection and generate a keypair here,
@@ -34,7 +33,6 @@ export function DepWizard({
     onLinked: (server: DepServerDetail) => void;
     onRemoved?: () => void;
 }) {
-    const {token} = useAuth();
     // Resume at the token step once a keypair exists: a failed or unfinished upload leaves the keypair
     // usable, so the retry is the token rather than the key.
     const [active, setActive] = useState(
@@ -52,7 +50,6 @@ export function DepWizard({
     const [busy, setBusy] = useState(false);
 
     async function createServer() {
-        if (!token) return;
         const trimmed = name.trim();
         if (!trimmed) {
             notifications.show({color: "red", message: "Give this connection a name."});
@@ -60,7 +57,7 @@ export function DepWizard({
         }
         setBusy(true);
         try {
-            const created = await api.createDepServer(token, trimmed);
+            const created = await api.createDepServer(trimmed);
             setServer(created);
             // Stay on step 1: it is the only place the public key download is a primary action.
         } catch (e) {
@@ -85,11 +82,11 @@ export function DepWizard({
     }
 
     async function uploadToken(file: File | null) {
-        if (!token || !server || !file) return;
+        if (!server || !file) return;
         setBusy(true);
         try {
-            await api.uploadDepToken(token, server.id, file);
-            const detail = await api.getDepServer(token, server.id);
+            await api.uploadDepToken(server.id, file);
+            const detail = await api.getDepServer(server.id);
             setServer(detail);
             setLinked(detail);
             setActive(2);
@@ -110,7 +107,7 @@ export function DepWizard({
             });
             // Refresh so last_error shows inline under the upload button.
             try {
-                const detail = await api.getDepServer(token, server.id);
+                const detail = await api.getDepServer(server.id);
                 setServer(detail);
             } catch {
                 /* keep the notification; nothing more to show */
@@ -134,9 +131,8 @@ export function DepWizard({
             labels: {confirm: "Remove", cancel: "Cancel"},
             confirmProps: {color: "red"},
             onConfirm: async () => {
-                if (!token) return;
                 try {
-                    await api.removeDepServer(token, server.id);
+                    await api.removeDepServer(server.id);
                     notifications.show({color: "green", message: "Connection removed."});
                     onRemoved?.();
                 } catch (e) {

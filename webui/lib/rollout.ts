@@ -4,7 +4,6 @@
 
 import {useCallback, useEffect, useState} from "react";
 import {api, type RolloutItemStats, type RolloutStatsResponse} from "./api";
-import {useAuth} from "./auth-context";
 
 export interface RolloutCounts {
     installed: number;
@@ -41,23 +40,21 @@ export function inFlight(c: RolloutCounts): number {
 }
 
 export function useRolloutStats(kind: "app" | "profile") {
-    const {token} = useAuth();
     const [stats, setStats] = useState<RolloutStatsResponse | null>(null);
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState<string | null>(null);
 
     const refresh = useCallback(async () => {
-        if (!token) return;
         setLoading(true);
         setError(null);
         try {
-            setStats(await api.getRolloutStats(token, kind));
+            setStats(await api.getRolloutStats(kind));
         } catch (e) {
             setError((e as Error).message);
         } finally {
             setLoading(false);
         }
-    }, [token, kind]);
+    }, [kind]);
 
     useEffect(() => {
         void refresh();

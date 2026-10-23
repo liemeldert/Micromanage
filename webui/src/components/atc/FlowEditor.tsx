@@ -5,6 +5,7 @@ import {
     type Connection,
     Controls,
     type Edge,
+    type FitViewOptions,
     Handle,
     MiniMap,
     type NodeProps,
@@ -92,6 +93,27 @@ const GRID = 16;
 
 // Pointer tools. Pan drags the canvas; select drags a marquee over it.
 type CanvasTool = "pan" | "select";
+
+const MIN_ZOOM = 0.2;
+const MAX_ZOOM = 2;
+// Zoom step for one mouse wheel notch.
+const WHEEL_ZOOM_STEP = 1.15;
+// Room around the graph after a fit, so blocks are not flush against the canvas edges.
+const FIT_VIEW_OPTIONS: FitViewOptions = {padding: {left: "24px", top: "24px", right: "24px", bottom: "24px"}};
+
+// Trackpad pixel deltas in Chromium and WebKit carry a legacy wheelDeltaY of exactly -3 times deltaY, and Firefox
+// reports mouse wheels in lines.
+function isMouseWheel(e: WheelEvent): boolean {
+    if (e.deltaMode !== WheelEvent.DOM_DELTA_PIXEL) return true;
+    if (e.deltaX !== 0 || e.deltaY === 0) return false;
+    const legacy = (e as WheelEvent & { wheelDeltaY?: number }).wheelDeltaY;
+    if (typeof legacy === "number" && legacy !== 0) return Math.abs(legacy + 3 * e.deltaY) > 2;
+    return Number.isInteger(e.deltaY) && Math.abs(e.deltaY) >= 50;
+}
+
+function isTypingTarget(target: EventTarget | null): boolean {
+    return target instanceof Element && Boolean(target.closest("input, textarea, select, [contenteditable]"));
+}
 
 // == Custom canvas node ==
 export function FlowNodeCard({data, selected, isConnectable}: NodeProps) {
@@ -327,7 +349,10 @@ function FlowEditorInner({
                              onOpenDraft,
                              onChange,
                          }: FlowEditorProps) {
-    const {fitView, screenToFlowPosition} = useReactFlow();
+    const {fitView, screenToFlowPosition, getViewport, setViewport, zoomIn, zoomOut} = useReactFlow();
+    const rootRef = useRef<HTMLDivElement | null>(null);
+    const canvasBoxRef = useRef<HTMLDivElement | null>(null);
+    const pointerOverCanvas = useRef(false);
     const initial = useMemo(
         // Build once per loaded document. Keyed on docKey rather than flowId, so a flow that keeps its id across
         // loads still re-initialises and nothing that changes mid-edit can throw the canvas away.
@@ -401,6 +426,50 @@ function FlowEditorInner({
         setSelectedId(focusNode.id);
         fitView({nodes: [{id: focusNode.id}], maxZoom: 1.2, duration: 350});
     }, [focusNode, fitView]);
+
+    // A mouse wheel zooms around the pointer, while trackpad scrolling pans and pinch or Cmd plus wheel go to React
+    // Flow's own zoom. Registered natively because React's wheel listener is passive.
+    useEffect(() => {
+        const box = canvasBoxRef.current;
+        if (!box) return;
+        const onWheel = (e: WheelEvent) => {
+            if (e.ctrlKey || e.metaKey || !isMouseWheel(e)) return;
+            const target = e.target instanceof Element ? e.target : null;
+            const pane = target?.closest(".react-flow");
+            if (!pane || target?.closest(".react-flow__panel, .react-flow__minimap, .react-flow__controls, .nowheel")) {
+                return;
+            }
+            e.preventDefault();
+            e.stopPropagation();
+            const rect = pane.getBoundingClientRect();
+            const px = e.clientX - rect.left;
+            const py = e.clientY - rect.top;
+            const {x, y, zoom} = getViewport();
+            const step = e.deltaY < 0 ? WHEEL_ZOOM_STEP : 1 / WHEEL_ZOOM_STEP;
+            const next = Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, zoom * step));
+            setViewport({x: px - ((px - x) / zoom) * next, y: py - ((py - y) / zoom) * next, zoom: next});
+        };
+        box.addEventListener("wheel", onWheel, {passive: false, capture: true});
+        return () => box.removeEventListener("wheel", onWheel, {capture: true});
+    }, [getViewport, setViewport]);
+
+    // Cmd (Ctrl elsewhere) with =, + or - zooms the canvas and 0 fits it, in place of the browser's page zoom, while
+    // the pointer is over the canvas or focus is inside the editor.
+    useEffect(() => {
+        const onKeyDown = (e: KeyboardEvent) => {
+            const isMac = /Mac|iPhone|iPad|iPod/.test(navigator.platform);
+            if (!(isMac ? e.metaKey : e.ctrlKey) || e.altKey || isTypingTarget(e.target)) return;
+            if (!["=", "+", "-", "0"].includes(e.key)) return;
+            const focusInside = rootRef.current?.contains(document.activeElement) ?? false;
+            if (!pointerOverCanvas.current && !focusInside) return;
+            e.preventDefault();
+            if (e.key === "0") void fitView({...FIT_VIEW_OPTIONS, duration: 200});
+            else if (e.key === "-") void zoomOut({duration: 150});
+            else void zoomIn({duration: 150});
+        };
+        window.addEventListener("keydown", onKeyDown, {capture: true});
+        return () => window.removeEventListener("keydown", onKeyDown, {capture: true});
+    }, [fitView, zoomIn, zoomOut]);
 
     const onConnect = useCallback(
         (c: Connection) => {
@@ -581,13 +650,18 @@ function FlowEditorInner({
         : [];
 
     return (
-        <Group align="stretch" gap={0} style={{height: "100%", minHeight: 0}} wrap="nowrap">
-            <Box style={{
-                flex: 1,
-                position: "relative",
-                borderRadius: 10,
-                overflow: "hidden",
-            }}>
+        <Group ref={rootRef} align="stretch" gap={0} style={{height: "100%", minHeight: 0}} wrap="nowrap">
+            <Box
+                ref={canvasBoxRef}
+                onPointerEnter={() => (pointerOverCanvas.current = true)}
+                onPointerLeave={() => (pointerOverCanvas.current = false)}
+                style={{
+                    flex: 1,
+                    position: "relative",
+                    borderRadius: 10,
+                    overflow: "hidden",
+                }}
+            >
                 <ReactFlow
                     nodes={decorated}
                     edges={edges}
@@ -600,10 +674,11 @@ function FlowEditorInner({
                     onDragOver={onDragOver}
                     onDrop={onDrop}
                     fitView
-                    // Keep a little room around the graph so nodes are not flush against the edges after fit-view.
-                    fitViewOptions={{padding: {left: "24px", top: "24px", right: "24px", bottom: "24px"}}}
-                    // Mac trackpad feel: two-finger scroll pans both axes, pinch zooms, and Cmd plus wheel
-                    // zooms. preventScrolling keeps the page still while the pointer is over the canvas.
+                    fitViewOptions={FIT_VIEW_OPTIONS}
+                    minZoom={MIN_ZOOM}
+                    maxZoom={MAX_ZOOM}
+                    // Two-finger scroll pans both axes, pinch zooms, and Cmd plus wheel zooms. A mouse wheel is
+                    // turned into zoom by the listener above. preventScrolling keeps the page still over the canvas.
                     panOnScroll
                     // Default is 0.5, which moves the canvas half as far as the fingers and reads as drag.
                     panOnScrollSpeed={1}
@@ -807,7 +882,7 @@ function FlowEditorInner({
                     }}
                 >
                     <Group gap={4} wrap="nowrap">
-                        <Tooltip label="Pan (drag the canvas)" withArrow position="top">
+                        <Tooltip label="Pan: drag to move the canvas" withArrow position="top">
                             <ActionIcon
                                 size="md"
                                 radius="xl"
@@ -820,7 +895,13 @@ function FlowEditorInner({
                                 <IconHandStop size={16}/>
                             </ActionIcon>
                         </Tooltip>
-                        <Tooltip label="Select (drag a box, or hold Shift while panning)" withArrow position="top">
+                        <Tooltip
+                            label="Select: drag across blocks to select them. Shift does the same in pan mode."
+                            withArrow
+                            position="top"
+                            multiline
+                            w={220}
+                        >
                             <ActionIcon
                                 size="md"
                                 radius="xl"

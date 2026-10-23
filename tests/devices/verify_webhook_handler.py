@@ -304,8 +304,7 @@ async def main():
     fp2 = wh._naming_cfg_fingerprint("m9")
     check(f"an unchanged file fingerprints the same twice (got {fp1})",
           fp1 is not None and fp1 == fp2)
-    write_config_yaml("m9", {"device_naming": {"template": "IT-{serial}",
-                                               "apply_on_enroll": True}})
+    write_config_yaml("m9", {"device_naming": {"template": "IT-{serial}"}})
     fp3 = wh._naming_cfg_fingerprint("m9")
     check("a temp-plus-os.replace rewrite moves the fingerprint",
           fp3 is not None and fp3 != fp1)
@@ -363,7 +362,7 @@ async def main():
           and await naming_reads("nm-fp", "UDID-NM-FP") == 0)
 
     # PATCH saves the DB row first, then mirrors it to the file; fingerprint change implies DB is fresh.
-    tn.device_naming = {"template": "IT-{serial}", "apply_on_enroll": True}
+    tn.device_naming = {"template": "IT-{serial}"}
     await tn.save(update_fields=["device_naming"])
     write_config_yaml("nm-fp", {"device_naming": tn.device_naming})
     stale = wh._TENANT_NAMING_CACHE.get("nm-fp")
@@ -392,8 +391,9 @@ async def main():
     check("nothing is ever cached for a tenant with no fingerprint",
           "nm-cli" not in wh._TENANT_NAMING_CACHE)
 
-    # Without a file, device_naming reaches the DB with no fingerprint to cache on.
-    tcli.device_naming = {"template": "LAB-{serial}", "apply_on_enroll": True}
+    # Without a file, device_naming reaches the DB with no fingerprint to cache on. A stored apply_on_enroll false
+    # from an older release is ignored.
+    tcli.device_naming = {"template": "LAB-{serial}", "apply_on_enroll": False}
     await tcli.save(update_fields=["device_naming"])
     await checkin("nm-cli", "UDID-NM-CLI")
     cli_dev = await Device.get(udid="UDID-NM-CLI")
@@ -410,11 +410,10 @@ async def main():
                    "OSVersion": "15.5"}, topic="mdm.Authenticate")
 
     # File edited, cache holds old DB value under new fingerprint; sync loop updates DB, file unchanged.
-    write_config_yaml("nm-ttl", {"device_naming": {"template": "TTL-{serial}",
-                                                   "apply_on_enroll": True}})
+    write_config_yaml("nm-ttl", {"device_naming": {"template": "TTL-{serial}"}})
     fp_now = wh._naming_cfg_fingerprint("nm-ttl")
     wh._TENANT_NAMING_CACHE["nm-ttl"] = (fp_now, time.monotonic() + 300.0, {})
-    tt.device_naming = {"template": "TTL-{serial}", "apply_on_enroll": True}
+    tt.device_naming = {"template": "TTL-{serial}"}
     await tt.save(update_fields=["device_naming"])
 
     held = await naming_reads("nm-ttl", "UDID-NM-TTL")
@@ -461,7 +460,7 @@ async def main():
           all(r.name is None for r in rows))
 
     # Admin configures template; it writes DB first, then mirrors to config.yaml.
-    te.device_naming = {"template": "CART-{serial}", "apply_on_enroll": True}
+    te.device_naming = {"template": "CART-{serial}"}
     await te.save(update_fields=["device_naming"])
     write_config_yaml("nm-e2e", {"device_naming": te.device_naming})
 
@@ -487,8 +486,9 @@ async def main():
     write_config_yaml("m5-groups", {"device_naming": {}})
     gdir = tenant_config.tenant_dir("m5-groups")
     (gdir / "groups.yaml").write_text(yaml.safe_dump({"groups": [
+        # apply_on_enroll false is a key from an older release and does not stop the group template naming.
         {"name": "ipads", "device_naming": {"template": "PAD-{serial}",
-                                            "apply_on_enroll": True},
+                                            "apply_on_enroll": False},
          "conditions": [{"type": "platform", "operator": "in", "value": ["iPad"]}]},
         {"name": "nobody", "conditions": [
             {"type": "serial_number", "operator": "in", "value": ["__never__"]}]},

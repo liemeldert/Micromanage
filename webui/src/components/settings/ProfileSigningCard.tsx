@@ -1,4 +1,4 @@
-// Admin card for the identity that signs enrollment profiles, uploaded as Apple hands it out: a .p12 exported from
+// Admin card for the identity that signs enrollment profiles, uploaded as a .p12 exported from
 // Keychain Access and optional .cer intermediates. The server returns only the certificate's subject, issuer, expiry
 // and chain length; the key and the .p12 password never come back.
 
@@ -20,7 +20,6 @@ import {modals} from "@mantine/modals";
 import {notifications} from "@mantine/notifications";
 import {IconAlertTriangle, IconCertificate, IconKey, IconRefresh, IconTrash, IconUpload} from "@tabler/icons-react";
 import {api, ApiError, type ProfileSigningStatus} from "../../../lib/api";
-import {useAuth} from "../../../lib/auth-context";
 import {GlassCard} from "../ui/GlassCard";
 
 // Mirrors the server's limits, so a wrong or oversized file is caught before it is uploaded.
@@ -66,7 +65,6 @@ function daysUntil(iso: string | null): number | null {
 }
 
 export function ProfileSigningCard() {
-    const {token} = useAuth();
     // null while loading, with loadError kept separate so a failed fetch never reads as not configured.
     const [status, setStatus] = useState<ProfileSigningStatus | null>(null);
     const [loadError, setLoadError] = useState<string | null>(null);
@@ -78,9 +76,8 @@ export function ProfileSigningCard() {
     const [removing, setRemoving] = useState(false);
 
     const load = () => {
-        if (!token) return Promise.resolve();
         return api
-            .getProfileSigning(token)
+            .getProfileSigning()
             .then((s) => {
                 setStatus(s);
                 setLoadError(null);
@@ -93,8 +90,7 @@ export function ProfileSigningCard() {
     };
     useEffect(() => {
         load();
-        // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [token]);
+    }, []);
 
     const configured = status?.configured === true;
     const p12Error = p12Problem(p12File);
@@ -102,10 +98,10 @@ export function ProfileSigningCard() {
     const canImport = !!p12File && !p12Error && !intermediatesError && !importing && !removing;
 
     const importIdentity = async () => {
-        if (!token || !p12File || !canImport) return;
+        if (!p12File || !canImport) return;
         setImporting(true);
         try {
-            const next = await api.importProfileSigning(token, {
+            const next = await api.importProfileSigning({
                 p12_b64: await fileToBase64(p12File),
                 password,
                 intermediates_b64: await Promise.all(intermediates.map(fileToBase64)),
@@ -145,10 +141,9 @@ export function ProfileSigningCard() {
     };
 
     const remove = async () => {
-        if (!token) return;
         setRemoving(true);
         try {
-            setStatus(await api.deleteProfileSigning(token));
+            setStatus(await api.deleteProfileSigning());
             notifications.show({color: "green", message: "Signing certificate removed."});
         } catch (e) {
             notifications.show({

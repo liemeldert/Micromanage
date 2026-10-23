@@ -1,9 +1,12 @@
+import {useEffect, useRef} from "react";
 import {ActionIcon, Badge, Box, Divider, Group, Paper, ScrollArea, Text, Tooltip,} from "@mantine/core";
 import {IconCircleFilled, IconFilePlus, IconGitBranch, IconLock, IconSearch, IconX,} from "@tabler/icons-react";
 import type {FlowDoc} from "../../../lib/api";
 import {glassClassName} from "../ui/glass";
 
 const SAVE_FIRST_REASON = "Save this flow first; a draft copies the saved flow.";
+// Height of the tabs and of every control in the row.
+const CONTROL_HEIGHT = 30;
 
 // The editor's single toolbar: open flow tabs on the left, and on the right whatever actions the
 // page supplies for the active flow. One row, so the canvas keeps the rest of the window.
@@ -57,6 +60,12 @@ export function FlowTabs({
 
     const flowLabel = (flow: FlowDoc | undefined, fallback: string) => flow?.name || flow?.id || fallback;
 
+    // The strip scrolls sideways, so a tab opened from a link or the switcher is brought into view.
+    const activeTabRef = useRef<HTMLDivElement | null>(null);
+    useEffect(() => {
+        activeTabRef.current?.scrollIntoView({block: "nearest", inline: "nearest"});
+    }, [activeFlowId]);
+
     const activeFlow = flowsById.get(activeFlowId);
     const activeIsDraft = Boolean(activeFlow?.draft_of);
     const draftOfActive = activeFlow ? draftByTarget.get(activeFlow.id) : undefined;
@@ -79,7 +88,11 @@ export function FlowTabs({
             className={glassClassName({material: "thin", reactive: false})}
             p="xs"
             radius={0}
-            style={{position: "relative", zIndex: 5}}
+            style={{
+                position: "relative",
+                zIndex: 5,
+                borderBottom: "1px solid var(--mantine-color-default-border)",
+            }}
         >
             <Group justify="space-between" wrap="nowrap" gap="xs">
                 <ScrollArea type="never" offsetScrollbars={false} style={{flex: 1}}>
@@ -99,14 +112,26 @@ export function FlowTabs({
                             return (
                                 <Group
                                     key={flow.id}
+                                    ref={isActive ? activeTabRef : undefined}
+                                    h={CONTROL_HEIGHT}
                                     gap={6}
                                     wrap="nowrap"
                                     role="button"
+                                    tabIndex={0}
+                                    className="mantine-focus-auto"
                                     aria-label={flow.name || flow.id}
+                                    aria-pressed={isActive}
                                     onClick={() => onSelectFlow(flow.id)}
+                                    onKeyDown={(e) => {
+                                        // Keys from the close button inside the tab stay with that button.
+                                        if (e.target !== e.currentTarget) return;
+                                        if (e.key !== "Enter" && e.key !== " ") return;
+                                        e.preventDefault();
+                                        onSelectFlow(flow.id);
+                                    }}
                                     style={{
                                         cursor: "pointer",
-                                        padding: "4px 10px",
+                                        padding: "0 10px",
                                         borderRadius: "var(--mantine-radius-xs)",
                                         backgroundColor: isActive ? "var(--mantine-color-blue-light)" : "var(--mantine-color-default)",
                                         border: isActive
@@ -192,11 +217,17 @@ export function FlowTabs({
                     </Group>
                 </ScrollArea>
 
-                <Group gap={6} wrap="nowrap">
+                <Group gap={8} wrap="nowrap">
                     {/* Both controls are always here, enabled or not, so the toolbar keeps one width as a
                         draft comes and goes. */}
                     <Tooltip label="New flow" withArrow position="top">
-                        <ActionIcon size="md" variant="default" onClick={onNewFlow} aria-label="New flow">
+                        <ActionIcon
+                            size={CONTROL_HEIGHT}
+                            variant="subtle"
+                            color="gray"
+                            onClick={onNewFlow}
+                            aria-label="New flow"
+                        >
                             <IconFilePlus size={16}/>
                         </ActionIcon>
                     </Tooltip>
@@ -210,9 +241,9 @@ export function FlowTabs({
                     >
                         <Box style={{display: "flex"}}>
                             <ActionIcon
-                                size="md"
-                                variant={draftOfActive ? "light" : "default"}
-                                color={draftOfActive ? "orange" : undefined}
+                                size={CONTROL_HEIGHT}
+                                variant={draftOfActive ? "light" : "subtle"}
+                                color={draftOfActive ? "orange" : "gray"}
                                 onClick={draftOfActive ? () => onSelectFlow(draftOfActive.id) : onCreateDraft}
                                 disabled={!draftOfActive && (!isAdmin || !activeSaved || !canOfferCreateDraft)}
                                 aria-label={draftOfActive ? "Open draft" : "Create draft"}
@@ -222,13 +253,19 @@ export function FlowTabs({
                         </Box>
                     </Tooltip>
                     <Tooltip label="All flows (mod+P)" withArrow position="top">
-                        <ActionIcon size="md" variant="default" onClick={onOpenSwitcher}>
+                        <ActionIcon
+                            size={CONTROL_HEIGHT}
+                            variant="subtle"
+                            color="gray"
+                            onClick={onOpenSwitcher}
+                            aria-label="All flows"
+                        >
                             <IconSearch size={16}/>
                         </ActionIcon>
                     </Tooltip>
                     {actions ? (
                         <>
-                            <Divider orientation="vertical" mx={4}/>
+                            <Divider orientation="vertical" mx={4} my={4}/>
                             {actions}
                         </>
                     ) : null}

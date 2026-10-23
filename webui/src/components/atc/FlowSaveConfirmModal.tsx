@@ -3,7 +3,6 @@ import {Button, Checkbox, Group, List, Modal, Stack, Text} from "@mantine/core";
 import {GlassAlert} from "../ui/GlassAlert";
 import {IconAlertTriangle} from "@tabler/icons-react";
 import {api, type ScopePreview, type ScopePreviewTriggerKind} from "../../../lib/api";
-import {useAuth} from "../../../lib/auth-context";
 import type {SaveGuardReason} from "./flow-utils";
 
 /** Blocking save-time confirmation. Reasons are the flow-utils.saveGuardReasons checks plus the server's warnings
@@ -18,7 +17,7 @@ const PREVIEW_KINDS = new Set<string>([
     "schedule",
 ]);
 
-// Same ceiling the ATC page puts on its warnings fetch; past it the count is not coming.
+// Same ceiling the ATC page puts on its warnings fetch.
 const PREVIEW_TIMEOUT_MS = 4000;
 
 // How many devices are named under a count.
@@ -30,15 +29,14 @@ function previewKey(r: SaveGuardReason): string {
 }
 
 async function fetchPreview(
-    token: string,
     reason: SaveGuardReason,
 ): Promise<ScopePreview | null> {
     try {
         const res = await Promise.race([
-            api.previewScope(token, {
+            api.previewScope({
                 scope: reason.match ?? {},
-                // A flow start reads an empty scope as every device of this trigger kind, so say so rather than
-                // leave the server to guess. Profiles and app versions would send "none".
+                // A flow start reads an empty scope as every device of this trigger kind. Profiles and app versions
+                // would send "none".
                 empty_scope: "all",
                 trigger_kind: reason.kind as ScopePreviewTriggerKind,
                 sample_limit: SAMPLE_SHOWN,
@@ -59,14 +57,12 @@ function count(n: number, truncated: boolean): string {
     return `${truncated ? "at least " : ""}${n.toLocaleString()}`;
 }
 
-/** The sentence carrying the number, one per trigger kind. It sits under the reason's own sentence rather than
- * replacing it. */
+/** The sentence carrying the number, one per trigger kind, shown under the reason's own sentence. */
 function countSentence(reason: SaveGuardReason, p: ScopePreview): string {
     const matched = count(p.matched, p.truncated);
     const devices = plural(p.matched, "device", "devices");
     if (!p.scope_is_empty) {
-        // Says which way the number cuts. "matches 437 of 1,040" left people reading it as a limit the flow
-        // imposes on itself either way round, so the sentence now names what is left out.
+        // Names what is left out, as "matches 437 of 1,040" reads as a limit the flow imposes on itself.
         if (p.matched >= p.eligible) {
             return `This scope matches all ${p.eligible.toLocaleString()} ${plural(
                 p.eligible, "device", "devices")} this start can reach right now.`;
@@ -98,7 +94,7 @@ function countSentence(reason: SaveGuardReason, p: ScopePreview): string {
     }
 }
 
-/** Up to three matched devices by name, so the number can be sanity checked. */
+/** Up to three matched devices by name. */
 function sampleSentence(p: ScopePreview): string | null {
     const names = p.sample.slice(0, SAMPLE_SHOWN).map((d) => d.display_name);
     if (!names.length) return null;
@@ -127,22 +123,20 @@ export function FlowSaveConfirmModal({
     onCancel: () => void;
     onConfirm: () => void;
 }) {
-    const {token} = useAuth();
     const [acked, setAcked] = useState(false);
-    // Counts by previewKey, filled in as replies arrive. Never blocks a render.
+    // Counts by previewKey, filled in as replies arrive.
     const [previews, setPreviews] = useState<Record<string, ScopePreview>>({});
 
-    // Never carry the tick over from the previous open.
+    // Resets the tick from the previous open.
     useEffect(() => {
         if (opened) setAcked(false);
     }, [opened]);
 
     // One count request per distinct (kind, scope) when the modal opens. Replies are dropped if the modal closed
-    // meanwhile, and the previous open's numbers are cleared first so no stale count sits under a new reason.
+    // meanwhile, and the previous open's numbers are cleared first.
     useEffect(() => {
         if (!opened) return;
         setPreviews({});
-        if (!token) return;
         let stale = false;
         const asked = new Map<string, SaveGuardReason>();
         for (const r of reasons) {
@@ -151,16 +145,16 @@ export function FlowSaveConfirmModal({
             if (!asked.has(key)) asked.set(key, r);
         }
         for (const [key, reason] of asked) {
-            fetchPreview(token, reason).then((p) => {
+            fetchPreview(reason).then((p) => {
                 if (!stale && p) setPreviews((prev) => ({...prev, [key]: p}));
             });
         }
         return () => {
             stale = true;
         };
-    }, [opened, token, reasons]);
+    }, [opened, reasons]);
 
-    // The confirm label names the consequence, broadest reason winning: a check-in or schedule start reaches the
+    // The confirm label names the consequence of the broadest reason: a check-in or schedule start reaches the
     // whole fleet, an enrollment start reaches devices as they enroll, and server-only reasons ask just for the
     // acknowledgement. A document the server has already refused gets no offer.
     const blocked = serverErrors.length > 0;

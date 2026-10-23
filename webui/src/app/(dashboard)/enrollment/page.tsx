@@ -111,9 +111,9 @@ function DetailRow({label, value}: { label: string; value: string | null }) {
 
 // The tenant-scoped list, and the admin-only list of check-ins that resolved no tenant. Two endpoints feed one
 // table, since the rows carry the same fields.
-const fetchTenantAttempts = (token: string) => api.getEnrollmentAttempts(token, {limit: 20});
-const fetchUnattributedAttempts = (token: string) =>
-    api.getUnattributedEnrollmentAttempts(token, {limit: 20});
+const fetchTenantAttempts = () => api.getEnrollmentAttempts({limit: 20});
+const fetchUnattributedAttempts = () =>
+    api.getUnattributedEnrollmentAttempts({limit: 20});
 
 const FAILED_ATTEMPTS_DESCRIPTION = "Enrollment requests the controller refused or could not match to a device.";
 
@@ -126,24 +126,22 @@ function AttemptsCard({
     title: string;
     description: string;
     emptyText: string;
-    fetchAttempts: (token: string) => Promise<{ attempts: EnrollmentAttempt[] }>;
+    fetchAttempts: () => Promise<{ attempts: EnrollmentAttempt[] }>;
 }) {
-    const {token} = useAuth();
     const [attempts, setAttempts] = useState<EnrollmentAttempt[] | null>(null);
     const [loading, setLoading] = useState(true);
 
     const load = useCallback(async () => {
-        if (!token) return;
         setLoading(true);
         try {
-            const res = await fetchAttempts(token);
+            const res = await fetchAttempts();
             setAttempts(res.attempts);
         } catch (e: unknown) {
             notifications.show({color: "red", message: (e as Error).message});
         } finally {
             setLoading(false);
         }
-    }, [token, fetchAttempts]);
+    }, [fetchAttempts]);
 
     useEffect(() => {
         load();
@@ -212,23 +210,22 @@ function AttemptsCard({
 }
 
 export default function EnrollmentPage() {
-    const {token, isAdmin} = useAuth();
+    const {isAdmin} = useAuth();
     const [details, setDetails] = useState<EnrollmentDetails | null>(null);
     const [loading, setLoading] = useState(true);
     const {readiness, reload: reloadReadiness} = useReadiness();
     const enrollWarnings = readiness?.capabilities.find((c) => c.capability === "enroll")?.warnings ?? [];
 
     const load = useCallback(async () => {
-        if (!token) return;
         setLoading(true);
         try {
-            setDetails(await api.getEnrollment(token));
+            setDetails(await api.getEnrollment());
         } catch (e: unknown) {
             notifications.show({color: "red", message: (e as Error).message});
         } finally {
             setLoading(false);
         }
-    }, [token]);
+    }, []);
 
     const refresh = () => {
         load();

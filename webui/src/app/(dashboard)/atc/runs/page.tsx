@@ -22,7 +22,6 @@ import {notifications} from "@mantine/notifications";
 import {IconRefresh} from "@tabler/icons-react";
 import {api, type FlowRunCounts, type FlowRunRow} from "../../../../../lib/api";
 import {clickable} from "../../../../../lib/a11y";
-import {useAuth} from "../../../../../lib/auth-context";
 import {timeSince, timeUntil} from "../../../../../lib/time";
 import {FLOW_RUN_STATUS_COLORS as STATUS_COLOR} from "../../../../../lib/status-labels";
 import {PageHeader} from "@/components/layout/PageHeader";
@@ -204,7 +203,6 @@ const EMPTY_COUNTS: FlowRunCounts = {
 };
 
 export default function FlowRunsPage() {
-    const {token} = useAuth();
     const router = useRouter();
 
     const [runs, setRuns] = useState<FlowRunRow[]>([]);
@@ -223,13 +221,12 @@ export default function FlowRunsPage() {
     const [windowHours, setWindowHours] = useState<string | null>(null);
     const [unverified, setUnverified] = useState(false);
 
-    // Last request wins: changing a filter mid-request would otherwise leave the previous rows under the new label.
+    // Only the latest request's result is applied, as an older one would leave previous rows under the new filter.
     const reqSeq = useRef(0);
     const foregroundPending = useRef(false);
 
     const load = useCallback(
         async (background = false) => {
-            if (!token) return;
             if (background && foregroundPending.current) return;
             const seq = ++reqSeq.current;
             if (!background) {
@@ -243,7 +240,7 @@ export default function FlowRunsPage() {
                         : status === ANY
                             ? {}
                             : {status};
-                const res = await api.listFlowRuns(token, {
+                const res = await api.listFlowRuns({
                     skip: (page - 1) * PAGE_SIZE,
                     limit: PAGE_SIZE,
                     ...state,
@@ -285,14 +282,14 @@ export default function FlowRunsPage() {
                 }
             }
         },
-        [token, page, status, flow, eventKind, parkedMins, windowHours, unverified],
+        [page, status, flow, eventKind, parkedMins, windowHours, unverified],
     );
 
     useEffect(() => {
         load();
     }, [load]);
 
-    // Runs change state while the page is open, so poll quietly in the background.
+    // Runs change state while the page is open, so they are polled in the background.
     useEffect(() => {
         const id = setInterval(() => {
             if (document.visibilityState === "visible") load(true);

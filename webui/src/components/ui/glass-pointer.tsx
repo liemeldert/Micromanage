@@ -21,6 +21,8 @@ let pointer: { x: number; y: number } | null = null;
 // The surface currently wearing a tint borrowed from something inside it.
 let borrower: HTMLElement | null = null;
 let frame = 0;
+const INNER_HOVER =
+    ':has(.mm-glass-nested:hover, .mm-glass-control:hover, .mm-glass-interactive:hover, button:hover, [role="button"]:hover)';
 let listening = false;
 
 function paint() {
@@ -49,7 +51,8 @@ function paint() {
         // A surface that lifts also leans after the pointer while it is over it, the way a focused target does
         // on iPadOS. Only while the pointer is actually inside, or a card would drift at a cursor passing by.
         if (!el.classList.contains("mm-glass-lift")) continue;
-        const over = distance === 0;
+        // No lean while a nested control under the pointer is hovered.
+        const over = distance === 0 && !el.matches(INNER_HOVER);
         // Pressing harder leans the card further. The press level already folds in trackpad force and pen
         // pressure where they exist, and grows on hold time where they do not.
         const press = Number(el.style.getPropertyValue("--mm-glass-press")) || 0;

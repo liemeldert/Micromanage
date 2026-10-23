@@ -19,7 +19,6 @@ import Link from "next/link";
 import {useRouter} from "next/navigation";
 import {BarChart} from "@mantine/charts";
 import {api, type DispatcherAlert, isCredentialRevealAlert, type StatsOverview} from "../../../../lib/api";
-import {useAuth} from "../../../../lib/auth-context";
 import {READINESS_POLL_MS, useReadiness} from "../../../../lib/readiness";
 import {notifications} from "@mantine/notifications";
 import {ReadinessBanner} from "@/components/ReadinessStatus";
@@ -46,7 +45,7 @@ function StatCard({
     sub?: string;
     icon: React.ElementType;
     color: string;
-    /** A band of light around the card when this number is something to act on. */
+    /** Highlights the card when this number needs action. */
     tone?: GlassTone;
     toneLevel?: number;
 }) {
@@ -74,22 +73,18 @@ function StatCard({
     );
 }
 
-// Triage order, worst first, matching the alert board's own colours.
-// The two fleet breakdowns sit side by side, so they share a height and an axis. Without that the plot areas end
-// at different heights and the bars in one chart stand on a different line from the bars in the other.
+// Triage order, worst first, matching the alert board's own colours. The two fleet breakdowns sit side by side, so they
+// share a height and an axis and their plot areas end on the same line.
 const FLEET_CHART_HEIGHT = 260;
 
-// Recharts drops x-axis labels it thinks would collide. interval 0 keeps every bar's label, the angle stops model
-// identifiers running into each other, and the height is the room the tilted labels need. The OS chart's labels
-// would fit without any of it. It takes the same axis anyway, so both plot areas end on the same line.
+// Recharts drops x-axis labels that would overlap. interval 0 keeps every bar's label, the angle separates model
+// identifiers, and the height fits the tilted labels. The OS chart takes the same axis so both plot areas match.
 const FLEET_CHART_X_AXIS = {interval: 0, angle: -30, textAnchor: "end", height: 70} as const;
 
 // Device counts are whole numbers; a small tallest bar otherwise gets 0.5 ticks.
 const FLEET_CHART_Y_AXIS = {allowDecimals: false} as const;
 
-// The second line under an alert's summary. Most summaries already name the device ("FileVault disabled on
-// hana-mac-l4ze"), and repeating it underneath spends the row's second line saying nothing new, so the name
-// only appears when the summary has not already said it.
+// The second line under an alert's summary, the device name, which is left out when the summary already names it.
 function alertDetailLine(alert: {
     summary: string;
     opened_at?: string | null;
@@ -137,8 +132,8 @@ function ComplianceBreakdown({
     const [peekId, setPeekId] = useState<string | null>(null);
     const [showAcked, setShowAcked] = useState(false);
 
-    // Acknowledged means somebody has seen it, so it leaves the board the way a notification does, and the
-    // counts follow the board rather than the server's total. They can be brought back to be un-acknowledged.
+    // Acknowledged alerts leave the board and the counts follow the board rather than the server's total. They can be
+    // un-acknowledged.
     const unresolved = alerts.filter((alert) => alert.status !== "resolved");
     const ackedBySeverity = unresolved
         .filter((alert) => alert.status === "acknowledged")
@@ -195,7 +190,7 @@ function ComplianceBreakdown({
                                             borderRadius: 8,
                                             flexShrink: 0,
                                             background: `var(--mantine-color-${severity.color}-6)`,
-                                            // A zero is worth naming, not worth shouting.
+                                            // A zero is dimmed.
                                             opacity: count ? 1 : 0.35,
                                         }}
                                     />
@@ -208,9 +203,9 @@ function ComplianceBreakdown({
                                 </Text>
                             </Interactable>
 
-                            {/* Each column scrolls on its own, so a hundred of one severity cannot bury the
-                              others below it. Mantine sizes an autosize area to its widest line, which a long
-                              summary turns into a sideways scrollbar, so the content is held to the column. */}
+                            {/* Each column scrolls on its own, so many alerts of one severity do not push the others
+                            down. Mantine sizes an autosize area to its widest line, so the content is held to the
+                            column width. */}
                             <ScrollArea.Autosize
                                 mah={260}
                                 type="auto"
@@ -218,9 +213,8 @@ function ComplianceBreakdown({
                                 offsetScrollbars="y"
                                 styles={{content: {minWidth: 0}}}
                             >
-                                {/* Matches the swipe hint's reach on both sides, since the column clips
-                                  anything past its padding. The rows sit close together: the gap between two
-                                  of them is worth less here than one more alert being readable. */}
+                                {/* Matches the swipe hint's reach on both sides, as the column clips anything
+                                past its padding. */}
                                 <Stack gap={2} px={12} py={2}>
                                     {rows.length === 0 ? (
                                         <Text fz="xs" c="dimmed" px={8}>
@@ -296,7 +290,6 @@ function ComplianceBreakdown({
 }
 
 export default function DashboardPage() {
-    const {token} = useAuth();
     const router = useRouter();
     const {readiness, loading: readinessLoading, error: readinessError} = useReadiness(READINESS_POLL_MS);
     const [stats, setStats] = useState<StatsOverview | null>(null);
@@ -307,14 +300,12 @@ export default function DashboardPage() {
         counts: Record<string, number>;
         alerts: DispatcherAlert[];
     } | null>(null);
-    // A failed alert fetch is not "all clear". Held apart from compliance so the card can say it does not know
-    // rather than show a green zero.
+    // A failed alert fetch is kept apart from compliance so the card can show it is unknown instead of a green zero.
     const [complianceFailed, setComplianceFailed] = useState(false);
     const [loading, setLoading] = useState(true);
 
     useEffect(() => {
-        if (!token) return;
-        Promise.all([api.getStats(token), api.getDevicesByModel(token), api.getDevicesByOs(token)])
+        Promise.all([api.getStats(), api.getDevicesByModel(), api.getDevicesByOs()])
             .then(([s, m, o]) => {
                 setStats(s);
                 setByModel(m.slice(0, 8));
@@ -324,20 +315,19 @@ export default function DashboardPage() {
             .finally(() => setLoading(false));
         // Compliance summary is independent (the feature may be unconfigured).
         api
-            .listAlerts(token)
+            .listAlerts()
             .then((a) => {
                 setCompliance({active: a.active, counts: a.counts, alerts: a.alerts ?? []});
                 setComplianceFailed(false);
             })
             .catch(() => setComplianceFailed(true));
-    }, [token]);
+    }, []);
 
     const refreshAlerts = useCallback(() => {
-        if (!token) return;
-        api.listAlerts(token)
+        api.listAlerts()
             .then((a) => setCompliance({active: a.active, counts: a.counts, alerts: a.alerts ?? []}))
             .catch(() => setComplianceFailed(true));
-    }, [token]);
+    }, []);
 
     const dismissAlert = useCallback((id: string) => {
         setCompliance((current) => (current
@@ -346,31 +336,27 @@ export default function DashboardPage() {
     }, []);
 
     const unacknowledgeAlert = useCallback((id: string) => {
-        if (!token) return;
-        api.unacknowledgeAlert(token, id)
+        api.unacknowledgeAlert(id)
             .then(refreshAlerts)
             .catch((e) => notifications.show({color: "red", message: (e as Error).message}));
-    }, [token, refreshAlerts]);
+    }, [refreshAlerts]);
 
     const acknowledgeAlert = useCallback((id: string) => {
-        if (!token) return;
-        api.acknowledgeAlert(token, id)
+        api.acknowledgeAlert(id)
             .then(refreshAlerts)
             .catch((e) => notifications.show({color: "red", message: (e as Error).message}));
-    }, [token, refreshAlerts]);
+    }, [refreshAlerts]);
 
-    // Closing a credential reveal record asks for a reason and is audited, so that one goes to the page that can
-    // ask rather than being settled from a dashboard tile.
+    // Closing a credential reveal record asks for a reason and is audited, so it is handled on the alerts page.
     const resolveAlert = useCallback((alert: DispatcherAlert) => {
-        if (!token) return;
         if (isCredentialRevealAlert(alert)) {
             router.push(`/compliance?alert=${encodeURIComponent(alert.id)}`);
             return;
         }
-        api.resolveAlert(token, alert.id)
+        api.resolveAlert(alert.id)
             .then(refreshAlerts)
             .catch((e) => notifications.show({color: "red", message: (e as Error).message}));
-    }, [token, refreshAlerts, router]);
+    }, [refreshAlerts, router]);
 
     if (loading) {
         return <PageSkeleton variant="dashboard"/>;
@@ -399,8 +385,7 @@ export default function DashboardPage() {
     }, {});
     const ackedTotal = (compliance?.alerts ?? []).filter((alert) => alert.status === "acknowledged").length;
 
-    // Red and black alerts want acting on; yellow is worth a quieter, warmer band. An unreachable endpoint is
-    // not a fleet problem, so it says nothing rather than glowing.
+    // Red and black alerts highlight strongly and yellow ones softly. An unreachable endpoint is not highlighted.
     const severeAlerts = (liveBySeverity.black ?? 0) + (liveBySeverity.red ?? 0);
     const complianceTone: GlassTone = complianceFailed
         ? "neutral"
@@ -462,7 +447,7 @@ export default function DashboardPage() {
                         icon={IconClock}
                         color={taskFailed > 0 ? "red" : "orange"}
                         tone={taskFailed > 0 ? "negative" : "neutral"}
-                        // Scales with the count, so a fleet's worth of failures glows harder than a handful.
+                        // The highlight strength scales with the count.
                         toneLevel={Math.min(0.35 + taskFailed / 25, 1)}
                     />
                 </Box>
@@ -601,8 +586,8 @@ export default function DashboardPage() {
                             </Text>
                             <BarChart
                                 h={FLEET_CHART_HEIGHT}
-                                // A device that has not reported its OS comes back with an empty os_version, which
-                                // would draw a bar with no label at all.
+                                // A device that has not reported its OS has an empty os_version, which would draw an
+                                // unlabeled bar.
                                 data={byOs.map((d) => ({name: d.os_version || "unknown", Devices: d.count}))}
                                 dataKey="name"
                                 series={[{name: "Devices", color: "grape"}]}

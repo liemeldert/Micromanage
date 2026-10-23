@@ -33,8 +33,8 @@ class TenantUpdate(BaseModel):
     dep_enabled: Optional[bool] = None
     ddm_enabled: Optional[bool] = None
     is_active: Optional[bool] = None
-    # Tenant-default device-naming template applied at enrollment (services.naming). Keys are template (for example
-    # IT-{serial}) and apply_on_enroll. An empty dict clears it.
+    # Tenant-default device-naming template applied at enrollment (services.naming), keyed template (for example
+    # IT-{serial}). Other keys are ignored and an empty dict clears it.
     device_naming: Optional[Dict[str, Any]] = None
     # Reverse-DNS base for composed PayloadIdentifiers ("com.acme.mdm")
     payload_identifier_prefix: Optional[str] = None
@@ -52,6 +52,12 @@ class TenantUpdate(BaseModel):
             if re.fullmatch(r"\d{4}-\d{2}-\d{2}", v):
                 return f"{v}T00:00:00Z"
         return v
+
+
+def _naming_template_only(device_naming: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    """The stored naming config reduced to its template, with any other key dropped."""
+    template = (device_naming or {}).get("template")
+    return {"template": template} if template else {}
 
 
 @router.get("/api/v1/tenant", response_model=Dict[str, Any])
@@ -74,7 +80,7 @@ async def get_tenant_info(principal: Principal = Depends(get_current_principal))
         # Admin-entered renewal reminders (manual-entry MVP; see models.tenant).
         "apns_cert_expires_at": tenant.apns_cert_expires_at,
         "dep_token_expires_at": tenant.dep_token_expires_at,
-        "device_naming": tenant.device_naming or {},
+        "device_naming": _naming_template_only(tenant.device_naming),
         # Null when the built-in "com.mdm.<tenant id>" base is in use.
         "payload_identifier_prefix": tenant.payload_identifier_prefix,
         # Whether FileVault recovery-key escrow is set up, plus the certificate expiry. Booleans and dates only; the
@@ -144,17 +150,14 @@ async def update_tenant(update: TenantUpdate, admin: Principal = Depends(require
                     detail=f"payload_identifier_prefix {err}")
             tenant.payload_identifier_prefix = prefix
     if update.device_naming is not None:
-        # Only template and apply_on_enroll are kept; a blank template clears the tenant default (stored as an empty
-        # dict). Group-level templates take precedence (services.naming.select_naming_config).
+        # Only template is kept; a blank template clears the tenant default (stored as an empty dict). Group-level
+        # templates take precedence (services.naming.select_naming_config).
         dn = update.device_naming
         if not isinstance(dn, dict):
             raise HTTPException(status_code=400, detail="device_naming must be an object")
         template = str(dn.get("template") or "").strip()[:200]
         if template:
-            tenant.device_naming = {
-                "template": template,
-                "apply_on_enroll": bool(dn.get("apply_on_enroll")),
-            }
+            tenant.device_naming = {"template": template}
         else:
             tenant.device_naming = {}
     # The reminder dates are the one pair where null is a real value, so they key off whether the field was in the

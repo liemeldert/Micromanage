@@ -4,15 +4,13 @@ import {modals} from "@mantine/modals";
 import {notifications} from "@mantine/notifications";
 import {IconArrowBackUp, IconHistory} from "@tabler/icons-react";
 import {api, configConflict, type ConfigVersion} from "../../../lib/api";
-import {useAuth} from "../../../lib/auth-context";
 import {showConfigConflict} from "../../../lib/config";
 
 type EditableType = "groups" | "apps" | "profiles" | "declarations";
 
 /**
  * History drawer for a config document: prior versions newest first, a line diff against the live file, and a restore.
- * Restore sends currentVersion as If-Match, so it is refused if someone else has saved since. The diff base is the
- * live file's own text, since re-serializing the editors' parsed JSON reformats the YAML and marks every line changed.
+ * Restore sends currentVersion as If-Match. The diff base is the live file's text, as re-serializing would reformat it.
  */
 export function ConfigHistoryDrawer({
                                         opened,
@@ -29,7 +27,6 @@ export function ConfigHistoryDrawer({
     currentVersion?: string;
     onRestored: () => void;
 }) {
-    const {token} = useAuth();
     const [versions, setVersions] = useState<ConfigVersion[]>([]);
     const [loading, setLoading] = useState(false);
     const [selectedId, setSelectedId] = useState<string | null>(null);
@@ -40,17 +37,16 @@ export function ConfigHistoryDrawer({
     const [liveDoc, setLiveDoc] = useState<string | null>(null);
 
     const loadList = useCallback(async () => {
-        if (!token) return;
         setLoading(true);
         try {
-            const res = await api.listConfigHistory(token, type);
+            const res = await api.listConfigHistory(type);
             setVersions(res.versions);
         } catch (e) {
             notifications.show({color: "red", message: (e as Error).message});
         } finally {
             setLoading(false);
         }
-    }, [token, type]);
+    }, [type]);
 
     useEffect(() => {
         if (opened) {
@@ -62,10 +58,10 @@ export function ConfigHistoryDrawer({
     }, [opened, loadList]);
 
     useEffect(() => {
-        if (!opened || !token) return;
+        if (!opened) return;
         let stale = false;
         api
-            .getConfigRaw(token, type)
+            .getConfigRaw(type)
             .then((r) => {
                 if (!stale) setLiveDoc(r.text);
             })
@@ -74,14 +70,13 @@ export function ConfigHistoryDrawer({
         return () => {
             stale = true;
         };
-    }, [opened, token, type]);
+    }, [opened, type]);
 
     const selectVersion = async (id: string) => {
-        if (!token) return;
         setSelectedId(id);
         setLoadingContent(true);
         try {
-            const res = await api.getConfigVersion(token, type, id);
+            const res = await api.getConfigVersion(type, id);
             setSelectedContent(res.content);
         } catch (e) {
             notifications.show({color: "red", message: (e as Error).message});
@@ -107,10 +102,9 @@ export function ConfigHistoryDrawer({
     };
 
     const doRestore = async (id: string) => {
-        if (!token) return;
         setRestoring(true);
         try {
-            const res = await api.restoreConfigVersion(token, type, id, {ifMatch: currentVersion});
+            const res = await api.restoreConfigVersion(type, id, {ifMatch: currentVersion});
             notifications.show({
                 color: "teal",
                 title: "Restored",

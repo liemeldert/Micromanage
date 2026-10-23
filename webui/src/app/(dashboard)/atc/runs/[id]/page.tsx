@@ -22,7 +22,6 @@ import {modals} from "@mantine/modals";
 import {notifications} from "@mantine/notifications";
 import {IconArrowLeft, IconSitemap} from "@tabler/icons-react";
 import {api, ApiError, type FlowNodeSpec, type FlowRunDetail, resumeFlowRun,} from "../../../../../../lib/api";
-import {useAuth} from "../../../../../../lib/auth-context";
 import {FLOW_RUN_STATUS_COLORS as STATUS_COLOR} from "../../../../../../lib/status-labels";
 import {FlowNodeCard, MINIMAP_MASK} from "@/components/atc/FlowEditor";
 import {flowToGraph, type RFNode} from "@/components/atc/flow-utils";
@@ -31,16 +30,14 @@ const nodeTypes = {atc: FlowNodeCard};
 
 const TERMINAL_STATUSES = new Set(["completed", "failed", "cancelled"]);
 
-// Whether the graph below is the definition that ran. A run pins its own copy while it is still going and drops it
-// when it finishes, after which the server falls back to the current flows.yaml. If that has been edited, the path
-// drawn from run.visited sits over a different document: renamed steps do not light up, later additions look skipped.
+// Whether the graph below is the definition that ran. A finished run drops its pinned copy and the server falls back
+// to the current flows.yaml, so after an edit the path drawn from run.visited sits over a different document.
 const FLOW_SOURCE_BADGE: Record<string, { label: string; color: string }> = {
     current: {label: "flow unchanged since this run", color: "gray"},
     edited: {label: "flow edited since this run", color: "orange"},
 };
 
 export default function FlowRunViewer() {
-    const {token} = useAuth();
     const router = useRouter();
     const params = useParams();
     const scheme = useComputedColorScheme("light");
@@ -57,15 +54,13 @@ export default function FlowRunViewer() {
     }, [run?.status]);
 
     useEffect(() => {
-        if (!token) return;
-        api.getFlowStepCatalog(token).then((c) => setCatalog(c.nodes)).catch(() => {
+        api.getFlowStepCatalog().then((c) => setCatalog(c.nodes)).catch(() => {
         });
-    }, [token]);
+    }, []);
 
     const refresh = useCallback(async () => {
-        if (!token) return;
         try {
-            const r = await api.getFlowRun(token, id);
+            const r = await api.getFlowRun(id);
             setRun(r);
             setGone(false);
         } catch (e) {
@@ -74,10 +69,9 @@ export default function FlowRunViewer() {
         } finally {
             setLoading(false);
         }
-    }, [token, id]);
+    }, [id]);
 
     useEffect(() => {
-        if (!token) return;
         refresh();
         // Poll every 5s until the run reaches a terminal state, then stop.
         const t = setInterval(() => {
@@ -88,7 +82,7 @@ export default function FlowRunViewer() {
             refresh();
         }, 5000);
         return () => clearInterval(t);
-    }, [token, refresh]);
+    }, [refresh]);
 
     const graph = useMemo(() => {
         if (!run?.flow) return {nodes: [] as RFNode[], edges: [] as Edge[]};
@@ -135,10 +129,9 @@ export default function FlowRunViewer() {
             ),
             labels: {confirm: opt.label, cancel: "Cancel"},
             onConfirm: async () => {
-                if (!token) return;
                 setResuming(opt.edge);
                 try {
-                    await resumeFlowRun(token, id, opt.edge);
+                    await resumeFlowRun(id, opt.edge);
                     notifications.show({color: "teal", message: `Resumed: ${opt.label}`});
                     await refresh();
                 } catch (e) {

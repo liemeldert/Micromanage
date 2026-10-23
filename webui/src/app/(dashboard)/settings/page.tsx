@@ -134,7 +134,7 @@ const EMPTY_S3_FORM: S3FormState = {
 const MIN_PASSWORD_LENGTH = 12;
 
 export default function SettingsPage() {
-    const {token, tenantId, email, isAdmin} = useAuth();
+    const {tenantId, email, isAdmin} = useAuth();
     const [tenant, setTenant] = useState<TenantInfo | null>(null);
     const [loading, setLoading] = useState(true);
     const [health, setHealth] = useState<"ok" | "error" | "loading">("loading");
@@ -206,8 +206,7 @@ export default function SettingsPage() {
     useBeforeUnload(tenantDirty || s3Dirty);
 
     const loadTenant = () => {
-        if (!token) return Promise.resolve();
-        return api.getTenant(token).then((t) => {
+        return api.getTenant().then((t) => {
             setTenant(t);
             if (!tenantDirtyRef.current) {
                 setNameDraft(t.name ?? "");
@@ -237,19 +236,17 @@ export default function SettingsPage() {
     };
 
     useEffect(() => {
-        if (!token) return;
         Promise.all([
             loadTenant(),
             api.health().then(() => setHealth("ok")).catch(() => setHealth("error")),
-            api.me(token).then((m) => setHasPassword(m.has_password)).catch(() => {
+            api.me().then((m) => setHasPassword(m.has_password)).catch(() => {
             }),
-            api.getMfaStatus(token).then(setMfaStatus).catch(() => {
+            api.getMfaStatus().then(setMfaStatus).catch(() => {
             }),
         ])
             .catch((e: unknown) => notifications.show({color: "red", message: (e as Error).message}))
             .finally(() => setLoading(false));
-        // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [token]);
+    }, []);
 
     // True if the tenant currently has a credential on file for this key
     // (GET redacts the value but still reports the key as present).
@@ -325,14 +322,14 @@ export default function SettingsPage() {
     }
 
     async function handleSaveTenant() {
-        if (!token || !tenant) return;
+        if (!tenant) return;
         if (s3SecretsPartial) return; // the Save button is disabled for this too
         if (s3Dirty && s3MissingBucket) return;
         if (nameBlank) return;
         if (payloadPrefixError) return;
         setSavingTenant(true);
         try {
-            const body: Parameters<typeof api.updateTenant>[1] = {};
+            const body: Parameters<typeof api.updateTenant>[0] = {};
             if (nameDraft.trim() !== (tenant.name ?? "")) body.name = nameDraft.trim();
             if (payloadPrefixDraft.trim() !== (tenant.payload_identifier_prefix ?? "")) {
                 body.payload_identifier_prefix = payloadPrefixDraft.trim();
@@ -358,7 +355,7 @@ export default function SettingsPage() {
             }
 
             setS3Error(null);
-            await api.updateTenant(token, body);
+            await api.updateTenant(body);
             notifications.show({color: "teal", message: "Tenant settings saved."});
             // Reset the ref synchronously rather than via the effect, so the loadTenant below
             // repopulates the form with the values that were just saved.
@@ -390,12 +387,12 @@ export default function SettingsPage() {
         currentPw.length > 0 && newPw.length >= MIN_PASSWORD_LENGTH && newPw === confirmPw;
 
     async function handleChangePassword() {
-        if (!token || !pwFormValid) return;
+        if (!pwFormValid) return;
         setChangingPw(true);
         setPwError(null);
         try {
             // The change ends every session for this account; the proxy sets a new session cookie for this tab.
-            await api.changePassword(token, currentPw, newPw);
+            await api.changePassword(currentPw, newPw);
             setCurrentPw("");
             setNewPw("");
             setConfirmPw("");
@@ -411,19 +408,18 @@ export default function SettingsPage() {
     }
 
     async function loadMfaStatus() {
-        if (!token) return;
         try {
-            setMfaStatus(await api.getMfaStatus(token));
+            setMfaStatus(await api.getMfaStatus());
         } catch {
         }
     }
 
     async function handleStartMfaEnroll() {
-        if (!token || !enrollPassword) return;
+        if (!enrollPassword) return;
         setEnrolling(true);
         setEnrollError(null);
         try {
-            setEnrollData(await api.enrollMfa(token, enrollPassword));
+            setEnrollData(await api.enrollMfa(enrollPassword));
             setEnrollModalOpen(false);
             setEnrollPassword("");
         } catch (e: unknown) {
@@ -457,11 +453,11 @@ export default function SettingsPage() {
     }
 
     async function handleConfirmMfaEnroll() {
-        if (!token || !enrollCode.trim()) return;
+        if (!enrollCode.trim()) return;
         setConfirmingEnroll(true);
         setEnrollError(null);
         try {
-            const res = await api.confirmMfaEnrollment(token, enrollCode.trim());
+            const res = await api.confirmMfaEnrollment(enrollCode.trim());
             setRecoveryCodes(res.recovery_codes);
             setEnrollData(null);
             setEnrollCode("");
@@ -474,11 +470,11 @@ export default function SettingsPage() {
     }
 
     async function handleDisableMfa() {
-        if (!token || !disablePassword) return;
+        if (!disablePassword) return;
         setDisabling(true);
         setDisableError(null);
         try {
-            await api.disableMfa(token, disablePassword);
+            await api.disableMfa(disablePassword);
             setDisableModalOpen(false);
             setDisablePassword("");
             await loadMfaStatus();
@@ -631,29 +627,38 @@ export default function SettingsPage() {
                                 </Group>
                             </Stack>
                         </Group>
-                        <TextInput
-                            label="Code from your authenticator app"
-                            placeholder="123456"
-                            value={enrollCode}
-                            onChange={(e) => {
-                                setEnrollCode(e.currentTarget.value);
-                                setEnrollError(null);
+                        <form
+                            onSubmit={(e) => {
+                                e.preventDefault();
+                                if (enrollCode.trim() && !confirmingEnroll) void handleConfirmMfaEnroll();
                             }}
-                            error={enrollError}
-                            maw={200}
-                        />
-                        <Group justify="flex-end">
-                            <Button variant="default" onClick={cancelMfaEnroll}>
-                                Cancel
-                            </Button>
-                            <Button
-                                onClick={handleConfirmMfaEnroll}
-                                loading={confirmingEnroll}
-                                disabled={!enrollCode.trim()}
-                            >
-                                Confirm
-                            </Button>
-                        </Group>
+                        >
+                            <Stack gap="sm">
+                                <TextInput
+                                    label="Code from your authenticator app"
+                                    placeholder="123456"
+                                    value={enrollCode}
+                                    onChange={(e) => {
+                                        setEnrollCode(e.currentTarget.value);
+                                        setEnrollError(null);
+                                    }}
+                                    error={enrollError}
+                                    maw={200}
+                                />
+                                <Group justify="flex-end">
+                                    <Button variant="default" onClick={cancelMfaEnroll}>
+                                        Cancel
+                                    </Button>
+                                    <Button
+                                        type="submit"
+                                        loading={confirmingEnroll}
+                                        disabled={!enrollCode.trim()}
+                                    >
+                                        Confirm
+                                    </Button>
+                                </Group>
+                            </Stack>
+                        </form>
                     </Stack>
                 ) : mfaStatus?.enabled ? (
                     <Stack gap="xs" maw={480}>
@@ -753,30 +758,39 @@ export default function SettingsPage() {
                     <Text fz="sm" c="dimmed">
                         Enter your password to turn off two-factor authentication for this account.
                     </Text>
-                    <PasswordInput
-                        label="Password"
-                        autoFocus
-                        data-autofocus
-                        value={disablePassword}
-                        onChange={(e) => {
-                            setDisablePassword(e.currentTarget.value);
-                            setDisableError(null);
+                    <form
+                        onSubmit={(e) => {
+                            e.preventDefault();
+                            if (disablePassword && !disabling) void handleDisableMfa();
                         }}
-                        error={disableError}
-                    />
-                    <Group justify="flex-end">
-                        <Button variant="default" onClick={closeDisableModal}>
-                            Cancel
-                        </Button>
-                        <Button
-                            color="red"
-                            onClick={handleDisableMfa}
-                            loading={disabling}
-                            disabled={!disablePassword}
-                        >
-                            Turn off
-                        </Button>
-                    </Group>
+                    >
+                        <Stack gap="sm">
+                            <PasswordInput
+                                label="Password"
+                                autoFocus
+                                data-autofocus
+                                value={disablePassword}
+                                onChange={(e) => {
+                                    setDisablePassword(e.currentTarget.value);
+                                    setDisableError(null);
+                                }}
+                                error={disableError}
+                            />
+                            <Group justify="flex-end">
+                                <Button variant="default" onClick={closeDisableModal}>
+                                    Cancel
+                                </Button>
+                                <Button
+                                    color="red"
+                                    type="submit"
+                                    loading={disabling}
+                                    disabled={!disablePassword}
+                                >
+                                    Turn off
+                                </Button>
+                            </Group>
+                        </Stack>
+                    </form>
                 </Stack>
             </Modal>
 

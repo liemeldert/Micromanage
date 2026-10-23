@@ -6,7 +6,6 @@ import {modals} from "@mantine/modals";
 import {notifications} from "@mantine/notifications";
 import yaml from "js-yaml";
 import {api, ApiError, configConflict, type Device} from "./api";
-import {useAuth} from "./auth-context";
 
 // == Schema types ==
 
@@ -48,7 +47,6 @@ export interface ScopeOverrides {
 // Optional on a group: a device in the group derives its managed name from this template.
 export interface DeviceNaming {
     template: string;
-    apply_on_enroll?: boolean;
 }
 
 export interface Group extends ScopeOverrides {
@@ -560,7 +558,6 @@ type ConfigType = "groups" | "apps" | "profiles" | "tags" | "flows" | "dispatche
 const REWRITTEN_ON_SAVE = new Set<ConfigType>(["profiles", "apps"]);
 
 export function useConfigResource<T>(type: ConfigType, empty: T) {
-    const {token} = useAuth();
     const [data, setData] = useState<T | null>(null);
     const [loading, setLoading] = useState(true);
     const [saving, setSaving] = useState(false);
@@ -570,10 +567,9 @@ export function useConfigResource<T>(type: ConfigType, empty: T) {
     // silent skips the loading flag for the post-save re-read; editors that hide their form while
     // loading would otherwise rebuild after every save.
     const load = useCallback(async (silent = false) => {
-        if (!token) return;
         if (!silent) setLoading(true);
         try {
-            const res = await api.getConfigWithVersion(token, type);
+            const res = await api.getConfigWithVersion(type);
             setData((res.data as T) ?? empty);
             setVersion(res.version);
         } catch (e: unknown) {
@@ -588,7 +584,7 @@ export function useConfigResource<T>(type: ConfigType, empty: T) {
             if (!silent) setLoading(false);
         }
         // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [token, type]);
+    }, [type]);
 
     const reload = useCallback(() => load(), [load]);
 
@@ -600,10 +596,9 @@ export function useConfigResource<T>(type: ConfigType, empty: T) {
     // keepNewerEdits leaves the data alone when it changed while the PUT was pending, as on the ATC canvas.
     const save = useCallback(
         async (next: T, opts: { quiet?: boolean; keepNewerEdits?: boolean } = {}): Promise<boolean> => {
-            if (!token) return false;
             setSaving(true);
             try {
-                const res = await api.updateConfig(token, type, next as Record<string, unknown>,
+                const res = await api.updateConfig(type, next as Record<string, unknown>,
                     undefined, {ifMatch: version});
                 if (opts.keepNewerEdits) {
                     setData((current) => (current === next ? next : current));
@@ -639,7 +634,7 @@ export function useConfigResource<T>(type: ConfigType, empty: T) {
                 setSaving(false);
             }
         },
-        [token, type, version, load, reload],
+        [type, version, load, reload],
     );
 
     // YAML text of the live data, used as the current baseline by the History drawer's diff. The visual
@@ -660,22 +655,20 @@ export function useConfigResource<T>(type: ConfigType, empty: T) {
 // Load the advisory tag registry (tags.yaml) for pickers, autocomplete and chip colours. A missing
 // registry or a failed load is an empty list, and free-form tags stay valid everywhere.
 export function useTagRegistry() {
-    const {token} = useAuth();
     const [tags, setTags] = useState<TagDef[]>([]);
     const [loading, setLoading] = useState(true);
 
     const reload = useCallback(async () => {
-        if (!token) return;
         setLoading(true);
         try {
-            const res = (await api.getConfig(token, "tags")) as { tags?: TagDef[] } | null;
+            const res = (await api.getConfig("tags")) as { tags?: TagDef[] } | null;
             setTags(Array.isArray(res?.tags) ? (res!.tags as TagDef[]) : []);
         } catch {
             setTags([]);
         } finally {
             setLoading(false);
         }
-    }, [token]);
+    }, []);
 
     useEffect(() => {
         reload();

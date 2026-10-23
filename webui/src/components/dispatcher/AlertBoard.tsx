@@ -14,7 +14,7 @@ const ACTIVE_STATUSES = ["pending", "open", "acknowledged"];
 type PendingReject = { alert: DispatcherAlert; actionKey: string; command: string };
 
 export function AlertBoard() {
-    const {token, isAdmin} = useAuth();
+    const {isAdmin} = useAuth();
     const router = useRouter();
     const [alerts, setAlerts] = useState<DispatcherAlert[]>([]);
     const [counts, setCounts] = useState<Record<string, number>>({});
@@ -45,10 +45,9 @@ export function AlertBoard() {
 
     const load = useCallback(
         async (background = false) => {
-            if (!token) return;
             if (!background) setLoading(true);
             try {
-                const res = await api.listAlerts(token, sevFilter ? {severity: sevFilter} : {});
+                const res = await api.listAlerts(sevFilter ? {severity: sevFilter} : {});
                 setAlerts(res.alerts);
                 setCounts(res.counts);
                 setLoadError(null);
@@ -59,7 +58,7 @@ export function AlertBoard() {
                 if (!background) setLoading(false);
             }
         },
-        [token, sevFilter],
+        [sevFilter],
     );
 
     useEffect(() => {
@@ -87,7 +86,7 @@ export function AlertBoard() {
 
     const evaluateNow = () =>
         act(async () => {
-            const r = await api.dispatcherEvaluate(token!);
+            const r = await api.dispatcherEvaluate();
             notifications.show({
                 color: "teal",
                 message: ALERT_BOARD_STRINGS.evaluated(r.devices_evaluated),
@@ -174,7 +173,7 @@ export function AlertBoard() {
                             deviceHref={a.device_id ? `/devices/${a.device_id}` : null}
                             ruleHref={`/compliance/rules?rule=${encodeURIComponent(a.rule_id)}`}
                             onOpenRun={(runId) => router.push(`/atc/runs/${runId}`)}
-                            onAck={() => act(() => api.acknowledgeAlert(token!, a.id), a.id)}
+                            onAck={() => act(() => api.acknowledgeAlert(a.id), a.id)}
                             onResolve={() => {
                                 // A credential reveal alert asks for a reason first.
                                 if (isCredentialRevealAlert(a)) {
@@ -182,11 +181,11 @@ export function AlertBoard() {
                                     setDismissing(a);
                                     return;
                                 }
-                                act(() => api.resolveAlert(token!, a.id), a.id);
+                                act(() => api.resolveAlert(a.id), a.id);
                             }}
                             onApprove={(key) =>
                                 act(async () => {
-                                    const r = await api.approveRemediation(token!, a.id, key);
+                                    const r = await api.approveRemediation(a.id, key);
                                     notifications.show({color: "teal", message: r.outcome});
                                 }, a.id)
                             }
@@ -194,7 +193,7 @@ export function AlertBoard() {
                                 setRejectReason("");
                                 setRejecting({alert: a, actionKey: key, command});
                             }}
-                            onAction={(key) => act(() => api.alertAction(token!, a.id, key), a.id)}
+                            onAction={(key) => act(() => api.alertAction(a.id, key), a.id)}
                         />
                     ))}
                 </Stack>
@@ -214,7 +213,7 @@ export function AlertBoard() {
                     const target = dismissing;
                     if (!target) return;
                     setDismissing(null);
-                    act(() => api.resolveAlert(token!, target.id, reason.trim() || undefined), target.id);
+                    act(() => api.resolveAlert(target.id, reason.trim() || undefined), target.id);
                 }}
             />
 
@@ -239,7 +238,7 @@ export function AlertBoard() {
                     setRejecting(null);
                     act(async () => {
                         const r = await api.rejectRemediation(
-                            token!, target.alert.id, target.actionKey, rejectReason.trim() || undefined,
+                            target.alert.id, target.actionKey, rejectReason.trim() || undefined,
                         );
                         notifications.show({color: "teal", message: r.message});
                     }, target.alert.id);

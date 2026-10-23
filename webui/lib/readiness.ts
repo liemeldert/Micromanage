@@ -5,23 +5,23 @@ import {useCallback, useEffect, useState} from "react";
 import {api, ApiError, type Readiness} from "./api";
 import {useAuth} from "./auth-context";
 
-/** Slow on purpose: deployment settings only change on a controller restart. */
+/** Deployment settings only change on a controller restart. */
 export const READINESS_POLL_MS = 5 * 60 * 1000;
 
 export function useReadiness(pollMs: number | null = null) {
-    const {token, isAdmin} = useAuth();
+    const {isAdmin} = useAuth();
     const [readiness, setReadiness] = useState<Readiness | null>(null);
     const [loading, setLoading] = useState(true);
     // Set only for errors worth surfacing, which excludes the 404.
     const [error, setError] = useState<string | null>(null);
 
     const load = useCallback(async () => {
-        if (!token || !isAdmin) {
+        if (!isAdmin) {
             setLoading(false);
             return;
         }
         try {
-            const r = await api.getReadiness(token);
+            const r = await api.getReadiness();
             setReadiness(r);
             setError(null);
         } catch (e) {
@@ -33,7 +33,7 @@ export function useReadiness(pollMs: number | null = null) {
         } finally {
             setLoading(false);
         }
-    }, [token, isAdmin]);
+    }, [isAdmin]);
 
     useEffect(() => {
         load();

@@ -1,5 +1,5 @@
 // Tags on the device identity card: one field holding the tags as pills, rather than a card of its own.
-// POST /devices/{id}/tags answers with whether group membership moved. Built on PillsInput, since Mantine's TagsInput
+// POST /devices/{id}/tags returns whether group membership changed. Built on PillsInput, since Mantine's TagsInput
 // paints every pill the same colour and the registry gives each tag its own.
 
 import {useEffect, useRef, useState} from "react";
@@ -8,7 +8,6 @@ import {IconTag} from "@tabler/icons-react";
 import {modals} from "@mantine/modals";
 import {notifications} from "@mantine/notifications";
 import {api, type Device} from "../../lib/api";
-import {useAuth} from "../../lib/auth-context";
 import {useTagRegistry} from "../../lib/config";
 
 export function DeviceTagsField({
@@ -18,7 +17,6 @@ export function DeviceTagsField({
     device: Device;
     onChanged?: () => void;
 }) {
-    const {token} = useAuth();
     const {tagNames, colorOf, labelOf} = useTagRegistry();
     const [tags, setTags] = useState<string[]>(device.tags ?? []);
     const [draft, setDraft] = useState("");
@@ -48,7 +46,7 @@ export function DeviceTagsField({
     }, [saving]);
 
     const apply = async (add: string[], remove: string[]) => {
-        if (!token || saving) return;
+        if (saving) return;
         const prev = tags;
         const optimistic = [
             ...tags.filter((t) => !remove.includes(t)),
@@ -57,7 +55,7 @@ export function DeviceTagsField({
         setTags(optimistic);
         setSaving(true);
         try {
-            const res = await api.updateDeviceTags(token, device.id, {add, remove});
+            const res = await api.updateDeviceTags(device.id, {add, remove});
             setTags(res.device.tags ?? optimistic);
             if (res.groups_changed) {
                 notifications.show({
@@ -106,9 +104,7 @@ export function DeviceTagsField({
                 <PillsInput
                     size="xs"
                     disabled={saving}
-                    // The icon sits inside the field rather than above it, pinned to the first line, so the field
-                    // grows downward as tags wrap and the icon stays where it was. What tags are for is on the
-                    // Tags settings page; it does not need restating on every device.
+                    // The icon is pinned to the first line, so it stays in place as the field grows when tags wrap.
                     leftSection={saving ? <Loader size={11}/> : <IconTag size={14}/>}
                     leftSectionProps={{style: {alignItems: "flex-start", paddingTop: 7}}}
                     leftSectionPointerEvents="none"
@@ -122,8 +118,7 @@ export function DeviceTagsField({
                                 disabled={saving}
                                 onRemove={() => confirmRemove(t)}
                                 style={{
-                                    // The registry colour, mixed into the field's own surface rather than painted
-                                    // over it, so a pill reads as part of the control it sits in.
+                                    // The registry colour, mixed into the field's own surface.
                                     backgroundColor: colorOf(t)
                                         ? `color-mix(in srgb, var(--mantine-color-${colorOf(t)}-6) 18%, transparent)`
                                         : undefined,
@@ -152,8 +147,7 @@ export function DeviceTagsField({
                                         addTag(draft);
                                         return;
                                     }
-                                    // Backspace on an empty field takes the last tag off, which is what every
-                                    // other pill field does. It still asks first.
+                                    // Backspace on an empty field removes the last tag, after a confirmation.
                                     if (event.key === "Backspace" && draft.length === 0 && tags.length) {
                                         event.preventDefault();
                                         confirmRemove(tags[tags.length - 1]);

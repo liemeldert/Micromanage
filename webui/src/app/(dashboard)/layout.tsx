@@ -1,6 +1,6 @@
 "use client";
 
-import {useEffect, useMemo, useState} from "react";
+import {useEffect, useMemo, useRef, useState} from "react";
 import Link from "next/link";
 import {usePathname, useRouter} from "next/navigation";
 import {
@@ -9,8 +9,10 @@ import {
     Avatar,
     Box,
     Burger,
+    Center,
     Collapse,
     Group,
+    Loader,
     ScrollArea,
     Text,
     UnstyledButton,
@@ -56,6 +58,14 @@ export default function DashboardLayout({children}: { children: React.ReactNode 
     // Read after mount: the shortcut label depends on the platform, and deciding
     // it during render would make the server and client markup disagree.
     const [modLabel, setModLabel] = useState("Ctrl K");
+    const [signingOut, setSigningOut] = useState(false);
+    const mounted = useRef(true);
+    useEffect(() => {
+        mounted.current = true;
+        return () => {
+            mounted.current = false;
+        };
+    }, []);
 
     // Nav and command palette read the same table in lib/palette.ts, sections included, so nothing
     // here decides what goes where.
@@ -63,11 +73,9 @@ export default function DashboardLayout({children}: { children: React.ReactNode 
     // Matched against the unfiltered table, so a page hidden by role highlights nothing rather than
     // highlighting the wrong row.
     const here = useMemo(() => {
-        const full = sidebarTree({isAdmin: true, showYaml});
-        return activeHref(
-            pathname,
-            full.flatMap((e) => (e.kind === "item" ? [e.item.href] : e.items.map((i) => i.href))),
-        );
+        const items = sidebarTree({isAdmin: true, showYaml}).flatMap((e) => (e.kind === "item" ? [e.item] : e.items));
+        const alias = items.find((i) => i.activeFor?.includes(pathname));
+        return alias ? alias.href : activeHref(pathname, items.map((i) => i.href));
     }, [pathname, showYaml]);
     const hereGroup = useMemo(() => {
         for (const entry of tree) {
@@ -97,14 +105,20 @@ export default function DashboardLayout({children}: { children: React.ReactNode 
         if (hydrated && !isAuthenticated) router.replace("/login");
     }, [hydrated, isAuthenticated, router]);
 
-    if (!hydrated || !isAuthenticated) return null;
+    if (!hydrated || !isAuthenticated) {
+        return (
+            <Center h="100vh">
+                <Loader aria-label="Checking your session"/>
+            </Center>
+        );
+    }
 
     const toggleGroup = (id: string) =>
         setOpenGroups((prev) => (prev.includes(id) ? prev.filter((g) => g !== id) : [...prev, id]));
 
     return (
         <>
-            {/* Mounted inside the authed shell so it can use the session token. */}
+            {/* Rendered only after the session check, as it calls the API. */}
             <CommandPalette/>
             <AppShell
                 // Height 0 from sm up so the bar takes no space on desktop, where the
@@ -236,11 +250,18 @@ export default function DashboardLayout({children}: { children: React.ReactNode 
                                     variant="subtle"
                                     color="red"
                                     size="sm"
+                                    loading={signingOut}
                                     onClick={async () => {
-                                        await logout();
-                                        router.push("/login");
+                                        setSigningOut(true);
+                                        try {
+                                            await logout();
+                                            router.push("/login");
+                                        } finally {
+                                            if (mounted.current) setSigningOut(false);
+                                        }
                                     }}
-                                    title="Sign out"
+                                    title={signingOut ? "Signing out" : "Sign out"}
+                                    aria-label={signingOut ? "Signing out" : "Sign out"}
                                 >
                                     <IconLogout size={14}/>
                                 </ActionIcon>
