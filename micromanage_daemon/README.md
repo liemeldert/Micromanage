@@ -50,16 +50,16 @@ Micromanage.app/Contents/Library/LaunchDaemons/app.micromanage.micromanaged.plis
 
 ## Build
 
-Xcode 27 or newer. The `micromanage-extra` scheme builds both targets and embeds the daemon and its plist. From the
-command line:
+Xcode 26.6 or newer. The shared `micromanage-extra` scheme builds both targets and embeds the daemon and its plist.
+From the command line:
 
 ```sh
 xcodebuild -project micromanaged.xcodeproj -scheme micromanage-extra -configuration Debug build
 ```
 
 If `xcode-select` points at the Command Line Tools, set `DEVELOPER_DIR` to the Xcode you want, for example
-`DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer`. The schemes are still per user; share them under Manage
-Schemes before the command above works on a fresh checkout.
+`DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer`. Keep the project format at Xcode 16 (object version 77)
+when Xcode offers to upgrade it, since the CodeQL workflow builds the app with the newest Xcode on GitHub's runners.
 
 Build settings worth knowing about:
 
@@ -179,7 +179,7 @@ Domain `app.micromanage.micromanage-extra`, written as the user, so no `sudo`.
 
 Root keeps state in `/Library/Application Support/Micromanage`, a directory of mode 0700 with files of mode 0600:
 `credential.json`, `grants.json`, `state.json` (events, pending requests, last check-in, the server policy) and
-`downloads/` for packages. Run as a normal user, for development, the same layout lands under the user's own
+`downloads/` for packages. Run as a normal user, for development, the same layout is created under the user's own
 `Library/Application Support/Micromanage`.
 
 ```sh

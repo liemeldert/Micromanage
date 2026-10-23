@@ -3,7 +3,7 @@
 	archiveVersion = 1;
 	classes = {
 	};
-	objectVersion = 90;
+	objectVersion = 77;
 	objects = {
 
 /* Begin PBXBuildFile section */
@@ -25,7 +25,7 @@
 		4D4D00000000000000000301 /* Embed Daemon */ = {
 			isa = PBXCopyFilesBuildPhase;
 			dstPath = "";
-			dstSubfolder = Executables;
+			dstSubfolderSpec = 6;
 			files = (
 				4D4D00000000000000000101 /* micromanaged in Embed Daemon */,
 			);
@@ -34,7 +34,7 @@
 		4D4D00000000000000000302 /* Embed Launchd Plist */ = {
 			isa = PBXCopyFilesBuildPhase;
 			dstPath = Contents/Library/LaunchDaemons;
-			dstSubfolder = Wrapper;
+			dstSubfolderSpec = 1;
 			files = (
 				4D4D00000000000000000102 /* app.micromanage.micromanaged.plist in Embed Launchd Plist */,
 			);
@@ -180,7 +180,7 @@
 			);
 			mainGroup = 000000000000000000000001;
 			minimizedProjectReferenceProxies = 1;
-			preferredProjectObjectVersion = 90;
+			preferredProjectObjectVersion = 77;
 			productRefGroup = 000000000000000000000020 /* Products */;
 			projectDirPath = "";
 			projectRoot = "";
