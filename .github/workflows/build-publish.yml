@@ -29,12 +29,13 @@ jobs:
       - name: Install dependencies
         run: pip install -r controller/requirements.txt
 
-      # Each tests/verify_*.py is a standalone script (no pytest) that runs against in-memory sqlite and exits non-zero
-      # on failure. The glob picks up new scripts. All of them run before the job fails, so one run shows every failure.
+      # Each tests/*/verify_*.py is a standalone script (no pytest) that runs against in-memory sqlite and exits
+      # non-zero on failure. The glob picks up new scripts. All of them run before the job fails, so one run shows every
+      # failure.
       - name: Run verify test suite
         run: |
           status=0
-          for t in tests/verify_*.py; do
+          for t in tests/*/verify_*.py; do
             echo "::group::$t"
             if PYTHONPATH=. python "$t"; then
               echo "PASS: $t"
@@ -75,7 +76,7 @@ jobs:
       - name: Apply the schema to a fresh Postgres and check it
         env:
           DATABASE_URL: postgres://postgres:ci@localhost:5432/mdm_iac
-        run: PYTHONPATH=. python tests/pg_schema_check.py
+        run: PYTHONPATH=. python tests/postgres/pg_schema_check.py
 
   build:
     needs: [ test, schema ]

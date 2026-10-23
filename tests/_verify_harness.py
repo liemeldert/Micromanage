@@ -1,4 +1,5 @@
-"""Shared entry point for tests/verify_*.py. Runs main and exits cleanly to avoid CPython's threading shutdown hang."""
+"""Shared entry point for tests/*/verify_*.py. Runs main and exits cleanly to avoid CPython's threading shutdown
+hang."""
 
 import asyncio
 import dataclasses

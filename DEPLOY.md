@@ -11,6 +11,43 @@ While I have attempted to provide reasonable defaults, you should review the com
 decide whether they suit your environment. The compose file is intended to be a starting point,
 and you should modify it as needed, especially regarding SCEP.
 
+## Quickstart
+
+Micromanage includes a shell script that can get the server up and running quickly.
+However, you need two things to enroll. You will need a APNs push certificate from Apple (see section 3), and a domain
+publicly trusted TLS in front of port 443 (see section 1). Request the certificate first, as the signing email takes
+time.
+
+```sh
+git clone https://github.com/liemeldert/Micromanage.git micromanage && cd micromanage
+./setup.sh env
+```
+
+`setup.sh env` asks for the MDM hostname, the first admin email and a password (press enter to generate one). Then set
+`SCEP_URL=https://<hostname>:9443/scep/mdm_device_scep` and uncomment `MDM_EMBED_CA_CERT_PATH=/stepca-certs/root_ca.crt`
+in `.env`, and leave `MDM_TOPIC` empty. Put the proxy in front of the stack: `/mdm` goes to `nanomdm-front` and
+everything under `PUBLIC_API_URL` goes to the controller on port 8001.
+
+```sh
+docker compose -f docker-compose.prod.yml up -d
+curl -fsS http://127.0.0.1:8001/api/v1/health
+```
+
+The published images are linux/amd64 only, so on an arm64 host set `platform: linux/amd64` on `yaml-init`, `controller`
+and `webui` in a `compose.override.yml`. Port 9000 must be free on the host, since NanoMDM publishes 127.0.0.1:9000.
+Wait until the services are healthy, then sign in at `http://<server>:3000` as the admin (the tenant is `default`) and
+clear `CONTROLLER_BOOTSTRAP_ADMIN_EMAIL` and `CONTROLLER_BOOTSTRAP_ADMIN_PASSWORD` in `.env`. With the certificate files
+in `certs/apns/`, upload them and recreate the controller so it reads the new topic:
+
+```sh
+./setup.sh push-cert
+docker compose -f docker-compose.prod.yml up -d --force-recreate --no-deps controller
+```
+
+Until then the Enrollment page lists `MDM_TOPIC` as missing and the profile download returns 503. Once it lists
+nothing, create an enrollment link under Enrollment and open it on the device, then install the downloaded profile in
+the device's settings. The device appears under Devices after its first check-in.
+
 ## 1. Prerequisites
 
 - A DNS record for `MDM_HOSTNAME` pointing at the server.
@@ -31,6 +68,7 @@ If a TLS proxy sits in front of port `8001`, set `FORWARDED_ALLOW_IPS` to the pr
 `X-Forwarded-For`, so the enrollment rate limits and logs see each device instead of the proxy. Without it every request
 appears to come from the proxy and shares one rate limit. The sign-in throttle also keys on the client address, so
 behind an unlisted proxy a lock earned by one client holds for every client sharing the proxy.
+The proxy in front of the web UI must send `X-Forwarded-Proto`, or the session cookie is set without the Secure flag.
 
 ## 2. Generate secrets
 

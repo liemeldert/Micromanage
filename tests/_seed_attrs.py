@@ -1,4 +1,4 @@
-"""Builds the device attribute bag a check-in reports, as a fixture for tests/verify_compliance_catalog.py.
+"""Builds the device attribute bag a check-in reports, as a fixture for tests/compliance/verify_compliance_catalog.py.
 
 The bag is realistic so a check cannot pass against a key no device ever sends. It uses the product's own
 device_platform_category for the Mac / non-Mac split, so the two cannot drift.
