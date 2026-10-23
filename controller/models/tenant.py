@@ -401,6 +401,16 @@ class IdentityCutover(Model):
         table = "identity_cutover"
 
 
+class SecretProbe(Model):
+    """A single row, id 1, holding a fixed value encrypted under the key the stored secrets were written with."""
+    id = fields.IntField(pk=True, generated=False)
+    token = fields.TextField()
+    created_at = fields.DatetimeField(auto_now_add=True)
+
+    class Meta:
+        table = "secret_probe"
+
+
 class AuditLog(Model):
     """An append-only record of who or what changed something, scoped to the tenant it happened in. A null
     actor_email/actor_role marks a machine-attributed row, which cleanup_old_audit_log relies on. detail

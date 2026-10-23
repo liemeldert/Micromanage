@@ -96,7 +96,7 @@ async def run_checks(url: str) -> int:
                  "alerts", "dep_servers", "device_secrets", "schema_state", "service_tokens",
                  "enrollment_links", "scep_challenges", "legacy_identities", "identity_cutover",
                  "device_agents", "agent_enrollment_codes", "agent_tasks", "agent_elevation_requests",
-                 "agent_events"):
+                 "agent_events", "secret_probe"):
         check(f"table {name} exists", name in tables)
 
     # Three processes run this at once at startup, and every restart runs it again.

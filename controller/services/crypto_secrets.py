@@ -24,36 +24,49 @@ class SecretEncryptionUnavailable(RuntimeError):
     """Raised by encrypt when no key material is configured."""
 
 
-def _derive_key() -> Optional[bytes]:
-    """Resolve a 32-byte urlsafe-base64 Fernet key from the environment.
-
-    Returns None when no key material is configured or if the key is malformed."""
+def _resolve_key(*, log: bool = True) -> Tuple[Optional[bytes], Optional[str]]:
+    """The Fernet key from the environment and the variable it came from, or (None, None) when no key material is
+    configured or the key is malformed."""
     explicit = os.getenv("SECRET_ENCRYPTION_KEY")
     if explicit:
         # One validity check, shared with the readiness predicate and the startup refusal, so the three cannot disagree
         # about what counts as a key.
         if readiness.fernet_key_error(explicit) is None:
-            return explicit.strip().encode()
-        logger.error(
-            "SECRET_ENCRYPTION_KEY is set but is not a valid urlsafe-base64 32-byte Fernet key; ignoring it."
-        )
-        return None
+            return explicit.strip().encode(), "SECRET_ENCRYPTION_KEY"
+        if log:
+            logger.error(
+                "SECRET_ENCRYPTION_KEY is set but is not a valid urlsafe-base64 32-byte Fernet key; ignoring it."
+            )
+        return None, None
 
     jwt_secret = os.getenv("JWT_SECRET")
     if jwt_secret and readiness.is_placeholder(jwt_secret):
         # The env templates publish this value, so HKDF over it derives a key anybody can recompute, and every escrowed
         # password and DEP credential would sit under a public secret. auth.tokens refuses it too.
-        logger.error(
-            "JWT_SECRET is still one of the values the env templates ship, so it cannot be used to derive an encryption"
-            " key. Set SECRET_ENCRYPTION_KEY, or set a real JWT_SECRET."
-        )
-        return None
+        if log:
+            logger.error(
+                "JWT_SECRET is still one of the values the env templates ship, so it cannot be used to derive an "
+                "encryption key. Set SECRET_ENCRYPTION_KEY, or set a real JWT_SECRET."
+            )
+        return None, None
     if jwt_secret:
         derived = HKDF(
             algorithm=hashes.SHA256(), length=32, salt=None, info=_HKDF_INFO
         ).derive(jwt_secret.encode())
-        return base64.urlsafe_b64encode(derived)
-    return None
+        return base64.urlsafe_b64encode(derived), "JWT_SECRET"
+    return None, None
+
+
+def _derive_key() -> Optional[bytes]:
+    """Resolve a 32-byte urlsafe-base64 Fernet key from the environment.
+
+    Returns None when no key material is configured or if the key is malformed."""
+    return _resolve_key()[0]
+
+
+def key_source() -> Optional[str]:
+    """The variable the current key comes from, SECRET_ENCRYPTION_KEY or JWT_SECRET, or None when no key resolves."""
+    return _resolve_key(log=False)[1]
 
 
 def _fernet() -> Optional[Fernet]:
@@ -65,6 +78,18 @@ def _fernet() -> Optional[Fernet]:
     except Exception:
         logger.exception("Failed to construct Fernet from configured key material")
         return None
+
+
+def opens(token: Optional[str]) -> bool:
+    """Whether the current key decrypts token, without checking its binding and without logging."""
+    key = _resolve_key(log=False)[0]
+    if not token or key is None:
+        return False
+    try:
+        Fernet(key).decrypt(token.encode("ascii"))
+    except (InvalidToken, Exception):  # noqa: BLE001
+        return False
+    return True
 
 
 def is_available() -> bool:

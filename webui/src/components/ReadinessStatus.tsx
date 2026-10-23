@@ -19,6 +19,7 @@ const CAPABILITY_LABELS: Record<string, string> = {
     mdm_enqueue: "MDM commands",
     escrow: "Secret escrow",
     webhook_ingest: "Webhook ingest",
+    secrets: "Stored secrets",
 };
 const capabilityLabel = (id: string) => CAPABILITY_LABELS[id] ?? id;
 

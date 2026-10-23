@@ -27,11 +27,12 @@ DDM_SYNC = "ddm_sync"
 MDM_ENQUEUE = "mdm_enqueue"
 ESCROW = "escrow"
 WEBHOOK_INGEST = "webhook_ingest"
+SECRETS = "secrets"
 
 # Every capability, in the order the API reports them. A caller keys off the name, not the position.
 CAPABILITIES: Tuple[str, ...] = (
     ENROLL, ADE, APP_INSTALL, DDM_BRIDGE, DDM_SYNC, MDM_ENQUEUE, ESCROW,
-    WEBHOOK_INGEST,
+    WEBHOOK_INGEST, SECRETS,
 )
 
 # The placeholder secrets the shipped env templates carry. Matched as exact strings, not by prefix.
@@ -430,6 +431,27 @@ def _check_webhook_ingest(tenant, active_tenants: Optional[int]) -> Status:
     return Ready(warnings=warnings)
 
 
+def _check_secrets(tenant, active_tenants: Optional[int]) -> Status:
+    """Whether the stored secrets decrypt with the current key, as probe_secrets last found."""
+    if _SECRETS_PROBE.get("error"):
+        return Ready(warnings=["Stored secrets could not be checked because the database query failed. Check the "
+                               "controller's database connection."])
+    failed = _SECRETS_PROBE.get("failed")
+    if not failed:
+        return Ready()
+    columns = ", ".join(failed)
+    if _SECRETS_PROBE.get("source") == "SECRET_ENCRYPTION_KEY":
+        return Blocked(
+            f"Stored secrets do not decrypt with the current SECRET_ENCRYPTION_KEY (failed: {columns}). Restore its "
+            "previous value, or unset it if they were stored under the key derived from JWT_SECRET, and restart the "
+            "controller.",
+            broken=["SECRET_ENCRYPTION_KEY"], scope=DEPLOYMENT)
+    return Blocked(
+        f"Stored secrets do not decrypt with the key derived from JWT_SECRET (failed: {columns}). Restore the previous "
+        "JWT_SECRET, or set SECRET_ENCRYPTION_KEY to the key that stored them, and restart the controller.",
+        broken=["JWT_SECRET"], scope=DEPLOYMENT)
+
+
 _PREDICATES = {
     ENROLL: _check_enroll,
     ADE: _check_ade,
@@ -439,6 +461,7 @@ _PREDICATES = {
     MDM_ENQUEUE: _check_mdm_enqueue,
     ESCROW: _check_escrow,
     WEBHOOK_INGEST: _check_webhook_ingest,
+    SECRETS: _check_secrets,
 }
 
 
@@ -599,6 +622,7 @@ _PROBE_TTL_SECONDS = 60
 _SCEP_WEBHOOK_PROBE: Dict[str, Any] = {}
 _LEGACY_PROBE: Dict[str, Any] = {}
 _NANOMDM_SCHEMA_PROBE: Dict[str, Any] = {}
+_SECRETS_PROBE: Dict[str, Any] = {}
 
 
 def _fresh(cache: Dict[str, Any]) -> bool:
@@ -710,3 +734,29 @@ async def probe_enrollment() -> None:
     await warm_enroll_state()
     await probe_legacy_identities()
     await probe_nanomdm_schema()
+
+
+async def probe_secrets() -> None:
+    """Check that the stored secrets decrypt with the current key, cached per process for 60 s. Logs an error only
+    when the failed columns change."""
+    if _fresh(_SECRETS_PROBE):
+        return
+    from controller.services import crypto_secrets, secret_probe
+
+    previous = _SECRETS_PROBE.get("failed")
+    try:
+        result = await secret_probe.run_check()
+    except Exception as exc:
+        logger.warning("readiness: cannot check stored secrets (%s)", type(exc).__name__)
+        _SECRETS_PROBE.update(error=True, failed=None, source=None, checked_at=time.monotonic())
+        return
+    failed = tuple(result.failed)
+    _SECRETS_PROBE.update(error=False, failed=failed, source=crypto_secrets.key_source(),
+                          checked_at=time.monotonic())
+    if failed and failed != previous:
+        logger.error("readiness[%s]: %s", SECRETS, _check_secrets(None, None).reason)
+
+
+def forget_secrets_probe() -> None:
+    """Clear the cached stored-secrets result, for tests."""
+    _SECRETS_PROBE.clear()

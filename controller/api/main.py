@@ -181,6 +181,7 @@ register_tortoise(
 async def _init_schema():
     from controller.models.database import init_schema
     await init_schema()
+    await readiness.probe_secrets()
     from controller.services import atc_provision
     if atc_provision.ATC_PROVISION_EXISTING_TENANTS:
         try:
